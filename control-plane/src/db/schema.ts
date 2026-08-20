@@ -30,6 +30,10 @@ export const deploymentStatus = pgEnum('deployment_status', [
   'deploying',
   'running',
   'failed',
+  // PRD 6.4: a pinned service on a downed node. Deliberately not 'failed' —
+  // it did not crash, it is being held on purpose, and the dashboard has to
+  // be able to say which.
+  'pinned_unavailable',
   'rolled_back',
   'superseded',
 ])

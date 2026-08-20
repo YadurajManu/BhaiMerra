@@ -192,7 +192,10 @@ describe('failover rescheduling (FR-6, FR-7)', () => {
 
     assert.equal(rows.length, 1, 'no new deployment should have been created for a pinned service')
     assert.equal(rows[0]!.nodeId, nodeIds['thinkpad'], 'it must stay with its volume')
-    assert.equal(rows[0]!.status, 'failed')
+    // Not 'failed': it did not crash, it is being held. The dashboard has to
+    // be able to tell those apart, and the service must stay visible on its
+    // node rather than vanishing from the placement map.
+    assert.equal(rows[0]!.status, 'pinned_unavailable')
 
     const moved = await ctx.db
       .select()

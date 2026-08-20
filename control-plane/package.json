@@ -10,7 +10,8 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --test-concurrency=1 --import tsx tests/*.test.ts"
+    "test": "node --test --test-concurrency=1 --import tsx tests/*.test.ts",
+    "smoke": "tsx scripts/smoke.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.3.0",

@@ -51,7 +51,7 @@ export async function rescheduleFromNode(
       await ctx.db.transaction(async (tx) => {
         await tx
           .update(deployments)
-          .set({ status: 'failed', failureReason: 'node_down_pinned' })
+          .set({ status: 'pinned_unavailable', failureReason: 'node_down_pinned' })
           .where(eq(deployments.id, deployment.id))
         await recordAudit(tx, {
           orgId: fleet.orgId,

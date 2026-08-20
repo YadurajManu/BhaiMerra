@@ -35,10 +35,14 @@ fleet-os/
 | Agent: heartbeat loop with backoff | ✅ survives control-plane outages (§9) |
 | Cross-compiled binaries | ✅ 5 targets, ~6 MB each |
 | Install script | ✅ POSIX sh, checksum verified, systemd unit |
+| fleet.yaml parsing and validation (FR-4) | ✅ every error at once, each naming the fix |
+| Apply manifest → services | ✅ orphans reported, never deleted |
 | Scheduler placement (§8) | ✅ filter + weighted rank, explains every rejection |
+| Deploy, reschedule, placement map, event timeline | ✅ |
 | Automatic rescheduling (FR-6) | ✅ flexible services move on node loss |
 | Pinned services held with a distinct alert (FR-7) | ✅ |
-| git-push deploy + multi-arch build | ⬜ Phase 2 — needs the Docker daemon |
+| Multi-arch build runner (FR-3) | ⬜ interface only — needs the Docker daemon |
+| git webhook → deploy | ⬜ Phase 2 |
 | Mesh / ingress | ⬜ Phase 4 |
 | Dashboard, CLI | ⬜ Phase 5 |
 
@@ -74,9 +78,15 @@ curl -sX POST localhost:8080/fleets/$FLEET/nodes/pair-token -H "authorization: B
 ## Tests
 
 ```bash
-cd control-plane && npm test    # 23 tests, needs Postgres + Redis
+cd control-plane && npm test     # 83 tests, needs Postgres + Redis
+cd control-plane && npm run smoke # end-to-end against a running control plane
 cd agent && go test ./...
 ```
+
+`npm run smoke` walks the whole path against a live server: sign up, pair three
+nodes, heartbeat, reject a bad manifest, apply a good one, preview placement,
+deploy everything, then stop heartbeating for one node and assert that its
+flexible services move and its pinned one does not.
 
 The control-plane suite (57 tests) includes the two integration tests
 `context.txt` §12 asks for:
