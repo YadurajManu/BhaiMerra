@@ -44,6 +44,8 @@ fleet-os/
 | Multi-arch build runner (FR-3) | ✅ buildx → registry, arm64 + armv7 + amd64 |
 | Agent container lifecycle | ✅ pull, run, replace, stop; reconciles to desired state |
 | Deploy → build → pull → running | ✅ verified end to end |
+| Alerting (FR-12) | ✅ webhook (signed), Discord, Slack; email is an interface |
+| Reclaim policies (FR-9) | ✅ eager / idle / manual, applied when a node returns |
 | git webhook → deploy | ⬜ Phase 2 — the trigger, not the pipeline |
 | Mesh / ingress | ⬜ Phase 4 |
 | Dashboard, CLI | ⬜ Phase 5 |
@@ -151,6 +153,30 @@ opportunistic, pi-5 is the wrong architecture" is actionable. Ranking weights
 headroom at 0.5 because a homelab node driven into swap takes its neighbours
 with it. Ties break on node id so repeated runs cannot flap.
 
+## Alerting
+
+Severity is assigned per event type rather than inferred, because the whole
+point is that a routine reschedule and a pinned service being down are not the
+same news:
+
+```
+[warning ] node.down                   Node homeserver stopped responding after 3 missed heartbeats.
+[info    ] service.rescheduled         web moved to pi5 automatically.
+[info    ] service.rescheduled         img-proxy moved to vpsfra automatically.
+[critical] service.pinned_unavailable  postgres is DOWN and was not moved — it is pinned to a node that went offline.
+```
+
+Webhook payloads are HMAC-signed (`x-fleet-signature`) so a receiver can verify
+the alert came from your control plane. An unauthenticated webhook saying "your
+database is down" is a way to make someone panic on demand.
+
+Delivery never throws: an unreachable Discord webhook must not stop the sweeper
+finding the next dead node, nor the other channels for the same event. 5xx and
+429 are retried with backoff; other 4xx are not, because a bad URL stays bad.
+
+`POST /fleets/:id/alert-rules/test` fires a sample event so a rule can be
+verified before an incident rather than during one.
+
 ## Known gaps
 
 - The Docker module is stubbed. `sampler.New(version, nil)` reports no
@@ -162,8 +188,8 @@ with it. Ties break on node id so repeated runs cannot flap.
   the remaining piece of "git push, get a URL".
 - Ingress does not exist. A deployed container is reachable on the node, not
   at a public URL — that is Phase 4 (mesh, tunnels, TLS).
-- Reclaim policies are stored per fleet and service but not yet applied when a
-  node returns (PRD 7.5).
+- Email alerts are an interface with no provider wired in; webhook, Discord
+  and Slack deliver for real.
 - Concurrent control planes (PRD 7.5 HA) are safe for *detection* — marking a
   node down is a single conditional UPDATE ... RETURNING, so only one instance
   gets the row — but two instances rescheduling different downed nodes at the

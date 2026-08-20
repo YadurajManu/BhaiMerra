@@ -8,7 +8,7 @@
  * a fleet.yaml, preview placement, deploy, inspect the placement map, then
  * kill a node and watch failover happen.
  */
-import { readFileSync } from 'node:fs'
+import { createServer, type Server } from 'node:http'
 
 const API = process.env.API ?? 'http://localhost:8080'
 const TIMEOUT_MS = 8000
@@ -165,19 +165,50 @@ async function main() {
     )
   }
 
-  section('a service that builds from source is honest about the missing runner')
+  section('a build context that does not exist fails clearly')
   const noImage = await call('POST', `/fleets/${fleetId}/services`, {
     token,
-    body: { manifest: 'fleet: homelab\nservices:\n  api: { build: ./apps/api }\n' },
+    body: { manifest: 'fleet: homelab\nservices:\n  api: { build: ./apps/does-not-exist }\n' },
   })
   if (noImage.status === 200) {
     const again = await call('GET', `/fleets/${fleetId}/services`, { token })
     const api = again.body.services.find((s: any) => s.name === 'api')
     const res = await call('POST', `/services/${api.id}/deploy`, { token })
-    res.status === 501 && res.body.error.code === 'build_runner_unavailable'
-      ? ok('returns 501 naming the gap, rather than pretending to deploy')
-      : bad('expected 501 build_runner_unavailable', JSON.stringify(res.body).slice(0, 120))
+    // The build is where most deploys fail, so the message is the product.
+    res.status === 422 && /does not exist in the checkout/.test(res.body.error?.message ?? '')
+      ? ok('names the missing context instead of a generic build failure')
+      : bad('expected a 422 naming the missing build context', JSON.stringify(res.body).slice(0, 160))
   }
+
+  section('register a webhook so failover actually tells someone')
+  const alerts: Array<{ type: string; severity: string; message: string }> = []
+  const listener: Server = createServer((req, res) => {
+    let body = ''
+    req.on('data', (c) => (body += c))
+    req.on('end', () => {
+      try { alerts.push(JSON.parse(body)) } catch { /* ignore */ }
+      res.writeHead(200).end()
+    })
+  })
+  await new Promise<void>((r) => listener.listen(0, '127.0.0.1', r))
+  const hookPort = (listener.address() as { port: number }).port
+
+  const rule = await call('POST', `/fleets/${fleetId}/alert-rules`, {
+    token,
+    body: {
+      channelType: 'webhook',
+      url: `http://127.0.0.1:${hookPort}/hook`,
+      secret: 'smoke-test-shared-secret',
+      eventTypes: [],
+    },
+  })
+  rule.status === 201 ? ok('webhook rule registered') : bad('alert rule', JSON.stringify(rule.body))
+
+  const testFire = await call('POST', `/fleets/${fleetId}/alert-rules/test`, { token })
+  testFire.body.delivered === 1
+    ? ok('test alert delivered, so the rule is verifiable before an incident')
+    : bad('test alert not delivered', JSON.stringify(testFire.body))
+  alerts.length = 0
 
   section('failover: homeserver goes dark')
   const before = await call('GET', `/fleets/${fleetId}/placement-map`, { token })
@@ -213,6 +244,22 @@ async function main() {
     }
   }
   if (!moved) bad('failover did not complete within 45s')
+
+  section('the alerts that were actually sent')
+  await wait(1500)
+  for (const a of alerts) {
+    console.log(`      [${a.severity.padEnd(8)}] ${a.type.padEnd(28)} ${a.message}`)
+  }
+  alerts.some((a) => a.type === 'node.down')
+    ? ok('node.down alert sent')
+    : bad('no node.down alert reached the webhook')
+  alerts.some((a) => a.type === 'service.rescheduled' && /moved to/.test(a.message))
+    ? ok('the reschedule was reported, naming where it went')
+    : bad('no reschedule alert')
+  alerts.some((a) => a.type === 'service.pinned_unavailable' && a.severity === 'critical')
+    ? ok('the pinned service raised a CRITICAL alert, distinct from the routine move')
+    : bad('the pinned service did not raise its own critical alert')
+  await new Promise<void>((r) => listener.close(() => r()))
 
   section('event timeline')
   const events = await call('GET', `/fleets/${fleetId}/events`, { token })

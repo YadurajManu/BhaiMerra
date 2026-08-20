@@ -6,6 +6,8 @@ import { hashToken, newAgentToken, isPairingToken } from '../lib/tokens.js'
 import { recordAudit } from '../lib/audit.js'
 import { ApiError } from './errors.js'
 import { requireAgent } from './guards.js'
+import { reclaimToNode } from '../scheduler/reclaim.js'
+import { dispatchEvent } from '../alerting/dispatch.js'
 
 /** The capability report an agent sends at registration (tech doc §7). */
 const capability = z.object({
@@ -208,6 +210,17 @@ export async function agentRoutes(app: FastifyInstance) {
         .set({ status: 'online', lastHeartbeatAt: new Date() })
         .where(and(eq(nodes.id, nodeId), eq(nodes.status, 'offline')))
       req.log.info({ nodeId }, 'node recovered')
+
+      // FR-9: apply the reclaim policy now that it is back. Failures here
+      // must not fail the heartbeat — the node is alive either way.
+      try {
+        const outcomes = await reclaimToNode(app.ctx, fleetId, nodeId, {
+          onEvent: async (e) => { await dispatchEvent(app.ctx, e, { log: req.log }) },
+        })
+        if (outcomes.length) req.log.info({ nodeId, outcomes }, 'reclaim policy applied')
+      } catch (err) {
+        req.log.error({ err, nodeId }, 'reclaim failed after node returned')
+      }
     }
 
     return { ok: true, interval_sec: app.ctx.config.HEARTBEAT_INTERVAL_SEC }

@@ -3,6 +3,7 @@ import { loadConfig } from './config.js'
 import { createContext, closeContext } from './api/context.js'
 import { buildServer } from './server.js'
 import { startSweeper } from './heartbeat/sweeper.js'
+import { dispatchEvent } from './alerting/dispatch.js'
 
 const config = loadConfig()
 const ctx = createContext(config)
@@ -10,10 +11,12 @@ const app = await buildServer(ctx)
 
 const sweeper = startSweeper(ctx, {
   log: app.log,
-  onEvent: (event) => {
-    // Phase 3 routes this to the alerting engine. Until then it is at least
-    // on the record rather than silently dropped.
-    app.log.warn({ event }, 'fleet event')
+  onEvent: async (event) => {
+    app.log.info({ event }, 'fleet event')
+    // Delivery failures are logged inside dispatchEvent and never rethrown:
+    // an unreachable Discord webhook must not stop the sweeper from finding
+    // the next dead node.
+    await dispatchEvent(ctx, event, { log: app.log })
   },
 })
 
