@@ -1,0 +1,42 @@
+# ── secrets ────────────────────────────────────────────────────────
+# .env holds a real SECRETS_MASTER_KEY; losing it means every stored
+# secret is unrecoverable, and publishing it is worse.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!**/testdata/**/*.key
+
+# agent state — contains the node's long-lived credential
+agent.json
+*.agent.json
+
+# ── dependencies ───────────────────────────────────────────────────
+node_modules/
+.pnpm-store/
+
+# ── build output ───────────────────────────────────────────────────
+dist/
+build/
+.vite/
+*.tsbuildinfo
+
+# compiled agent binaries
+agent/dist/
+fleet-agent
+fleet-agent-*
+!scripts/install.sh
+
+# ── test and tooling ───────────────────────────────────────────────
+coverage/
+*.log
+.cache/
+
+# ── editors and OS ─────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+.vscode/*
+!.vscode/extensions.json
