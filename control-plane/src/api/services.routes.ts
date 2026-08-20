@@ -6,7 +6,7 @@ import { parseManifest, ManifestError } from '../manifest/parse.js'
 import { syncManifest } from '../manifest/sync.js'
 import { place } from '../scheduler/placement.js'
 import { fleetSnapshot, toServiceSpec } from '../scheduler/snapshot.js'
-import { platformsFor } from '../build/runner.js'
+import { platformsFor, BuildUnavailableError } from '../build/runner.js'
 import { recordAudit } from '../lib/audit.js'
 import { ApiError } from './errors.js'
 import { requireFleetPermission } from './guards.js'
@@ -140,16 +140,57 @@ export async function serviceRoutes(app: FastifyInstance) {
         })
       }
 
-      const image = body.image ?? service.image
+      let image = body.image ?? service.image
+
+      // Build from source when the service has no prebuilt image (FR-3).
+      // Every architecture present among *eligible* nodes is built, not just
+      // the winner's: a later failover must not be blocked by a missing arch.
       if (!image) {
-        const fleetArches = [...new Set(snapshot.map((n) => n.arch))]
-        throw new ApiError(
-          501,
-          'build_runner_unavailable',
-          `"${service.name}" builds from source, and the build runner is not implemented yet. ` +
-            `Set an "image:" on the service to deploy a prebuilt image.`,
-          { platformsRequired: platformsFor(fleetArches) }
-        )
+        if (!service.buildContext) {
+          throw ApiError.unprocessable(
+            'no_image_or_build',
+            `"${service.name}" has neither an image nor a build context.`
+          )
+        }
+
+        const eligibleArches = [
+          ...new Set(
+            snapshot
+              .filter((n) => n.status === 'online')
+              .map((n) => n.arch)
+              .filter((a) => !service.compatibleArches.length || service.compatibleArches.includes(a))
+          ),
+        ]
+        const platforms = platformsFor(eligibleArches)
+        if (!platforms.length) {
+          throw ApiError.unprocessable(
+            'no_buildable_platform',
+            `No online node in this fleet has an architecture "${service.name}" can be built for.`
+          )
+        }
+
+        const gitSha = body.gitSha ?? 'latest'
+        try {
+          const built = await app.ctx.builds.build({
+            serviceName: service.name,
+            buildContext: service.buildContext,
+            gitSha,
+            platforms,
+            registry: app.ctx.config.REGISTRY_URL ?? '',
+          })
+          image = built.imageTags[0]!
+          req.log.info(
+            { service: service.name, platforms, image, durationMs: built.durationMs },
+            'multi-arch build complete'
+          )
+        } catch (err) {
+          if (err instanceof BuildUnavailableError) {
+            // The build is where most deploys fail, so the message is the
+            // product: it names the platforms and the reason, verbatim.
+            throw new ApiError(422, 'build_failed', err.message, { platforms })
+          }
+          throw err
+        }
       }
 
       const deployment = await app.ctx.db.transaction(async (tx) => {

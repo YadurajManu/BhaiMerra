@@ -1,4 +1,4 @@
-import { and, eq, isNull, gt } from 'drizzle-orm'
+import { and, eq, isNull, gt, inArray } from 'drizzle-orm'
 import { z } from 'zod'
 import type { FastifyInstance } from 'fastify'
 import { nodes, fleets, pairingTokens, deployments, services } from '../db/schema.js'
@@ -176,6 +176,29 @@ export async function agentRoutes(app: FastifyInstance) {
       agentVersion: hb.agent_version,
     })
 
+    // Promote deployments the agent reports as actually running. The control
+    // plane schedules; only the node can say whether the container came up,
+    // so this is the one place 'deploying' becomes 'running'.
+    const up = new Set(
+      hb.containers.filter((c) => c.state === 'running').map((c) => c.name)
+    )
+    if (up.size) {
+      const pending = await db
+        .select({ id: deployments.id, name: services.name })
+        .from(deployments)
+        .innerJoin(services, eq(services.id, deployments.serviceId))
+        .where(and(eq(deployments.nodeId, nodeId), eq(deployments.status, 'deploying')))
+
+      const nowRunning = pending.filter((p) => up.has(p.name))
+      if (nowRunning.length) {
+        await db
+          .update(deployments)
+          .set({ status: 'running', finishedAt: new Date() })
+          .where(inArray(deployments.id, nowRunning.map((p) => p.id)))
+        req.log.info({ nodeId, services: nowRunning.map((p) => p.name) }, 'deployments now running')
+      }
+    }
+
     // A node that was marked down and is beating again comes back here rather
     // than waiting for the sweeper, so recovery is as fast as failure.
     const wasDown = await redis.getdel(`node:${nodeId}:down`)
@@ -209,7 +232,16 @@ export async function agentRoutes(app: FastifyInstance) {
       })
       .from(deployments)
       .innerJoin(services, eq(services.id, deployments.serviceId))
-      .where(and(eq(deployments.nodeId, nodeId), eq(deployments.status, 'running')))
+      // Both states: 'deploying' is what the agent is being asked to converge
+      // *toward*, and 'running' is what it should keep running. Returning only
+      // 'running' meant a fresh deployment was never handed to anyone, and
+      // nothing ever promoted it.
+      .where(
+        and(
+          eq(deployments.nodeId, nodeId),
+          inArray(deployments.status, ['deploying', 'running'])
+        )
+      )
 
     return {
       node_id: nodeId,

@@ -41,8 +41,10 @@ fleet-os/
 | Deploy, reschedule, placement map, event timeline | ✅ |
 | Automatic rescheduling (FR-6) | ✅ flexible services move on node loss |
 | Pinned services held with a distinct alert (FR-7) | ✅ |
-| Multi-arch build runner (FR-3) | ⬜ interface only — needs the Docker daemon |
-| git webhook → deploy | ⬜ Phase 2 |
+| Multi-arch build runner (FR-3) | ✅ buildx → registry, arm64 + armv7 + amd64 |
+| Agent container lifecycle | ✅ pull, run, replace, stop; reconciles to desired state |
+| Deploy → build → pull → running | ✅ verified end to end |
+| git webhook → deploy | ⬜ Phase 2 — the trigger, not the pipeline |
 | Mesh / ingress | ⬜ Phase 4 |
 | Dashboard, CLI | ⬜ Phase 5 |
 
@@ -64,6 +66,16 @@ cd agent
 make                        # vet + test + build
 ./dist/fleet-agent -capabilities
 ```
+
+For builds, bring up a registry and a multi-arch builder:
+
+```bash
+docker compose -f deploy/docker-compose.dev.yml up -d
+./deploy/setup-builder.sh
+```
+
+then set `REGISTRY_URL=localhost:5001` and `BUILDX_BUILDER=fleet-builder` in
+`control-plane/.env`.
 
 Pair a node:
 
@@ -87,6 +99,18 @@ cd agent && go test ./...
 nodes, heartbeat, reject a bad manifest, apply a good one, preview placement,
 deploy everything, then stop heartbeating for one node and assert that its
 flexible services move and its pinned one does not.
+
+`npm run e2e` goes further and uses real infrastructure: it spawns the actual
+agent binary against this machine's Docker, deploys a service that builds from
+source, and asserts the container comes up and serves a response.
+
+```
+✓ agent joined as "sayyestoheaven"
+✓ manifest applied  hello
+✓ built and scheduled onto sayyestoheaven  3.1s
+✓ the agent reported the container running
+✓ served a response  fleet-os says hello from aarch64
+```
 
 The control-plane suite (57 tests) includes the two integration tests
 `context.txt` §12 asks for:
@@ -133,8 +157,11 @@ with it. Ties break on node id so repeated runs cannot flap.
   containers; the interface is in place, the implementation is Phase 2.
 - `connectivity` is reported as `unknown` rather than guessed — a wrong value
   would make the control plane pick the wrong ingress path.
-- Rescheduling writes the new deployment row, but nothing yet **pulls and
-  starts the container** — that needs the Docker module and a registry.
+- No git webhook yet: deploys are triggered through the API, and the build
+  runner reads a checkout that is already on disk. Cloning at deploy time is
+  the remaining piece of "git push, get a URL".
+- Ingress does not exist. A deployed container is reachable on the node, not
+  at a public URL — that is Phase 4 (mesh, tunnels, TLS).
 - Reclaim policies are stored per fleet and service but not yet applied when a
   node returns (PRD 7.5).
 - Concurrent control planes (PRD 7.5 HA) are safe for *detection* — marking a

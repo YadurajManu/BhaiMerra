@@ -1,0 +1,40 @@
+# Local development dependencies for the control plane.
+#
+#   docker compose -f deploy/docker-compose.dev.yml up -d
+#
+# Postgres and Redis are commented out by default because a Homebrew install
+# of either is common and would fight these for the port. Uncomment whichever
+# you are not already running.
+
+services:
+  registry:
+    image: registry:2
+    container_name: fleet-registry
+    restart: unless-stopped
+    ports:
+      - '5001:5000'
+    volumes:
+      - registry-data:/var/lib/registry
+
+  # postgres:
+  #   image: postgres:16
+  #   container_name: fleet-postgres
+  #   restart: unless-stopped
+  #   environment:
+  #     POSTGRES_DB: fleetos_dev
+  #     POSTGRES_HOST_AUTH_METHOD: trust
+  #   ports:
+  #     - '5432:5432'
+  #   volumes:
+  #     - pg-data:/var/lib/postgresql/data
+
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: fleet-redis
+  #   restart: unless-stopped
+  #   ports:
+  #     - '6379:6379'
+
+volumes:
+  registry-data:
+  # pg-data:

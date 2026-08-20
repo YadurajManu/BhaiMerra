@@ -11,7 +11,8 @@
     "db:migrate": "tsx src/db/migrate.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --test --test-concurrency=1 --import tsx tests/*.test.ts",
-    "smoke": "tsx scripts/smoke.ts"
+    "smoke": "tsx scripts/smoke.ts",
+    "e2e": "tsx scripts/e2e-deploy.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.3.0",

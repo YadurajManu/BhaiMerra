@@ -19,7 +19,9 @@ import (
 
 	"github.com/fleet-os/fleet-os/agent/internal/capability"
 	"github.com/fleet-os/fleet-os/agent/internal/client"
+	"github.com/fleet-os/fleet-os/agent/internal/docker"
 	"github.com/fleet-os/fleet-os/agent/internal/heartbeat"
+	"github.com/fleet-os/fleet-os/agent/internal/reconcile"
 	"github.com/fleet-os/fleet-os/agent/internal/sampler"
 	"github.com/fleet-os/fleet-os/agent/internal/state"
 )
@@ -90,14 +92,33 @@ func run() error {
 		interval = 5 * time.Second
 	}
 
-	// Phase 1 ships without the Docker module wired in; the sampler treats a
-	// nil lister as "no containers to report" rather than failing the beat.
+	dockerClient := docker.New()
+	engine := &reconcile.Engine{
+		Docker: dockerClient,
+		Client: api,
+		NodeID: saved.NodeID,
+		Log:    log,
+	}
+
+	// A node whose Docker is down is still a live node: it reports health and
+	// stays in the fleet, it just cannot run workloads. Say so once at startup
+	// rather than failing every reconcile in silence.
+	if err := dockerClient.Ping(ctx); err != nil {
+		log.Warn("container runtime unavailable — this node will report health but cannot run services", "err", err)
+	} else {
+		log.Info("container runtime ready")
+	}
+
 	loop := &heartbeat.Loop{
 		Client:   api,
-		Sampler:  sampler.New(Version, nil),
+		Sampler:  sampler.New(Version, engine),
 		Interval: interval,
 		Log:      log,
 	}
+
+	// Reconciliation runs alongside the heartbeat rather than inside it, so a
+	// slow image pull never delays liveness and get the node marked down.
+	go runReconciler(ctx, engine, api, interval, log)
 
 	log.Info("agent started",
 		"version", Version,
@@ -149,6 +170,52 @@ func register(ctx context.Context, log *slog.Logger, controlPlane, token, stateP
 
 	log.Info("registered", "node", resp.Name, "node_id", resp.NodeID, "state_file", statePath)
 	return saved, nil
+}
+
+// runReconciler polls desired state and converges the node toward it.
+//
+// Losing the control plane is not fatal (PRD §9): already-running containers
+// keep serving, and the agent simply retries. It never stops workloads because
+// it cannot reach the control plane.
+func runReconciler(ctx context.Context, engine *reconcile.Engine, api *client.Client, interval time.Duration, log *slog.Logger) {
+	period := interval * 2
+	if period < 5*time.Second {
+		period = 5 * time.Second
+	}
+
+	ticker := time.NewTicker(period)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		desired, err := api.DesiredState(ctx)
+		if err != nil {
+			log.Debug("could not fetch desired state, keeping current workloads", "err", err)
+			continue
+		}
+
+		actions, err := engine.Reconcile(ctx, desired)
+		if err != nil {
+			log.Warn("reconcile failed", "err", err)
+			continue
+		}
+
+		for _, a := range actions {
+			if a.Verb == "unchanged" {
+				continue // the steady state is not worth a log line every tick
+			}
+			if a.Verb == "failed" {
+				log.Error("reconcile action failed", "service", a.Service, "detail", a.Detail)
+				continue
+			}
+			log.Info("reconciled", "service", a.Service, "action", a.Verb, "detail", a.Detail)
+		}
+	}
 }
 
 func newLogger(level string) *slog.Logger {
