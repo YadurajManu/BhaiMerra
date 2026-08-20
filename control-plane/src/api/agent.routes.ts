@@ -135,6 +135,10 @@ export async function agentRoutes(app: FastifyInstance) {
       return node!
     })
 
+    // Enter the sweep window now, so an agent that registers and then never
+    // beats is detected as down rather than looking healthy indefinitely.
+    await heartbeats.markRegistered(result.fleetId, result.id)
+
     req.log.info({ nodeId: result.id, name: result.name, arch: result.arch }, 'node registered')
 
     return reply.code(201).send({

@@ -162,3 +162,71 @@ describe('heartbeat failure detection (FR-5)', () => {
     assert.equal(row!.status, 'cordoned')
   })
 })
+
+/**
+ * Regression: found by running the real agent, not by the tests above — every
+ * test here beat each node at least once before going quiet, which hid it.
+ */
+describe('a node that registers but never heartbeats', () => {
+  let ctx: AppContext
+  let orgId: string
+  let fleetId: string
+  let nodeId: string
+
+  before(async () => {
+    ctx = createContext(loadConfig())
+    const [org] = await ctx.db.insert(orgs).values({ name: 'silent-node-test' }).returning()
+    orgId = org!.id
+    const [fleet] = await ctx.db
+      .insert(fleets)
+      .values({
+        orgId,
+        name: `silent-${Date.now()}`,
+        heartbeatIntervalSec: 1,
+        heartbeatMissThreshold: 1,
+      })
+      .returning()
+    fleetId = fleet!.id
+
+    const [node] = await ctx.db
+      .insert(nodes)
+      .values({
+        fleetId,
+        name: 'paired-but-dead',
+        arch: 'amd64',
+        cpuCores: 4,
+        ramMb: 8192,
+        diskMb: 100_000,
+        agentTokenHash: hashToken(newAgentToken()),
+        status: 'online', // exactly what /agent/register writes
+        lastHeartbeatAt: new Date(),
+      })
+      .returning()
+    nodeId = node!.id
+
+    // What the register route now does.
+    await ctx.heartbeats.markRegistered(fleetId, nodeId)
+  })
+
+  after(async () => {
+    await ctx.redis.del(`fleet:${fleetId}:hb`, `node:${nodeId}:hb`, `node:${nodeId}:down`)
+    await ctx.db.delete(orgs).where(eq(orgs.id, orgId))
+    await closeContext(ctx)
+  })
+
+  test('is swept like any other node instead of looking healthy forever', async () => {
+    await wait(1300)
+    const result = await sweepOnce(ctx)
+    const swept = result.markedDown.filter((n) => n.fleetId === fleetId)
+
+    assert.equal(swept.length, 1, 'a registered node that never beat must still go down')
+    assert.equal(swept[0]!.name, 'paired-but-dead')
+
+    const [row] = await ctx.db.select({ status: nodes.status }).from(nodes).where(eq(nodes.id, nodeId))
+    assert.equal(row!.status, 'offline')
+  })
+
+  test('reports no telemetry rather than fabricating a heartbeat', async () => {
+    assert.equal(await ctx.heartbeats.last(nodeId), null)
+  })
+})

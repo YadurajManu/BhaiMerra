@@ -1,5 +1,7 @@
 import { and, eq, inArray, ne } from 'drizzle-orm'
 import { fleets, nodes } from '../db/schema.js'
+import type { RescheduleOutcome } from '../scheduler/reschedule.js'
+import { rescheduleFromNode } from '../scheduler/reschedule.js'
 import type { AppContext } from '../api/context.js'
 import type { FleetEventPayload } from '../lib/events.js'
 
@@ -10,7 +12,11 @@ export type SweepOptions = {
   log?: { info: (o: unknown, m: string) => void; error: (o: unknown, m: string) => void }
 }
 
-export type SweepResult = { markedDown: Array<{ id: string; name: string; fleetId: string }> }
+export type SweepResult = {
+  markedDown: Array<{ id: string; name: string; fleetId: string }>
+  /** What the scheduler did about it, per service (FR-6/FR-7). */
+  rescheduled: Array<{ nodeId: string; outcomes: RescheduleOutcome[] }>
+}
 
 /**
  * Failure detection (FR-5). Runs on a tick and asks Redis which nodes in each
@@ -26,6 +32,7 @@ export type SweepResult = { markedDown: Array<{ id: string; name: string; fleetI
  */
 export async function sweepOnce(ctx: AppContext, opts: SweepOptions = {}): Promise<SweepResult> {
   const markedDown: SweepResult['markedDown'] = []
+  const rescheduled: SweepResult['rescheduled'] = []
   {
     {
       const allFleets = await ctx.db
@@ -74,11 +81,30 @@ export async function sweepOnce(ctx: AppContext, opts: SweepOptions = {}): Promi
               silentForMs: ctx.heartbeats.downAfterMs(fleet.intervalSec, fleet.threshold),
             },
           })
+
+          // Detection is only half of it. Move what can be moved (FR-6) and
+          // raise a distinct alert for what must not be (FR-7).
+          try {
+            const outcomes = await rescheduleFromNode(ctx, fleet.id, node.id, {
+              onEvent: opts.onEvent,
+            })
+            if (outcomes.length) {
+              rescheduled.push({ nodeId: node.id, outcomes })
+              opts.log?.info(
+                { nodeId: node.id, node: node.name, outcomes },
+                'rescheduled workloads from downed node'
+              )
+            }
+          } catch (err) {
+            // A failed reschedule must not abort the sweep: other nodes in
+            // other fleets still need to be detected.
+            opts.log?.error({ err, nodeId: node.id }, 'reschedule failed after node went down')
+          }
         }
       }
     }
   }
-  return { markedDown }
+  return { markedDown, rescheduled }
 }
 
 export function startSweeper(

@@ -35,9 +35,10 @@ fleet-os/
 | Agent: heartbeat loop with backoff | ✅ survives control-plane outages (§9) |
 | Cross-compiled binaries | ✅ 5 targets, ~6 MB each |
 | Install script | ✅ POSIX sh, checksum verified, systemd unit |
-| Scheduler placement (§8) | ⬜ Phase 2 |
-| git-push deploy + multi-arch build | ⬜ Phase 2 |
-| Automatic rescheduling (FR-6) | ⬜ Phase 3 — detection is done, the move is not |
+| Scheduler placement (§8) | ✅ filter + weighted rank, explains every rejection |
+| Automatic rescheduling (FR-6) | ✅ flexible services move on node loss |
+| Pinned services held with a distinct alert (FR-7) | ✅ |
+| git-push deploy + multi-arch build | ⬜ Phase 2 — needs the Docker daemon |
 | Mesh / ingress | ⬜ Phase 4 |
 | Dashboard, CLI | ⬜ Phase 5 |
 
@@ -77,10 +78,20 @@ cd control-plane && npm test    # 23 tests, needs Postgres + Redis
 cd agent && go test ./...
 ```
 
-The control-plane suite includes the multi-node failure-detection test from
-`context.txt` §12: three nodes registered, one stops beating, assert that it
-and only it is marked down, that a `node.down` event fires once, and that a
-cordoned node is never swept.
+The control-plane suite (57 tests) includes the two integration tests
+`context.txt` §12 asks for:
+
+- **Failure detection** — three nodes registered, one stops beating; assert it
+  and only it is marked down, a `node.down` event fires once, and a cordoned
+  node is never swept.
+- **Failover** — a node holding one flexible and one pinned service goes dark;
+  assert the flexible one moves to the best eligible node, the pinned one does
+  not move and raises its own alert, the old deployment is superseded rather
+  than deleted, and a placement event records the winning score.
+
+Test files run serially (`--test-concurrency=1`): they share one Postgres and
+one Redis, and `sweepOnce` covers every fleet by design, so concurrent files
+consume state each other is about to assert on.
 
 ## Decisions taken
 
@@ -95,13 +106,31 @@ reasoning recorded so they can be revisited:
   Phases 1–3 and is deliberately still open.
 - **Open-core boundary: undecided.** Nothing built so far forecloses it.
 
+## The scheduler
+
+`src/scheduler/placement.ts` is a pure function over a fleet snapshot — no I/O —
+so a past decision can be replayed against recorded state to explain itself.
+
+Filtering collects rejections rather than short-circuiting: when a deploy
+fails, "no eligible node" is useless and "home-server was full, thinkpad is
+opportunistic, pi-5 is the wrong architecture" is actionable. Ranking weights
+headroom at 0.5 because a homelab node driven into swap takes its neighbours
+with it. Ties break on node id so repeated runs cannot flap.
+
 ## Known gaps
 
 - The Docker module is stubbed. `sampler.New(version, nil)` reports no
   containers; the interface is in place, the implementation is Phase 2.
 - `connectivity` is reported as `unknown` rather than guessed — a wrong value
   would make the control plane pick the wrong ingress path.
-- Detection is done but **rescheduling is not**: a node going down is recorded
-  and alerted on, and nothing moves yet. That is FR-6, Phase 3.
+- Rescheduling writes the new deployment row, but nothing yet **pulls and
+  starts the container** — that needs the Docker module and a registry.
+- Reclaim policies are stored per fleet and service but not yet applied when a
+  node returns (PRD 7.5).
+- Concurrent control planes (PRD 7.5 HA) are safe for *detection* — marking a
+  node down is a single conditional UPDATE ... RETURNING, so only one instance
+  gets the row — but two instances rescheduling different downed nodes at the
+  same moment could both place onto the same target and overcommit it. Needs a
+  per-fleet scheduling lock before HA is real.
 # BhaiMerra
 # BhaiMerra
