@@ -112,6 +112,36 @@ describe('affinity rules', () => {
     assert.equal(rejected[0]!.code, 'anti_affinity')
   })
 
+  test('anti-affinity is symmetric, whichever service deploys first', () => {
+    // Found by running the CLI: "web" declared anti_affinity with img-proxy,
+    // web deployed first (nothing to conflict with), then img-proxy — which
+    // declares no rule of its own — landed on the same node. The rule only
+    // worked depending on deploy order.
+    const nodes = [node({ id: 'n1', name: 'a' }), node({ id: 'n2', name: 'b' })]
+
+    const { eligible, rejected } = filterNodes(
+      svc({ name: 'img-proxy', antiAffinity: [] }),
+      nodes,
+      { web: 'n1' },
+      { web: ['img-proxy'] } // web is the one that declared it
+    )
+
+    assert.deepEqual(eligible.map((n) => n.id), ['n2'], 'must not land on web\'s node')
+    assert.equal(rejected[0]!.code, 'anti_affinity')
+    assert.match(rejected[0]!.detail, /"web" runs here and declares anti-affinity/)
+  })
+
+  test('an unrelated service declaring anti-affinity with someone else is ignored', () => {
+    const nodes = [node({ id: 'n1', name: 'a' })]
+    const { eligible } = filterNodes(
+      svc({ name: 'cache' }),
+      nodes,
+      { web: 'n1' },
+      { web: ['img-proxy'] } // about img-proxy, not about cache
+    )
+    assert.equal(eligible.length, 1)
+  })
+
   test('affinity pulls a service onto its partner node', () => {
     const nodes = [node({ id: 'n1', name: 'a' }), node({ id: 'n2', name: 'b' })]
     const { eligible } = filterNodes(svc({ affinity: ['cache'] }), nodes, { cache: 'n2' })

@@ -42,6 +42,15 @@ export type ServiceSpec = {
 /** Which services currently sit on which node, by service name. */
 export type Placements = Record<string, string | undefined>
 
+/**
+ * anti_affinity declared by *other* services, by service name.
+ *
+ * Needed because anti-affinity is symmetric in meaning but asymmetric in the
+ * file: if web says "keep away from img-proxy", placing img-proxy has to
+ * honour it too, or the rule works only when web happens to deploy first.
+ */
+export type AntiAffinityIndex = Record<string, string[] | undefined>
+
 export type RejectionCode =
   | 'offline'
   | 'cordoned'

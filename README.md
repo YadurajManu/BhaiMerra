@@ -12,8 +12,8 @@ This README covers what is built and how to run it.
 fleet-os/
   control-plane/   Fastify + TypeScript + Drizzle + Postgres + Redis
   agent/           Go binary, one per node
+  cli/             the fleet command
   dashboard/       React SPA                       (not started)
-  cli/             the fleet command               (not started)
   scripts/         install.sh — one-line agent install
   www/             marketing site (Vite + React)
   docs/
@@ -46,6 +46,8 @@ fleet-os/
 | Deploy → build → pull → running | ✅ verified end to end |
 | Alerting (FR-12) | ✅ webhook (signed), Discord, Slack; email is an interface |
 | Reclaim policies (FR-9) | ✅ eager / idle / manual, applied when a node returns |
+| Drift detection | ✅ reports what the node says is not running |
+| CLI (FR-17) | ✅ auth, init, validate, apply, status, nodes, deploy, where, events, alerts |
 | git webhook → deploy | ⬜ Phase 2 — the trigger, not the pipeline |
 | Mesh / ingress | ⬜ Phase 4 |
 | Dashboard, CLI | ⬜ Phase 5 |
@@ -153,6 +155,30 @@ opportunistic, pi-5 is the wrong architecture" is actionable. Ranking weights
 headroom at 0.5 because a homelab node driven into swap takes its neighbours
 with it. Ties break on node id so repeated runs cannot flap.
 
+## The CLI
+
+```bash
+cd cli && npm install && npm run build
+node dist/src/index.js --help
+```
+
+```
+$ fleet where web
+would place on homeserver
+
+NODE        SCORE   HEADROOM  RELIABILITY  LOAD  FREE
+homeserver  0.7904  0.969     0.50         0.78  16.0GB
+pi5         0.7748  0.938     0.50         0.78  8.0GB
+vpsfra      0.6810  0.750     0.50         0.78  2.0GB
+```
+
+`fleet status` leads with what is wrong rather than burying it: a pinned
+service that is down prints CRITICAL above the table, because that is the one
+case a human has to act on.
+
+Exit codes are a contract — `0` ok, `1` failure, `2` usage, `3` no eligible
+node, `4` health check failed — so a CI step can branch on them.
+
 ## Alerting
 
 Severity is assigned per event type rather than inferred, because the whole
@@ -190,6 +216,8 @@ verified before an incident rather than during one.
   at a public URL — that is Phase 4 (mesh, tunnels, TLS).
 - Email alerts are an interface with no provider wired in; webhook, Discord
   and Slack deliver for real.
+- `fleet logs` is not built yet. The agent can already read container logs;
+  shipping and aggregating them centrally is the remaining half.
 - Concurrent control planes (PRD 7.5 HA) are safe for *detection* — marking a
   node down is a single conditional UPDATE ... RETURNING, so only one instance
   gets the row — but two instances rescheduling different downed nodes at the

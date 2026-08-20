@@ -1,4 +1,5 @@
 import type {
+  AntiAffinityIndex,
   Candidate,
   Decision,
   NodeSnapshot,
@@ -35,7 +36,8 @@ const freeRam = (node: NodeSnapshot) => Math.max(0, node.ramMb - node.committedR
 export function filterNodes(
   service: ServiceSpec,
   nodes: NodeSnapshot[],
-  placements: Placements = {}
+  placements: Placements = {},
+  antiAffinityBy: AntiAffinityIndex = {}
 ): { eligible: NodeSnapshot[]; rejected: Rejection[] } {
   const eligible: NodeSnapshot[] = []
   const rejected: Rejection[] = []
@@ -109,9 +111,21 @@ export function filterNodes(
       continue
     }
 
+    // Forward: this service says keep away from something already here.
     const conflict = service.antiAffinity.find((other) => placements[other] === node.id)
     if (conflict) {
       reject(node, 'anti_affinity', `"${conflict}" already runs here and must be kept apart`)
+      continue
+    }
+
+    // Reverse: something already here said keep away from *this* service.
+    // Without this the rule depends on which service deploys first.
+    const objector = Object.keys(placements).find(
+      (other) =>
+        placements[other] === node.id && (antiAffinityBy[other] ?? []).includes(service.name)
+    )
+    if (objector) {
+      reject(node, 'anti_affinity', `"${objector}" runs here and declares anti-affinity with this service`)
       continue
     }
 
@@ -173,7 +187,8 @@ export function rankNodes(service: ServiceSpec, eligible: NodeSnapshot[]): Candi
 export function place(
   service: ServiceSpec,
   nodes: NodeSnapshot[],
-  placements: Placements = {}
+  placements: Placements = {},
+  antiAffinityBy: AntiAffinityIndex = {}
 ): Decision {
   const warnings: string[] = []
 
@@ -195,7 +210,7 @@ export function place(
     }
   }
 
-  const { eligible, rejected } = filterNodes(service, nodes, placements)
+  const { eligible, rejected } = filterNodes(service, nodes, placements, antiAffinityBy)
 
   if (!eligible.length) {
     return {

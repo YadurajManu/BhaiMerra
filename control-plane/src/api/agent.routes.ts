@@ -7,6 +7,7 @@ import { recordAudit } from '../lib/audit.js'
 import { ApiError } from './errors.js'
 import { requireAgent } from './guards.js'
 import { reclaimToNode } from '../scheduler/reclaim.js'
+import { detectDrift } from '../heartbeat/drift.js'
 import { dispatchEvent } from '../alerting/dispatch.js'
 
 /** The capability report an agent sends at registration (tech doc §7). */
@@ -198,6 +199,27 @@ export async function agentRoutes(app: FastifyInstance) {
           .set({ status: 'running', finishedAt: new Date() })
           .where(inArray(deployments.id, nowRunning.map((p) => p.id)))
         req.log.info({ nodeId, services: nowRunning.map((p) => p.name) }, 'deployments now running')
+      }
+    }
+
+    // Drift: what the node says is not running, that we believe is. Debounced
+    // through Redis so a container restarting between two beats does not fire
+    // an alert on every heartbeat.
+    if (hb.containers.length) {
+      const drifted = await detectDrift(app.ctx, nodeId, fleetId, hb.containers, {
+        onEvent: async (e) => {
+          const key = `drift:${nodeId}:${e.subject}`
+          if (await redis.set(key, '1', 'EX', 300, 'NX')) {
+            await dispatchEvent(app.ctx, e, { log: req.log })
+            req.log.warn({ event: e }, 'drift detected')
+          }
+        },
+      })
+      if (drifted.length) {
+        await db
+          .update(deployments)
+          .set({ failureReason: 'drift' })
+          .where(inArray(deployments.id, drifted.map((d) => d.deploymentId)))
       }
     }
 

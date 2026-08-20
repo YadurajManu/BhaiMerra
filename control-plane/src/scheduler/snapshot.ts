@@ -1,7 +1,7 @@
 import { and, eq, inArray } from 'drizzle-orm'
 import { nodes, services, deployments } from '../db/schema.js'
 import type { AppContext } from '../api/context.js'
-import type { Arch, NodeSnapshot, Placements, ServiceSpec } from './types.js'
+import type { AntiAffinityIndex, Arch, NodeSnapshot, Placements, ServiceSpec } from './types.js'
 
 /** Deployment states that still occupy capacity on a node. */
 const ACTIVE = ['deploying', 'running'] as const
@@ -17,7 +17,7 @@ const ACTIVE = ['deploying', 'running'] as const
 export async function fleetSnapshot(
   ctx: AppContext,
   fleetId: string
-): Promise<{ nodes: NodeSnapshot[]; placements: Placements }> {
+): Promise<{ nodes: NodeSnapshot[]; placements: Placements; antiAffinityBy: AntiAffinityIndex }> {
   const nodeRows = await ctx.db.select().from(nodes).where(eq(nodes.fleetId, fleetId))
 
   const active = await ctx.db
@@ -25,6 +25,7 @@ export async function fleetSnapshot(
       nodeId: deployments.nodeId,
       serviceName: services.name,
       requestRamMb: services.requestRamMb,
+      antiAffinity: services.antiAffinity,
     })
     .from(deployments)
     .innerJoin(services, eq(services.id, deployments.serviceId))
@@ -32,10 +33,12 @@ export async function fleetSnapshot(
 
   const committed = new Map<string, number>()
   const placements: Placements = {}
+  const antiAffinityBy: AntiAffinityIndex = {}
   for (const row of active) {
     if (!row.nodeId) continue
     committed.set(row.nodeId, (committed.get(row.nodeId) ?? 0) + row.requestRamMb)
     placements[row.serviceName] = row.nodeId
+    antiAffinityBy[row.serviceName] = row.antiAffinity
   }
 
   const snapshots = await Promise.all(
@@ -59,7 +62,7 @@ export async function fleetSnapshot(
     })
   )
 
-  return { nodes: snapshots, placements }
+  return { nodes: snapshots, placements, antiAffinityBy }
 }
 
 /** Translate a stored service row into the scheduler's input shape. */

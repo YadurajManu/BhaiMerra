@@ -113,8 +113,8 @@ export async function serviceRoutes(app: FastifyInstance) {
     { preHandler: requireServicePermission('service.read') },
     async (req) => {
       const { service, fleetId } = await loadService(app, req.params as { serviceId: string })
-      const { nodes: snapshot, placements } = await fleetSnapshot(app.ctx, fleetId)
-      const decision = place(toServiceSpec(service), snapshot, placements)
+      const { nodes: snapshot, placements, antiAffinityBy } = await fleetSnapshot(app.ctx, fleetId)
+      const decision = place(toServiceSpec(service), snapshot, placements, antiAffinityBy)
       return { service: service.name, decision }
     }
   )
@@ -129,9 +129,9 @@ export async function serviceRoutes(app: FastifyInstance) {
         .parse(req.body ?? {})
 
       const { service, fleetId, orgId } = await loadService(app, req.params as { serviceId: string })
-      const { nodes: snapshot, placements } = await fleetSnapshot(app.ctx, fleetId)
+      const { nodes: snapshot, placements, antiAffinityBy } = await fleetSnapshot(app.ctx, fleetId)
 
-      const decision = place(toServiceSpec(service), snapshot, placements)
+      const decision = place(toServiceSpec(service), snapshot, placements, antiAffinityBy)
       if (decision.outcome !== 'placed') {
         // Exit code 3 in the CLI. The rejection list is the useful part.
         throw new ApiError(422, 'no_eligible_node', decision.summary, {
@@ -272,10 +272,10 @@ export async function serviceRoutes(app: FastifyInstance) {
         .limit(1)
       if (!current) throw ApiError.unprocessable('not_running', `"${service.name}" is not running`)
 
-      const { nodes: snapshot, placements } = await fleetSnapshot(app.ctx, fleetId)
+      const { nodes: snapshot, placements, antiAffinityBy } = await fleetSnapshot(app.ctx, fleetId)
       // Exclude where it is now, or "reschedule" would be a no-op.
       const elsewhere = snapshot.filter((n) => n.id !== current.nodeId)
-      const decision = place(toServiceSpec(service), elsewhere, placements)
+      const decision = place(toServiceSpec(service), elsewhere, placements, antiAffinityBy)
 
       if (decision.outcome !== 'placed') {
         throw new ApiError(422, 'no_eligible_node', decision.summary, { rejected: decision.rejected })

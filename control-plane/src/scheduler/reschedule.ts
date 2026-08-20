@@ -84,9 +84,9 @@ export async function rescheduleFromNode(
 
     // Recompute the snapshot per service: each successful move consumes
     // capacity, and the next decision has to see that.
-    const { nodes: snapshot, placements } = await fleetSnapshot(ctx, fleetId)
+    const { nodes: snapshot, placements, antiAffinityBy } = await fleetSnapshot(ctx, fleetId)
     const spec = toServiceSpec(service, service.persistentVolume ? downNodeId : null)
-    const decision = place(spec, snapshot, placements)
+    const decision = place(spec, snapshot, placements, antiAffinityBy)
 
     if (decision.outcome !== 'placed') {
       await ctx.db
