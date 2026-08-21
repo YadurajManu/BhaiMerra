@@ -125,6 +125,7 @@ export type Node = {
   lastHeartbeatAt: string | null
   advertiseAddr: string | null
   agentVersion: string | null
+  createdAt: string
   telemetry: {
     cpuPct: number
     ramUsedMb: number

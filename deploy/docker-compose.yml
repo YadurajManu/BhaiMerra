@@ -85,6 +85,9 @@ services:
       BUILD_WORKDIR: /var/lib/fleet-os/builds
       INSTALL_SCRIPT_PATH: /app/install/install.sh
       AGENT_BIN_DIR: /app/install/bin
+      # Agents call the root API, which differs from the dashboard's /api
+      # browser proxy. Set this whenever the dashboard is publicly exposed.
+      PUBLIC_API_URL: ${PUBLIC_API_URL:-https://fleetapi.${INGRESS_ZONE:-fleetos.app}}
       INGRESS_ZONE: ${INGRESS_ZONE:-fleetos.app}
       INGRESS_PORT: '8081'
       HEARTBEAT_INTERVAL_SEC: ${HEARTBEAT_INTERVAL_SEC:-5}

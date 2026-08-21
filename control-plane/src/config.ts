@@ -27,6 +27,11 @@ const schema = z.object({
   MIGRATIONS_DIR: z.string().default('src/db/migrations'),
   /** Served at /install, with this control plane's address substituted in. */
   INSTALL_SCRIPT_PATH: z.string().default('../scripts/install.sh'),
+  /**
+   * The public API origin agents use. Required when /install is also exposed
+   * through a dashboard reverse proxy whose API lives under /api.
+   */
+  PUBLIC_API_URL: z.string().url().optional(),
   /** Cross-compiled agent binaries, served at /install/fleet-agent-<os>-<arch>. */
   AGENT_BIN_DIR: z.string().default('../agent/dist'),
   PORT: z.coerce.number().int().default(8080),

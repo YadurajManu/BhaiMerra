@@ -2,6 +2,7 @@ import { readFile, writeFile, access } from 'node:fs/promises'
 import { join } from 'node:path'
 import { request, requireFleet, CliError, EXIT } from '../api.js'
 import { c, table, statusColour, keyValues, relativeTime, mb } from '../render.js'
+import { task, splash, glyph } from '../ui.js'
 import type { Flags } from '../args.js'
 
 type Service = {
@@ -30,12 +31,16 @@ export const validateCommand = {
     const fleetId = await requireFleet(typeof flags.fleet === 'string' ? flags.fleet : undefined)
     const manifest = await readManifest(manifestPath(args[0]))
 
-    const { body } = await request<{
-      valid: boolean
-      services?: Array<{ name: string; placement: string; ramMb: number }>
-      warnings?: string[]
-      issues?: Array<{ path: string; message: string }>
-    }>('POST', `/fleets/${fleetId}/services/validate`, { body: { manifest } })
+    const body = await task(`checking ${manifestPath(args[0])}`, async () =>
+      (
+        await request<{
+          valid: boolean
+          services?: Array<{ name: string; placement: string; ramMb: number }>
+          warnings?: string[]
+          issues?: Array<{ path: string; message: string }>
+        }>('POST', `/fleets/${fleetId}/services/validate`, { body: { manifest } })
+      ).body
+    )
 
     if (flags.json) return console.log(JSON.stringify(body, null, 2))
 
@@ -61,19 +66,31 @@ export const applyCommand = {
     const fleetId = await requireFleet(typeof flags.fleet === 'string' ? flags.fleet : undefined)
     const manifest = await readManifest(manifestPath(args[0]))
 
-    const { body } = await request<{
-      created: string[]
-      updated: string[]
-      orphaned: string[]
-      warnings: string[]
-    }>('POST', `/fleets/${fleetId}/services`, { body: { manifest } })
+    const body = await task(
+      `applying ${manifestPath(args[0])}`,
+      async () =>
+        (
+          await request<{
+            created: string[]
+            updated: string[]
+            orphaned: string[]
+            warnings: string[]
+          }>('POST', `/fleets/${fleetId}/services`, { body: { manifest } })
+        ).body,
+      {
+        done: (b) =>
+          b.created.length || b.updated.length
+            ? `applied ${b.created.length + b.updated.length} service(s)`
+            : 'no changes',
+      }
+    )
 
     if (flags.json) return console.log(JSON.stringify(body, null, 2))
 
-    if (body.created.length) console.log(`${c.green('created')}  ${body.created.join(', ')}`)
-    if (body.updated.length) console.log(`${c.cyan('updated')}  ${body.updated.join(', ')}`)
-    if (!body.created.length && !body.updated.length) console.log('no changes')
-    for (const w of body.warnings) console.log(`\n${c.yellow('warning')}  ${w}`)
+    if (body.created.length) console.log(`${glyph.ok} ${c.green('created')}  ${body.created.join(', ')}`)
+    if (body.updated.length) console.log(`${glyph.ok} ${c.cyan('updated')}  ${body.updated.join(', ')}`)
+    for (const w of body.warnings) console.log(`${glyph.warn} ${c.yellow('warning')}  ${w}`)
+    if (body.created.length) console.log(c.dim(`\nnext: fleet deploy ${body.created[0]}`))
   },
 }
 
@@ -113,27 +130,86 @@ async function findService(fleetId: string, name: string): Promise<Service> {
   return match
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+/**
+ * The deploy request returns once the image exists and a node has been chosen.
+ * The container starting is the agent's job and happens afterwards, so the CLI
+ * follows it to conclusion rather than reporting "scheduled" and leaving the
+ * operator to guess.
+ */
+async function waitUntilRunning(fleetId: string, name: string, timeoutMs = 180_000) {
+  await task(
+    `waiting for ${c.bold(name)} to come up`,
+    async (s) => {
+      s.hints([
+        'the agent picks up desired state on its next poll',
+        'a cold image pull takes as long as the node\'s uplink does',
+        'this clears once the agent reports the container running',
+      ])
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        const current = await findService(fleetId, name)
+          .then((svc) => svc.current)
+          .catch(() => null)
+
+        if (current?.status === 'running') return
+        if (current?.status === 'failed') {
+          throw new CliError(
+            `"${name}" did not start. \`fleet deployments ${name}\` has the reason.`,
+            EXIT.healthCheckFailed
+          )
+        }
+        await sleep(2000)
+      }
+      throw new CliError(
+        `"${name}" was scheduled but has not reported running. \`fleet deployments ${name}\` has the detail.`,
+        EXIT.healthCheckFailed
+      )
+    },
+    { done: () => `${c.bold(name)} is running` }
+  )
+}
+
 export const deployCommand = {
   async run(args: string[], flags: Flags) {
     const fleetId = await requireFleet(typeof flags.fleet === 'string' ? flags.fleet : undefined)
     const [name] = args
-    if (!name) throw new CliError('usage: fleet deploy <service> [--sha <git-sha>]', EXIT.usage)
+    if (!name) throw new CliError('usage: fleet deploy <service> [--sha <git-sha>] [--no-wait]', EXIT.usage)
 
     const service = await findService(fleetId, name)
     const gitSha = typeof flags.sha === 'string' ? flags.sha : undefined
 
-    console.log(`deploying ${c.bold(service.name)}${gitSha ? ` at ${gitSha.slice(0, 7)}` : ''}…`)
-    const { body } = await request<{
-      placedOn: { name: string }
-      score: number
-      url: string | null
-      warnings: string[]
-    }>('POST', `/services/${service.id}/deploy`, { body: { gitSha } })
+    const body = await splash(
+      `deploying ${c.bold(service.name)}${gitSha ? c.dim(` at ${gitSha.slice(0, 7)}`) : ''}`,
+      async () =>
+        (
+          await request<{
+            placedOn: { name: string }
+            score: number
+            url: string | null
+            warnings: string[]
+          }>('POST', `/services/${service.id}/deploy`, { body: { gitSha } })
+        ).body,
+      {
+        // What the request involves, not a stage it has reached — the call is a
+        // single synchronous POST and the CLI cannot see inside it.
+        hints: [
+          'scoring every online node on headroom, reliability and load',
+          'building for every architecture an eligible node runs',
+          'the first multi-arch build is the slow one; layers cache after it',
+          'pushing the image to the fleet registry',
+        ],
+        done: (b) => `built and scheduled onto ${c.bold(b.placedOn.name)} ${c.dim(`score ${b.score?.toFixed(3)}`)}`,
+      }
+    )
 
     if (flags.json) return console.log(JSON.stringify(body, null, 2))
-    console.log(`${c.green('scheduled')} onto ${c.bold(body.placedOn.name)} ${c.dim(`score ${body.score?.toFixed(3)}`)}`)
-    if (body.url) console.log(`${c.green('live')}      ${c.cyan(body.url)}`)
-    for (const w of body.warnings ?? []) console.log(`${c.yellow('warning')}  ${w}`)
+
+    for (const w of body.warnings ?? []) console.log(`${glyph.warn} ${c.yellow('warning')}  ${w}`)
+    if (body.url) console.log(`${glyph.info} ${c.cyan(body.url)}`)
+
+    if (!flags['no-wait']) await waitUntilRunning(fleetId, service.name)
   },
 }
 

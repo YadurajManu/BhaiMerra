@@ -7,9 +7,9 @@ export const STEPS = [
   {
     n: '01',
     kicker: 'register',
-    title: 'Point the agent at a machine you own',
-    body: 'One install line per device. A Pi, a laptop with the lid closed, a mini PC in a closet, a $5 VPS. The agent detects architecture, cores, RAM, disk and GPU, then reports in.',
-    code: 'curl -fsSL fleet-os.dev/install | sh -s -- --token fl_9c2a…',
+    title: 'Pair a machine you own',
+    body: 'Open the dashboard and create a one-time pairing command for a Pi, laptop, mini PC or VPS. The agent detects architecture, cores, RAM, disk and GPU, then reports in. Re-running the installer on that machine makes no changes.',
+    code: 'dashboard → Nodes → Add a node → copy one-time command',
   },
   {
     n: '02',

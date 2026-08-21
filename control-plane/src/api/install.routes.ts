@@ -2,6 +2,7 @@ import { createReadStream } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { FastifyInstance, FastifyRequest } from 'fastify'
+import type { Config } from '../config.js'
 import { ApiError } from './errors.js'
 
 /**
@@ -19,6 +20,16 @@ export function publicOrigin(req: FastifyRequest): string {
   const proto = (req.headers['x-forwarded-proto'] as string | undefined)?.split(',')[0]?.trim() ?? req.protocol
   const host = (req.headers['x-forwarded-host'] as string | undefined) ?? req.headers.host
   return `${proto}://${host}`
+}
+
+/**
+ * Agents call the API at its root, unlike browsers which may reach it through
+ * the dashboard's /api reverse proxy. Prefer the explicitly configured public
+ * API address so a dashboard-issued installer cannot teach an agent the wrong
+ * origin (and receive nginx's 405 on POST /agent/register).
+ */
+export function publicApiOrigin(req: FastifyRequest, config: Pick<Config, 'PUBLIC_API_URL'>): string {
+  return config.PUBLIC_API_URL?.replace(/\/+$/, '') ?? publicOrigin(req)
 }
 
 export async function installRoutes(app: FastifyInstance) {
@@ -43,7 +54,7 @@ export async function installRoutes(app: FastifyInstance) {
       )
     }
 
-    const origin = publicOrigin(req)
+    const origin = publicApiOrigin(req, app.ctx.config)
 
     // Rewrite the default in each assignment, leaving anything after it (a
     // trailing comment) alone. Anchoring to end-of-line broke the moment a
@@ -123,6 +134,6 @@ export async function installRoutes(app: FastifyInstance) {
         }
       }
     }
-    return { control_plane: publicOrigin(req), agents: available }
+    return { control_plane: publicApiOrigin(req, app.ctx.config), agents: available }
   })
 }

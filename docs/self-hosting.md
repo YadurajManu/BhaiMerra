@@ -55,6 +55,15 @@ LAN that is this machine's IP, never `localhost`:
 REGISTRY_URL=192.168.1.20:5001
 ```
 
+Fleet OS derives the direct agent API hostname as `https://fleetapi.<zone>`.
+Override it with `PUBLIC_API_URL` only if you use a different hostname. Agents
+call routes such as `/agent/register` at the API root; `fleetapp.<zone>` only
+proxies browser calls below `/api`.
+
+```bash
+PUBLIC_API_URL=https://fleetapi.example.com
+```
+
 Getting this wrong is the most common setup failure: the control plane pushes
 an image successfully, and then every agent fails to pull it.
 

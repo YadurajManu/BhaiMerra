@@ -58,6 +58,7 @@ export default function Nodes() {
 
   if (error) return <ErrorNote error={error} />
   const nodes = data?.nodes ?? []
+  const liveNodes = nodes.filter((n) => n.live)
 
   return (
     <div className="space-y-6">
@@ -78,23 +79,54 @@ export default function Nodes() {
       <ErrorNote error={actionError} />
 
       {pairing && (
-        <Panel title="run this on the machine you want to add" className="fade-up">
-          <div className="space-y-3 p-5">
-            <div className="overflow-x-auto rounded-[3px] border border-[var(--color-line)] bg-[var(--color-ink-950)] px-4 py-3">
-              <Copyable text={pairing.install_command} className="text-[var(--color-signal)]" />
+        <Panel title={liveNodes.length ? 'node connected' : 'pair a machine'} className="fade-up">
+          <div className="space-y-5 p-5">
+            <div className="grid gap-px border border-[var(--color-line)] bg-[var(--color-line)] sm:grid-cols-3">
+              {[
+                ['01', 'copy', 'Run this one-time command on the machine you are adding.'],
+                ['02', 'pair', 'Its token is single-use and expires shortly.'],
+                [
+                  '03',
+                  liveNodes.length ? 'connected' : 'waiting',
+                  liveNodes.length
+                    ? `${liveNodes.length} live node${liveNodes.length === 1 ? '' : 's'} reporting to this fleet.`
+                    : 'This page updates automatically when the agent reports in.',
+                ],
+              ].map(([step, title, detail]) => (
+                <div key={step} className="bg-[var(--color-ink-950)] px-4 py-3">
+                  <div className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--color-fg-dim)]">
+                    <span className={title === 'connected' ? 'text-[var(--color-signal)]' : undefined}>{step}</span>
+                    <span className={title === 'connected' ? 'text-[var(--color-signal)]' : undefined}>{title}</span>
+                  </div>
+                  <p className="mt-2 text-[12px] leading-relaxed text-[var(--color-fg-muted)]">{detail}</p>
+                </div>
+              ))}
+            </div>
+
+            <div>
+              <div className="mono-label">run this on the machine you want to add</div>
+              <div className="mt-2 overflow-x-auto rounded-[3px] border border-[var(--color-line)] bg-[var(--color-ink-950)] px-4 py-3">
+                <Copyable text={pairing.install_command} className="text-[var(--color-signal)]" />
+              </div>
             </div>
             <p className="font-mono text-[10.5px] text-[var(--color-fg-dim)]">
-              Single-use, expires {since(pairing.expires_at)}. The node appears here within seconds of the agent starting.
+              Single-use, expires {since(pairing.expires_at)}. Re-running the installer on an already-paired machine makes no changes; use <code>--reset</code> only to deliberately pair it again.
             </p>
-            <Button onClick={() => setPairing(null)}>Done</Button>
+            <div className="flex items-center gap-3">
+              {liveNodes.length > 0 && <span className="font-mono text-[10.5px] text-[var(--color-signal)]">● live telemetry received</span>}
+              <Button className="ml-auto" onClick={() => setPairing(null)}>{liveNodes.length ? 'Continue' : 'Done'}</Button>
+            </div>
           </div>
         </Panel>
       )}
 
       {!loading && !nodes.length ? (
         <Empty
-          title="No nodes yet"
-          hint="Fleet OS deploys to hardware you already own. Pair one machine to begin — the agent is a single static binary with no runtime dependency."
+          title="Pair your first node"
+          hint="Open Add a node, run the generated one-time command on a machine you own, then watch it appear here automatically. The agent is a single static binary with no runtime dependency."
+          action={
+            canManage ? <Button variant="primary" onClick={mintToken}>Add your first node</Button> : undefined
+          }
         />
       ) : (
         <div className="grid gap-px bg-[var(--color-line)] lg:grid-cols-2">

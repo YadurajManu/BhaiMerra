@@ -23,6 +23,12 @@ export async function request<T = any>(
   opts: { body?: unknown; auth?: boolean; profile?: Profile } = {}
 ): Promise<ApiResult<T>> {
   const profile = opts.profile ?? (await loadProfile())
+  if (!profile.api) {
+    throw new CliError(
+      'No control plane URL is configured. Run `fleet auth login --api https://your-api-host` or set FLEET_API.',
+      EXIT.usage
+    )
+  }
   if (opts.auth !== false && !profile.accessToken) {
     throw new CliError('Not signed in. Run `fleet auth login` first.', EXIT.usage)
   }

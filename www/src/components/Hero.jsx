@@ -130,7 +130,7 @@ export default function Hero() {
               className="mt-8 flex flex-wrap items-center gap-3"
             >
               <MagneticButton href={APP_URL} variant="primary">
-                Get started
+                Pair your first node
                 <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                   <path d="M3 8h9m0 0L8.5 4.5M12 8l-3.5 3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
@@ -152,9 +152,9 @@ export default function Hero() {
               transition={{ duration: 0.9, ease: EASE.expo, delay: 0.75 }}
               className="mt-5 max-w-[440px]"
             >
-              <CopyLine command="curl -fsSL fleet-os.dev/install | sh" />
+              <CopyLine command="fleet nodes pair" />
               <p className="mt-2.5 font-mono text-[10px] tracking-[0.06em] text-[var(--color-fg-dim)]">
-                one line per machine · arm64 · armv7 · amd64
+                sign in → add a node → copy its one-time install command
               </p>
             </motion.div>
           </motion.div>

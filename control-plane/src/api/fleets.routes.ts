@@ -7,7 +7,7 @@ import { recordAudit } from '../lib/audit.js'
 import { ApiError } from './errors.js'
 import { requireUser, requireFleetPermission, invalidateAgentAuth } from './guards.js'
 import { dispatchEvent } from '../alerting/dispatch.js'
-import { publicOrigin } from './install.routes.js'
+import { publicApiOrigin } from './install.routes.js'
 import { FLEET_EVENTS } from '../lib/events.js'
 
 const PAIRING_TTL_MIN = 10
@@ -137,7 +137,7 @@ export async function fleetRoutes(app: FastifyInstance) {
         // Built from the address the caller actually reached us on. Hardcoding
         // a domain here handed self-hosters a command pointing at a host that
         // does not resolve for them.
-        install_command: `curl -fsSL ${publicOrigin(req)}/install | sh -s -- --token ${token}`,
+        install_command: `curl -fsSL ${publicApiOrigin(req, config)}/install | sh -s -- --token ${token}`,
       })
     }
   )

@@ -13,14 +13,16 @@ VERSION="${FLEET_VERSION:-latest}"
 TOKEN="${FLEET_PAIRING_TOKEN:-}"
 BIN_DIR="${FLEET_BIN_DIR:-/usr/local/bin}"
 STATE_DIR="${FLEET_STATE_DIR:-/var/lib/fleet-os}"
+RESET=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --token)         TOKEN="$2"; shift 2 ;;
     --control-plane) CONTROL_PLANE="$2"; shift 2 ;;
     --version)       VERSION="$2"; shift 2 ;;
+    --reset)         RESET=1; shift ;;
     --help|-h)
-      echo "usage: install.sh --token <pairing-token> [--control-plane URL] [--version V]"
+      echo "usage: install.sh --token <pairing-token> [--control-plane URL] [--version V] [--reset]"
       exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -28,8 +30,6 @@ done
 
 die() { echo "fleet-os: $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
-
-[ -n "$TOKEN" ] || die "a pairing token is required: generate one in the dashboard, then pass --token"
 
 # ── platform ────────────────────────────────────────────────────────
 os=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -44,6 +44,29 @@ case "$(uname -m)" in
   x86_64|amd64)   arch=amd64 ;;
   *) die "unsupported architecture: $(uname -m) (arm64, armv7 and amd64 are supported)" ;;
 esac
+
+# A Mac agent is deliberately a per-user LaunchAgent, so its state belongs in
+# that user's Library rather than under /var/lib. Resolve this before any work
+# so a repeat of the one-line installer can return cleanly without sudo,
+# downloads, or rewriting the service definition.
+if [ "$os" = darwin ]; then
+  STATE_DIR="${FLEET_STATE_DIR_DARWIN:-${FLEET_STATE_DIR:-$HOME/Library/Application Support/fleet-os}}"
+fi
+
+state_file="$STATE_DIR/agent.json"
+if [ -f "$state_file" ] && [ "$RESET" != 1 ]; then
+  installed_version=""
+  if [ -x "$BIN_DIR/fleet-agent" ]; then
+    installed_version=$("$BIN_DIR/fleet-agent" --version 2>/dev/null || true)
+  fi
+  echo "fleet-os: agent already installed${installed_version:+ ($installed_version)}"
+  echo "          state: $state_file"
+  echo "          no changes made"
+  echo "          to deliberately pair this machine again: add --reset with a fresh token"
+  exit 0
+fi
+
+[ -n "$TOKEN" ] || die "a pairing token is required: generate one in the dashboard, then pass --token"
 
 # ── preflight ───────────────────────────────────────────────────────
 # Check before downloading anything, so a machine that cannot run the agent
@@ -99,19 +122,44 @@ else
 fi
 
 chmod +x "$tmp/fleet-agent"
-$SUDO mkdir -p "$BIN_DIR" "$STATE_DIR"
-$SUDO chmod 700 "$STATE_DIR"
+$SUDO mkdir -p "$BIN_DIR"
+if [ "$os" = darwin ]; then
+  mkdir -p "$STATE_DIR"
+  chmod 700 "$STATE_DIR"
+else
+  $SUDO mkdir -p "$STATE_DIR"
+  $SUDO chmod 700 "$STATE_DIR"
+fi
 $SUDO mv "$tmp/fleet-agent" "$BIN_DIR/fleet-agent"
 
 echo "fleet-os: detected capability:"
 "$BIN_DIR/fleet-agent" -capabilities | sed 's/^/          /'
 
-# ── service ─────────────────────────────────────────────────────────
+# ── service ────────────────────────────────────────────────────────
+register_now() {
+  state_file="$STATE_DIR/agent.json"
+  if [ -f "$state_file" ]; then
+    if [ "$RESET" != 1 ]; then
+      die "this machine is already registered ($state_file); a pairing token would be ignored. If its credential was revoked, rerun with --reset to pair it again"
+    fi
+    backup="$STATE_DIR/agent.revoked-$(date +%Y%m%d-%H%M%S).json"
+    mv "$state_file" "$backup"
+    echo "fleet-os: saved previous agent state to $backup"
+  fi
+
+  # Pair in the foreground so a bad token is an error the user is still
+  # watching, rather than a restart loop found later in a log.
+  echo "fleet-os: pairing with ${CONTROL_PLANE}"
+  $1 env FLEET_STATE_DIR="$STATE_DIR" "$BIN_DIR/fleet-agent" \
+    --control-plane "$CONTROL_PLANE" --token "$TOKEN" --register-only \
+    || die "pairing failed — the token may be expired or already used"
+}
+
 if [ "$os" = linux ] && have systemctl; then
   $SUDO tee /etc/systemd/system/fleet-agent.service >/dev/null <<UNIT
 [Unit]
 Description=Fleet OS agent
-Documentation=https://fleet-os.dev/#/docs
+Documentation=${CONTROL_PLANE}
 After=network-online.target docker.service
 Wants=network-online.target
 
@@ -121,7 +169,6 @@ ExecStart=${BIN_DIR}/fleet-agent --control-plane ${CONTROL_PLANE}
 Environment=FLEET_STATE_DIR=${STATE_DIR}
 Restart=always
 RestartSec=5
-# The agent talks to the Docker socket and writes only its own state dir.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
@@ -132,18 +179,51 @@ ReadWritePaths=${STATE_DIR}
 WantedBy=multi-user.target
 UNIT
 
-  # Register once, in the foreground, so a bad token is an error the user
-  # sees now rather than a restart loop they have to go find in journalctl.
-  echo "fleet-os: pairing with ${CONTROL_PLANE}"
-  $SUDO env FLEET_STATE_DIR="$STATE_DIR" "$BIN_DIR/fleet-agent" \
-    --control-plane "$CONTROL_PLANE" --token "$TOKEN" --register-only \
-    || die "pairing failed — the token may be expired or already used"
-
+  register_now "$SUDO"
   $SUDO systemctl daemon-reload
   $SUDO systemctl enable --now fleet-agent
   echo "fleet-os: agent installed and running (systemctl status fleet-agent)"
+
+elif [ "$os" = darwin ]; then
+  # launchd, as a per-user LaunchAgent. A LaunchDaemon would need root and a
+  # root-owned state directory; the agent only needs the Docker socket, which
+  # Docker Desktop exposes to the logged-in user anyway.
+  register_now ""
+
+  PLIST="$HOME/Library/LaunchAgents/dev.fleet-os.agent.plist"
+  mkdir -p "$(dirname "$PLIST")"
+  cat > "$PLIST" <<PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.fleet-os.agent</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${BIN_DIR}/fleet-agent</string>
+    <string>--control-plane</string>
+    <string>${CONTROL_PLANE}</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>FLEET_STATE_DIR</key><string>${STATE_DIR}</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>${STATE_DIR}/agent.log</string>
+  <key>StandardErrorPath</key><string>${STATE_DIR}/agent.log</string>
+</dict>
+</plist>
+PLISTEOF
+
+  launchctl unload "$PLIST" 2>/dev/null || true
+  launchctl load "$PLIST"
+  echo "fleet-os: agent installed and running"
+  echo "          logs:  tail -f \"$STATE_DIR/agent.log\""
+  echo "          stop:  launchctl unload \"$PLIST\""
+
 else
-  echo "fleet-os: no systemd on this host — start the agent yourself:"
-  echo "          FLEET_STATE_DIR=$STATE_DIR $BIN_DIR/fleet-agent \\"
-  echo "            --control-plane $CONTROL_PLANE --token $TOKEN"
+  register_now "$SUDO"
+  echo "fleet-os: no service manager found — start the agent yourself:"
+  echo "          FLEET_STATE_DIR=$STATE_DIR $BIN_DIR/fleet-agent --control-plane $CONTROL_PLANE"
 fi

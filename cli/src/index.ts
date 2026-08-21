@@ -1,56 +1,106 @@
 #!/usr/bin/env node
 import { pathToFileURL } from 'node:url'
+import { realpathSync } from 'node:fs'
 import { CliError, EXIT } from './api.js'
 import { c } from './render.js'
+import { banner } from './mark.js'
 import { commands, type Command } from './commands/index.js'
 import { parseArgs, type Flags } from './args.js'
 
 export type { Flags }
 export { parseArgs }
 
-const USAGE = `${c.bold('fleet')} — deploy to hardware you own
+/**
+ * Grouped by the order an operator meets them, not alphabetically: the first
+ * group is a first session with the tool, read top to bottom.
+ */
+const GROUPS: Array<[string, Array<[string, string]>]> = [
+  [
+    'getting started',
+    [
+      ['init', 'Scaffold a fleet.yaml from this repository'],
+      ['nodes pair', 'Mint a pairing token for a new machine'],
+      ['apply [file]', 'Apply a fleet.yaml to the fleet'],
+      ['deploy <service>', 'Build, schedule, and roll out'],
+    ],
+  ],
+  [
+    'looking around',
+    [
+      ['status', 'One-screen view of the whole fleet'],
+      ['services', 'List services and where they are running'],
+      ['nodes', 'List nodes'],
+      ['where <service>', 'Explain where a service would be placed, and why'],
+      ['deployments <service>', 'Deployment history'],
+      ['events', 'Unified event timeline'],
+    ],
+  ],
+  [
+    'operating',
+    [
+      ['validate [file]', 'Check a fleet.yaml without applying it'],
+      ['reschedule <service>', 'Force a service to move'],
+      ['nodes cordon <name>', 'Stop scheduling new work onto a node'],
+      ['nodes uncordon <name>', 'Allow scheduling again'],
+      ['nodes rm <name>', 'Revoke and remove a node'],
+      ['alerts', 'List, add, and test alert rules'],
+      ['auth login|logout|whoami', 'Sign in to a control plane'],
+    ],
+  ],
+]
 
-${c.dim('USAGE')}
-  fleet <command> [options]
+const OPTIONS: Array<[string, string]> = [
+  ['--fleet <id>', 'Operate on a specific fleet'],
+  ['--api <url>', 'Control plane URL (default: saved profile)'],
+  ['--json', 'Machine-readable output on stdout'],
+  ['--no-wait', 'Return once scheduled, without following the rollout'],
+  ['-h, --help', 'Show help'],
+]
 
-${c.dim('COMMANDS')}
-  auth login|logout|whoami   Sign in to a control plane
-  init                       Scaffold a fleet.yaml from this repository
-  validate [file]            Check a fleet.yaml without applying it
-  apply [file]               Apply a fleet.yaml to the fleet
-  status                     One-screen view of the whole fleet
-  nodes                      List nodes
-  nodes pair                 Mint a pairing token for a new machine
-  nodes cordon <name>        Stop scheduling new work onto a node
-  nodes uncordon <name>      Allow scheduling again
-  nodes rm <name>            Revoke and remove a node
-  services                   List services and where they are running
-  deploy <service>           Build if needed, schedule, and roll out
-  where <service>            Explain where a service would be placed, and why
-  reschedule <service>       Force a service to move
-  deployments <service>      Deployment history
-  events                     Unified event timeline
-  alerts                     List alert rules
-  alerts add                 Add a webhook/discord/slack/email rule
-  alerts test                Fire a sample alert to verify routing
+// One column width across every group, so the glosses form a single edge down
+// the page rather than stepping in and out per section.
+const TERM_WIDTH = Math.max(
+  ...GROUPS.flatMap(([, rows]) => rows.map(([term]) => term.length)),
+  ...OPTIONS.map(([term]) => term.length)
+)
 
-${c.dim('GLOBAL OPTIONS')}
-  --fleet <id>   Operate on a specific fleet
-  --api <url>    Control plane URL (default: saved profile)
-  --json         Machine-readable output
-  -h, --help     Show help
+const definitions = (rows: Array<[string, string]>): string =>
+  rows.map(([term, gloss]) => `  ${term.padEnd(TERM_WIDTH)}   ${c.dim(gloss)}`).join('\n')
 
-${c.dim('EXIT CODES')}
-  0 ok   1 failure   2 usage   3 no eligible node   4 health check failed
-`
+const usage = (): string =>
+  [
+    banner('deploy to hardware you own'),
+    '',
+    `${c.dim('usage')}  fleet <command> [options]`,
+    ...GROUPS.flatMap(([title, rows]) => ['', c.bold(title), definitions(rows)]),
+    '',
+    c.bold('options'),
+    definitions(OPTIONS),
+    '',
+    c.dim('exit codes  0 ok · 1 failure · 2 usage · 3 no eligible node · 4 health check failed'),
+    '',
+  ].join('\n')
+
+async function version(): Promise<string> {
+  const { readFile } = await import('node:fs/promises')
+  const path = new URL('../package.json', import.meta.url)
+  const pkg = JSON.parse(await readFile(path, 'utf8')) as { version?: string }
+  return pkg.version ?? '0.0.0'
+}
 
 async function main() {
   const { positional, flags } = parseArgs(process.argv.slice(2))
   const [name, ...rest] = positional
 
+  if (flags.version || flags.v) {
+    console.log(await version())
+    process.exit(EXIT.ok)
+  }
+
   if (!name || flags.help || flags.h) {
-    console.log(USAGE)
-    process.exit(name ? EXIT.ok : EXIT.usage)
+    console.log(usage())
+    // A bare `fleet` is someone asking what this is, not a malformed command.
+    process.exit(EXIT.ok)
   }
 
   const command: Command | undefined = commands[name]
@@ -71,7 +121,9 @@ async function main() {
  */
 const invokedDirectly =
   process.argv[1] !== undefined &&
-  import.meta.url === pathToFileURL(process.argv[1]).href
+  // npm link exposes the bin as a symlink. ESM resolves this module to its
+  // real path, whereas argv retains the symlink, so compare canonical paths.
+  import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
 
 if (invokedDirectly) {
   main().catch(onError)
