@@ -99,6 +99,18 @@ services:
       # deploy prebuilt images.
       - /var/run/docker.sock:/var/run/docker.sock
 
+  dashboard:
+    build:
+      context: ../dashboard
+    container_name: fleet-dashboard
+    restart: unless-stopped
+    depends_on:
+      - control-plane
+    ports:
+      - '${DASHBOARD_PORT:-8082}:80'
+    # nginx serves the SPA and proxies /api to the control plane, so the
+    # browser only ever talks to one origin.
+
 volumes:
   pgdata:
   registrydata:

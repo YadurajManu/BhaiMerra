@@ -74,6 +74,38 @@ make                        # vet + test + build
 ./dist/fleet-agent -capabilities
 ```
 
+### Public, from your own machine
+
+Everything runs locally — Postgres, Redis, registry, control plane, dashboard —
+and Cloudflare Tunnel puts it on the internet without forwarding a port.
+
+```bash
+cd deploy
+cp .env.example .env          # fill in the secrets
+docker compose up -d --build
+
+./cloudflare/setup.sh         # creates the tunnel and routes DNS
+cloudflared tunnel --config cloudflare/fleet-os.yml run
+```
+
+Three hostnames, three jobs:
+
+| | |
+| --- | --- |
+| `fleet.<zone>` | the dashboard (nginx, which also proxies `/api`) |
+| `api.fleet.<zone>` | the control-plane API, for the CLI and agents |
+| `*.fleet.<zone>` | every deployed service, via the ingress edge |
+
+The wildcard is what makes a deployed service reachable at the hostname the
+scheduler assigned it — and it means no DNS write per deploy, which would
+otherwise be a rate-limited API call on the hot path. `INGRESS_ZONE` in `.env`
+must match the zone in the tunnel config or the two disagree about hostnames.
+
+Tunnel origins are set to `http2Origin: true`. QUIC is faster where it works
+and unreliable on networks that treat long-lived UDP as suspicious, which
+describes a lot of home ISPs — the lesson `context.txt` §3 records from
+plastikworld.xyz itself.
+
 ### Or: the whole control plane in one command
 
 ```bash
