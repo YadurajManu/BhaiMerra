@@ -1,0 +1,121 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Archivo", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+
+  /* Base — near-black with a cool cast, not #000 */
+  --color-ink-950: #08090b;
+  --color-ink-900: #0a0c0f;
+  --color-ink-850: #0e1116;
+  --color-ink-800: #12161c;
+  --color-ink-700: #1a1f26;
+
+  --color-line: #1b212a;
+  --color-line-2: #272f3a;
+
+  --color-fg: #e8ebef;
+  --color-fg-muted: #939ba7;
+  --color-fg-dim: #5d6672;
+
+  /* Semantic signal colors — used for state, never as decoration */
+  --color-signal: #3fe08b;
+  --color-signal-dim: #1f7a4b;
+  --color-warn: #ffb547;
+  --color-down: #ff5f52;
+
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@layer base {
+  :root { color-scheme: dark; }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    background-color: var(--color-ink-950);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--color-signal) 30%, transparent);
+    color: #fff;
+  }
+
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: var(--color-ink-950); }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-line-2);
+    border: 3px solid var(--color-ink-950);
+    border-radius: 99px;
+  }
+}
+
+@layer utilities {
+  .mono-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--color-fg-dim);
+  }
+  .grid-bg {
+    background-image:
+      linear-gradient(to right, rgba(255, 255, 255, 0.028) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(255, 255, 255, 0.028) 1px, transparent 1px);
+    background-size: 56px 56px;
+  }
+}
+
+@layer utilities {
+  .panel {
+    border: 1px solid var(--color-line);
+    background: var(--color-ink-900);
+  }
+  .panel-head {
+    border-bottom: 1px solid var(--color-line);
+    padding: 10px 16px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--color-fg-dim);
+  }
+  .no-scrollbar { scrollbar-width: none; }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .tabular { font-variant-numeric: tabular-nums; }
+}
+
+@keyframes signal-pulse {
+  0%   { box-shadow: 0 0 0 0 color-mix(in oklab, var(--color-signal) 55%, transparent); }
+  70%  { box-shadow: 0 0 0 7px color-mix(in oklab, var(--color-signal) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--color-signal) 0%, transparent); }
+}
+@keyframes warn-pulse {
+  0%   { box-shadow: 0 0 0 0 color-mix(in oklab, var(--color-warn) 55%, transparent); }
+  70%  { box-shadow: 0 0 0 7px color-mix(in oklab, var(--color-warn) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--color-warn) 0%, transparent); }
+}
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+.fade-up { animation: fade-up 0.45s cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 2px solid var(--color-signal);
+  outline-offset: 3px;
+  border-radius: 2px;
+  transition-property: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}

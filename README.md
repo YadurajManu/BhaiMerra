@@ -13,7 +13,7 @@ fleet-os/
   control-plane/   Fastify + TypeScript + Drizzle + Postgres + Redis
   agent/           Go binary, one per node
   cli/             the fleet command
-  dashboard/       React SPA                       (not started)
+  dashboard/       React SPA — the control-plane UI
   scripts/         install.sh — one-line agent install
   www/             marketing site (Vite + React)
   docs/
@@ -49,6 +49,7 @@ fleet-os/
 | Drift detection | ✅ reports what the node says is not running |
 | CLI (FR-17) | ✅ auth, init, validate, apply, status, nodes, deploy, where, events, alerts |
 | Public ingress (FR-8) | ✅ a URL that follows the service across a failover |
+| Dashboard (FR-10) | ✅ sign in, overview, nodes, services, events, alerts, settings |
 | git webhook → deploy | ✅ signed, fetches the pushed commit, builds and rolls out |
 | Mesh / ingress | ⬜ Phase 4 |
 | Dashboard, CLI | ⬜ Phase 5 |
@@ -161,6 +162,27 @@ fails, "no eligible node" is useless and "home-server was full, thinkpad is
 opportunistic, pi-5 is the wrong architecture" is actionable. Ranking weights
 headroom at 0.5 because a homelab node driven into swap takes its neighbours
 with it. Ties break on node id so repeated runs cannot flap.
+
+## The dashboard
+
+```bash
+cd dashboard && npm install && npm run dev     # :5174, proxies /api to :8080
+```
+
+Same design tokens as the marketing site, imported from `www/src/index.css`
+rather than retyped, so the two cannot drift.
+
+Every page reads the real API and polls, because this is a product about
+liveness. Two screens carry most of the weight:
+
+- **Overview** leads with what needs a human. A pinned service that is down
+  prints above the fold in red; everything else is a table.
+- **Service detail** shows the scheduler's actual reasoning — every candidate
+  node with its score, headroom, tier and load, plus who was rejected and why.
+  That is the thing no competitor surfaces.
+
+Roles change what renders, but the API is what enforces them — hiding a button
+is not access control, and the Settings page says so.
 
 ## The CLI
 
