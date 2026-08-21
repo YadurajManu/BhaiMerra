@@ -14,15 +14,20 @@ TOKEN="${FLEET_PAIRING_TOKEN:-}"
 BIN_DIR="${FLEET_BIN_DIR:-/usr/local/bin}"
 STATE_DIR="${FLEET_STATE_DIR:-/var/lib/fleet-os}"
 RESET=0
+ADVERTISE_ADDR="${FLEET_ADVERTISE_ADDR:-}"
+CONFIGURE=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --token)         TOKEN="$2"; shift 2 ;;
     --control-plane) CONTROL_PLANE="$2"; shift 2 ;;
     --version)       VERSION="$2"; shift 2 ;;
+    --advertise-addr) ADVERTISE_ADDR="$2"; shift 2 ;;
+    --configure)     CONFIGURE=1; shift ;;
     --reset)         RESET=1; shift ;;
     --help|-h)
-      echo "usage: install.sh --token <pairing-token> [--control-plane URL] [--version V] [--reset]"
+      echo "usage: install.sh --token <pairing-token> [--control-plane URL] [--version V] [--advertise-addr HOST] [--reset]"
+      echo "       install.sh --configure --advertise-addr HOST"
       exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -54,7 +59,7 @@ if [ "$os" = darwin ]; then
 fi
 
 state_file="$STATE_DIR/agent.json"
-if [ -f "$state_file" ] && [ "$RESET" != 1 ]; then
+if [ -f "$state_file" ] && [ "$RESET" != 1 ] && [ "$CONFIGURE" != 1 ]; then
   installed_version=""
   if [ -x "$BIN_DIR/fleet-agent" ]; then
     installed_version=$("$BIN_DIR/fleet-agent" --version 2>/dev/null || true)
@@ -66,7 +71,9 @@ if [ -f "$state_file" ] && [ "$RESET" != 1 ]; then
   exit 0
 fi
 
-[ -n "$TOKEN" ] || die "a pairing token is required: generate one in the dashboard, then pass --token"
+if [ "$CONFIGURE" != 1 ]; then
+  [ -n "$TOKEN" ] || die "a pairing token is required: generate one in the dashboard, then pass --token"
+fi
 
 # ── preflight ───────────────────────────────────────────────────────
 # Check before downloading anything, so a machine that cannot run the agent
@@ -138,6 +145,11 @@ echo "fleet-os: detected capability:"
 # ── service ────────────────────────────────────────────────────────
 register_now() {
   state_file="$STATE_DIR/agent.json"
+  if [ "$CONFIGURE" = 1 ]; then
+    [ -f "$state_file" ] || die "--configure needs an existing agent state at $state_file"
+    echo "fleet-os: updating agent configuration; keeping the existing node identity"
+    return
+  fi
   if [ -f "$state_file" ]; then
     if [ "$RESET" != 1 ]; then
       die "this machine is already registered ($state_file); a pairing token would be ignored. If its credential was revoked, rerun with --reset to pair it again"
@@ -150,9 +162,15 @@ register_now() {
   # Pair in the foreground so a bad token is an error the user is still
   # watching, rather than a restart loop found later in a log.
   echo "fleet-os: pairing with ${CONTROL_PLANE}"
-  $1 env FLEET_STATE_DIR="$STATE_DIR" "$BIN_DIR/fleet-agent" \
-    --control-plane "$CONTROL_PLANE" --token "$TOKEN" --register-only \
-    || die "pairing failed — the token may be expired or already used"
+  if [ -n "$ADVERTISE_ADDR" ]; then
+    $1 env FLEET_STATE_DIR="$STATE_DIR" FLEET_ADVERTISE_ADDR="$ADVERTISE_ADDR" "$BIN_DIR/fleet-agent" \
+      --control-plane "$CONTROL_PLANE" --token "$TOKEN" --register-only \
+      || die "pairing failed — the token may be expired or already used"
+  else
+    $1 env FLEET_STATE_DIR="$STATE_DIR" "$BIN_DIR/fleet-agent" \
+      --control-plane "$CONTROL_PLANE" --token "$TOKEN" --register-only \
+      || die "pairing failed — the token may be expired or already used"
+  fi
 }
 
 if [ "$os" = linux ] && have systemctl; then
@@ -167,6 +185,7 @@ Wants=network-online.target
 Type=simple
 ExecStart=${BIN_DIR}/fleet-agent --control-plane ${CONTROL_PLANE}
 Environment=FLEET_STATE_DIR=${STATE_DIR}
+${ADVERTISE_ADDR:+Environment=FLEET_ADVERTISE_ADDR=${ADVERTISE_ADDR}}
 Restart=always
 RestartSec=5
 NoNewPrivileges=true
@@ -207,6 +226,7 @@ elif [ "$os" = darwin ]; then
   <key>EnvironmentVariables</key>
   <dict>
     <key>FLEET_STATE_DIR</key><string>${STATE_DIR}</string>
+$(if [ -n "$ADVERTISE_ADDR" ]; then printf '    <key>FLEET_ADVERTISE_ADDR</key><string>%s</string>\n' "$ADVERTISE_ADDR"; fi)
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -225,5 +245,5 @@ PLISTEOF
 else
   register_now "$SUDO"
   echo "fleet-os: no service manager found — start the agent yourself:"
-  echo "          FLEET_STATE_DIR=$STATE_DIR $BIN_DIR/fleet-agent --control-plane $CONTROL_PLANE"
+  echo "          FLEET_STATE_DIR=$STATE_DIR${ADVERTISE_ADDR:+ FLEET_ADVERTISE_ADDR=$ADVERTISE_ADDR} $BIN_DIR/fleet-agent --control-plane $CONTROL_PLANE"
 fi

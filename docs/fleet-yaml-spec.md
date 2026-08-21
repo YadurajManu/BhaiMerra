@@ -11,6 +11,7 @@ defaults:                     # merged under every service
 
 services:
   web:
+    repo: https://github.com/you/homelab.git
     build: ./apps/web         # or image: — one of the two, never both
     placement: flexible
     resources: { ram: 512Mi, cpu: 0.5 }
@@ -42,6 +43,7 @@ end with a hyphen.
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `build` | path | — | Build context. Mutually exclusive with `image`. |
+| `repo` | repository URL | — | Enables GitHub push deploys for this service. Fleet fetches this commit's `fleet.yaml` before building. |
 | `image` | reference | — | Prebuilt image. Skips the build step. |
 | `placement` | enum | `flexible` | `flexible`, `preferred`, `pinned`. |
 | `node` | node name | — | Required for `pinned`; invalid for `flexible`. |

@@ -1,7 +1,15 @@
 import { api, type AuditEntry } from '../lib/api'
 import { useAuth, usePoll } from '../lib/auth'
 import { since } from '../lib/format'
-import { ErrorNote, Panel } from '../components/ui'
+import { Copyable, ErrorNote, Panel } from '../components/ui'
+
+type GitHubStatus = {
+  configured: boolean
+  webhookBase: string
+  clientId?: string | null
+  error?: string
+  installations?: Array<{ id: number; account: string; type: string }>
+}
 
 const ROLE_CAN: Record<string, string> = {
   viewer: 'read everything: nodes, services, logs, events',
@@ -19,6 +27,12 @@ export default function Settings() {
     [fleet?.id, isAdmin],
     20000
   )
+  const github = usePoll(
+    () => (isAdmin ? api<GitHubStatus>('/github/status') : Promise.resolve(null)),
+    [isAdmin],
+    30_000
+  )
+  const webhookUrl = github.data && fleet ? `${github.data.webhookBase}/webhooks/git/${fleet.id}` : null
 
   return (
     <div className="space-y-6">
@@ -77,6 +91,41 @@ export default function Settings() {
           </div>
         </Panel>
       </div>
+
+      {isAdmin && (
+        <Panel title="GitHub deploys" right={<span className="normal-case">push → fleet.yaml → build → deploy</span>}>
+          <div className="space-y-4 p-5">
+            {github.error ? (
+              <ErrorNote error={github.error} />
+            ) : github.data?.configured ? (
+              <div>
+                <p className="text-[13px] text-[var(--color-signal)]">GitHub App configured</p>
+                <p className="mt-1 text-[12.5px] leading-relaxed text-[var(--color-fg-muted)]">
+                  Installed for {github.data.installations?.length ?? 0} account{github.data.installations?.length === 1 ? '' : 's'}.
+                  Add a repository URL with <code>repo:</code> to each service in <code>fleet.yaml</code>.
+                </p>
+              </div>
+            ) : (
+              <div>
+                <p className="text-[13px] text-[var(--color-warn)]">GitHub App not configured</p>
+                <p className="mt-1 text-[12.5px] leading-relaxed text-[var(--color-fg-muted)]">
+                  Public repositories can still be fetched, but private repositories need a GitHub App with read-only Contents access.
+                </p>
+              </div>
+            )}
+
+            {webhookUrl && (
+              <div className="border-t border-[var(--color-line)] pt-4">
+                <p className="font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--color-fg-dim)]">GitHub webhook URL</p>
+                <div className="mt-2"><Copyable text={webhookUrl} /></div>
+                <p className="mt-2 text-[12px] leading-relaxed text-[var(--color-fg-dim)]">
+                  In GitHub: repository Settings → Webhooks → Add webhook. Choose JSON and “Just the push event”. Set the same secret as <code>WEBHOOK_SECRET</code> on this control plane.
+                </p>
+              </div>
+            )}
+          </div>
+        </Panel>
+      )}
 
       {isAdmin && (
         <Panel title="audit log" right={<span className="normal-case">written with the action, not after it</span>}>

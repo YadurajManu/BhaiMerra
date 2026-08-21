@@ -78,6 +78,10 @@ services:
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
       SECRETS_MASTER_KEY: ${SECRETS_MASTER_KEY:?set SECRETS_MASTER_KEY in .env}
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_CLIENT_ID: ${GITHUB_APP_CLIENT_ID:-}
+      GITHUB_APP_CLIENT_SECRET: ${GITHUB_APP_CLIENT_SECRET:-}
+      GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github-app.pem
       # Agents pull by this address, so it must be what *they* can reach —
       # not "registry", which only resolves inside this compose network.
       REGISTRY_URL: ${REGISTRY_URL:?set REGISTRY_URL to a host:port your agents can reach}
@@ -102,6 +106,9 @@ services:
       # self-hosted control plane needs no CDN behind it.
       - ../scripts/install.sh:/app/install/install.sh:ro
       - ../agent/dist:/app/install/bin:ro
+      # Optional GitHub App key. Only mounted when configured; it is never
+      # exposed to the dashboard or to an agent.
+      - ${GITHUB_APP_PRIVATE_KEY:-/dev/null}:/run/secrets/github-app.pem:ro
       # Multi-arch builds run through the host's Docker rather than a daemon
       # inside this container. This is a privileged mount: anything that can
       # write to it can control the host's Docker. Drop it if you only ever

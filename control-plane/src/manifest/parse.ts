@@ -70,6 +70,8 @@ const healthCheck = z
  */
 const serviceFields = z
   .object({
+    /** Source repository used for push-triggered deploys. */
+    repo: z.string().min(1, 'repo must be a repository URL').optional(),
     build: z.string().optional(),
     image: z.string().optional(),
     placement: z.enum(['pinned', 'preferred', 'flexible']).default('flexible'),

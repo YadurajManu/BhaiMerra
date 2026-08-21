@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify'
 import { listInstallations, listRepos, GitHubError } from '../github/app.js'
 import { ApiError } from './errors.js'
 import { requireUser } from './guards.js'
+import { publicApiOrigin } from './install.routes.js'
 
 /**
  * Read-only GitHub surface for the dashboard: which accounts have installed
@@ -20,12 +21,14 @@ export async function githubRoutes(app: FastifyInstance) {
     return app.ctx.github
   }
 
-  app.get('/github/status', { preHandler: requireUser }, async () => {
-    if (!app.ctx.github) return { configured: false }
+  app.get('/github/status', { preHandler: requireUser }, async (req) => {
+    const webhookBase = publicApiOrigin(req, app.ctx.config)
+    if (!app.ctx.github) return { configured: false, webhookBase }
     try {
       const installations = await listInstallations(app.ctx.github)
       return {
         configured: true,
+        webhookBase,
         clientId: app.ctx.github.clientId ?? null,
         installations: installations.map((i) => ({ id: i.id, account: i.account.login, type: i.account.type })),
       }
@@ -33,7 +36,7 @@ export async function githubRoutes(app: FastifyInstance) {
       // A bad key is a configuration problem the operator needs told about,
       // not a 500 with a stack trace.
       if (err instanceof GitHubError) {
-        return { configured: true, error: err.message, installations: [] }
+        return { configured: true, webhookBase, error: err.message, installations: [] }
       }
       throw err
     }

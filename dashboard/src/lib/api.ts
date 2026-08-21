@@ -139,6 +139,7 @@ export type Node = {
 export type Service = {
   id: string
   name: string
+  repoUrl: string | null
   placementPolicy: 'pinned' | 'preferred' | 'flexible'
   pinnedNodeId: string | null
   requestRamMb: number

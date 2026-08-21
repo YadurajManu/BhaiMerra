@@ -249,7 +249,7 @@ export async function serviceRoutes(app: FastifyInstance) {
         deployment: { id: deployment.id, status: deployment.status },
         placedOn: { id: decision.nodeId, name: decision.nodeName },
         // The point of the whole exercise: a URL, handed back on deploy.
-        url: service.domain ? `http://${service.domain}` : service.hostname ? `http://${service.hostname}` : null,
+        url: service.domain ? `https://${service.domain}` : service.hostname ? `https://${service.hostname}` : null,
         score: decision.candidates[0]?.score,
         warnings: decision.warnings,
         note: 'The agent will converge on its next desired-state poll.',

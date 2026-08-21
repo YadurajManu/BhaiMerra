@@ -9,6 +9,7 @@ const SAMPLE = `fleet: homelab
 
 services:
   web:
+    repo: https://github.com/you/homelab.git
     image: nginx:1.27
     placement: flexible
     port: 80
@@ -85,7 +86,7 @@ export default function Services() {
         <div>
           <h1 className="text-[22px] font-semibold tracking-[-0.03em]">Services</h1>
           <p className="mt-1 text-[13.5px] text-[var(--color-fg-muted)]">
-            Declared in fleet.yaml, placed by the scheduler.
+            Declared in fleet.yaml, placed by the scheduler. Add <code>repo:</code> to deploy the exact YAML and code from a GitHub push.
           </p>
         </div>
         {canEdit && (
@@ -107,6 +108,10 @@ export default function Services() {
               rows={16}
               className="no-scrollbar w-full resize-y rounded-[3px] border border-[var(--color-line)] bg-[#07080a] p-4 font-mono text-[12px] leading-[1.7] text-[var(--color-fg-muted)] outline-none focus:border-[var(--color-line-2)]"
             />
+            <p className="mt-3 text-[12px] leading-relaxed text-[var(--color-fg-dim)]">
+              <code>Apply</code> saves the desired services. It does not deploy them; use <code>Deploy</code> after applying. With a
+              <code>repo</code> field, GitHub pushes fetch that commit, apply its <code>fleet.yaml</code>, then redeploy its services.
+            </p>
 
             {issues && (
               <div className="mt-4 border-l-2 border-[var(--color-down)] bg-[color-mix(in_oklab,var(--color-down)_6%,transparent)] px-4 py-3">
@@ -175,11 +180,36 @@ export default function Services() {
                     {s.placementPolicy} · {mb(s.requestRamMb)}
                     {s.requiresGpu && ' · gpu'}
                   </div>
+                  {s.repoUrl?.startsWith('https://') && (
+                    <a
+                      href={s.repoUrl.replace(/\.git$/, '')}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-1 block truncate font-mono text-[10px] text-[var(--color-fg-dim)] hover:text-[var(--color-signal)]"
+                      title="Open source repository"
+                    >
+                      {s.repoUrl}
+                    </a>
+                  )}
+                  {s.repoUrl && !s.repoUrl.startsWith('https://') && (
+                    <span className="mt-1 block truncate font-mono text-[10px] text-[var(--color-fg-dim)]">{s.repoUrl}</span>
+                  )}
                 </div>
 
                 <div className="min-w-[200px] flex-1">
                   {s.domain || s.hostname ? (
-                    <Copyable text={`http://${s.domain ?? s.hostname}`} />
+                    <div className="flex items-center gap-3">
+                      <a
+                        href={`https://${s.domain ?? s.hostname}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="truncate font-mono text-[11.5px] text-[var(--color-fg-muted)] transition-colors hover:text-[var(--color-signal)]"
+                        title="Open public service"
+                      >
+                        https://{s.domain ?? s.hostname}
+                      </a>
+                      <Copyable text={`https://${s.domain ?? s.hostname}`} className="shrink-0" />
+                    </div>
                   ) : (
                     <span className="font-mono text-[11px] text-[var(--color-fg-dim)]">no hostname</span>
                   )}

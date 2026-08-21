@@ -151,6 +151,54 @@ anywhere. **Ingress reaches agents by their address**, which today means the
 control plane and the nodes need to be on the same network. A node in another
 building needs the reverse tunnel in [ADR 0001](adr/0001-mesh-and-ingress.md).
 
+### macOS + Docker Desktop
+
+When both the control plane and agent run on the same Mac, Docker Desktop
+places the control plane in a VM. The Mac's LAN address is not always
+reachable from that VM, even though the agent and Docker containers are
+healthy. Pair the agent with Docker Desktop's host gateway instead:
+
+```bash
+curl -fsSL https://fleetapi.example.com/install | sh -s -- \
+  --token flp_... --advertise-addr host.docker.internal --reset
+```
+
+If the agent is already paired, preserve that node identity and update only
+the route configuration instead (no new token, no new node):
+
+```bash
+curl -fsSL https://fleetapi.example.com/install | sh -s -- \
+  --configure --advertise-addr host.docker.internal
+```
+
+`--advertise-addr` is only the address Fleet ingress uses to reach the node;
+it does not change how the agent contacts the API. Use it only when the
+automatic LAN address is wrong. The reverse-tunnel ingress work will remove
+this requirement for nodes behind NAT.
+
+## GitHub push deploys
+
+Fleet can deploy a repository at the exact commit GitHub reports. Add a
+`repo:` URL to every service built from that repository, apply the manifest
+once in the dashboard, then add the fleet's webhook URL shown in **Settings →
+GitHub deploys** to that GitHub repository. Select **Just the push event** and
+use JSON payloads.
+
+For private repositories, create a GitHub App with **Contents: Read-only** and
+**Webhooks: Read & write**, install it on the repositories Fleet may read, and
+set these in `deploy/.env` before restarting the control plane:
+
+```dotenv
+WEBHOOK_SECRET=a-long-random-shared-secret
+GITHUB_APP_ID=123456
+GITHUB_APP_PRIVATE_KEY=/absolute/path/to/github-app.pem
+```
+
+The dashboard reports whether Fleet can reach the App and exposes the exact
+webhook endpoint. A push then fetches that commit, applies its root
+`fleet.yaml`, builds the configured services, and deploys them. Never commit
+the private key or webhook secret.
+
 ## Ports
 
 | Port | Service | Exposed |

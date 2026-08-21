@@ -59,7 +59,17 @@ export default function ServiceDetail() {
             <h1 className="font-mono text-[22px] tracking-[-0.02em]">{service.name}</h1>
             <div className="mt-2">
               {service.domain || service.hostname ? (
-                <Copyable text={`http://${service.domain ?? service.hostname}`} />
+                <div className="flex items-center gap-3">
+                  <a
+                    href={`https://${service.domain ?? service.hostname}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="font-mono text-[11.5px] text-[var(--color-fg-muted)] transition-colors hover:text-[var(--color-signal)]"
+                  >
+                    https://{service.domain ?? service.hostname}
+                  </a>
+                  <Copyable text={`https://${service.domain ?? service.hostname}`} />
+                </div>
               ) : (
                 <span className="font-mono text-[11px] text-[var(--color-fg-dim)]">no hostname assigned</span>
               )}
@@ -93,6 +103,7 @@ export default function ServiceDetail() {
           <dl className="divide-y divide-[var(--color-line)]">
             {[
               ['placement', service.placementPolicy],
+              ['repository', service.repoUrl ?? 'manual / image-only'],
               ['ram request', mb(service.requestRamMb)],
               ['architectures', service.compatibleArches.length ? service.compatibleArches.join(', ') : 'any'],
               ['min reliability', service.minReliabilityTier],
