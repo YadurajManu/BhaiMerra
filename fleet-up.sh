@@ -24,6 +24,16 @@ step(){ echo; echo "$(c '1;36' "── $1 ──")"; }
 
 compose() { docker compose --project-directory "$DEPLOY" -f "$DEPLOY/docker-compose.yml" "$@"; }
 
+# Read deploy/.env for our own settings too, not just compose's. Otherwise
+# every invocation needs ORIGINCERT=... typed in front of it, which is the
+# kind of thing that gets forgotten and then looks like a broken tunnel.
+if [ -f "$DEPLOY/.env" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$DEPLOY/.env"
+  set +a
+fi
+
 stop_tunnel() {
   if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
     kill "$(cat "$PIDFILE")" 2>/dev/null || true
