@@ -72,3 +72,19 @@ describe('remote safety', () => {
     assert.throws(() => assertSafeRemote('https://github.com/a`whoami`'), CheckoutError)
   })
 })
+
+describe('credential redaction', () => {
+  test('an installation token never survives into an error or a log', async () => {
+    // git echoes the remote in its own error output, token and all, and an
+    // installation token is a live credential for an hour.
+    const { redactRemote } = await import('../src/git/checkout.js')
+    assert.equal(
+      redactRemote('https://x-access-token:ghs_LIVE_TOKEN_VALUE@github.com/you/private.git'),
+      'https://***@github.com/you/private.git'
+    )
+    assert.equal(
+      redactRemote('https://github.com/you/public.git'),
+      'https://github.com/you/public.git'
+    )
+  })
+})

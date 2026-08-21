@@ -6,6 +6,7 @@ import { authRoutes } from './api/auth.routes.js'
 import { agentRoutes } from './api/agent.routes.js'
 import { fleetRoutes } from './api/fleets.routes.js'
 import { webhookRoutes } from './api/webhooks.routes.js'
+import { githubRoutes } from './api/github.routes.js'
 import { serviceRoutes } from './api/services.routes.js'
 import type { AppContext } from './api/context.js'
 
@@ -55,6 +56,7 @@ export async function buildServer(ctx: AppContext): Promise<FastifyInstance> {
   await app.register(agentRoutes)
   await app.register(fleetRoutes)
   await app.register(webhookRoutes)
+  await app.register(githubRoutes)
   await app.register(serviceRoutes)
 
   return app

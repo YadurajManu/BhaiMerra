@@ -3,6 +3,7 @@ import { createDb, type Db } from '../db/client.js'
 import { HeartbeatTracker } from '../heartbeat/tracker.js'
 import { BuildxRunner } from '../build/buildx.js'
 import type { BuildRunner } from '../build/runner.js'
+import type { GitHubConfig } from '../github/app.js'
 import type { Config } from '../config.js'
 
 export type AppContext = {
@@ -12,6 +13,8 @@ export type AppContext = {
   redis: Redis
   heartbeats: HeartbeatTracker
   builds: BuildRunner
+  /** null when no GitHub App is configured — private repos simply will not work. */
+  github: GitHubConfig | null
 }
 
 export function createContext(config: Config): AppContext {
@@ -30,7 +33,15 @@ export function createContext(config: Config): AppContext {
     timeoutMs: config.BUILD_TIMEOUT_MS,
   })
 
-  return { config, db, sql, redis, heartbeats, builds }
+  const github = config.GITHUB_APP_ID
+    ? {
+        appId: config.GITHUB_APP_ID,
+        privateKeyPath: config.GITHUB_APP_PRIVATE_KEY_PATH,
+        clientId: config.GITHUB_APP_CLIENT_ID,
+      }
+    : null
+
+  return { config, db, sql, redis, heartbeats, builds, github }
 }
 
 export async function closeContext(ctx: AppContext): Promise<void> {

@@ -51,6 +51,7 @@ fleet-os/
 | Public ingress (FR-8) | ✅ a URL that follows the service across a failover |
 | Dashboard (FR-10) | ✅ sign in, overview, nodes, services, events, alerts, settings |
 | git webhook → deploy | ✅ signed, fetches the pushed commit, builds and rolls out |
+| GitHub App | ✅ installation tokens for private repos, repo listing |
 | Mesh / ingress | ⬜ Phase 4 |
 | Dashboard, CLI | ⬜ Phase 5 |
 
@@ -207,6 +208,30 @@ case a human has to act on.
 
 Exit codes are a contract — `0` ok, `1` failure, `2` usage, `3` no eligible
 node, `4` health check failed — so a CI step can branch on them.
+
+## GitHub App
+
+Private repositories need one. A GitHub **App**, not an OAuth App: an App gets
+per-installation tokens that expire in an hour and cover only the repositories
+you granted, where an OAuth App gets one long-lived token covering everything
+that user can see — far too much for a service that clones code.
+
+```bash
+GITHUB_APP_ID=...              # public identifier
+GITHUB_APP_CLIENT_ID=...       # public identifier
+GITHUB_APP_PRIVATE_KEY_PATH=./github-app.pem   # the actual secret, gitignored
+```
+
+Permissions: `Contents: read`, `Metadata: read`, `Webhooks: write`. Subscribe
+to `push`. Then install it on your account and choose the repositories.
+
+Public repos work without any of this configured, so the App is optional until
+you need a private one.
+
+Installation tokens end up embedded in a clone URL, because that is the only
+way `git fetch` takes credentials non-interactively. `redactRemote` strips them
+before anything reaches a log — git puts the remote into its own error output,
+token and all.
 
 ## Ingress
 

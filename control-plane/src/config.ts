@@ -31,6 +31,11 @@ const schema = z.object({
   INGRESS_ZONE: z.string().default('fleetos.app'),
   /** Shared secret for git webhook signatures. Unset disables verification. */
   WEBHOOK_SECRET: z.string().min(16).optional(),
+  /** App ID and Client ID are public identifiers; only the key is secret. */
+  GITHUB_APP_ID: z.string().optional(),
+  GITHUB_APP_CLIENT_ID: z.string().optional(),
+  GITHUB_APP_CLIENT_SECRET: z.string().optional(),
+  GITHUB_APP_PRIVATE_KEY_PATH: z.string().default('./github-app.pem'),
   HOST: z.string().default('0.0.0.0'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),

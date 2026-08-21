@@ -4,6 +4,7 @@ import { z } from 'zod'
 import type { FastifyInstance } from 'fastify'
 import { fleets, services } from '../db/schema.js'
 import { checkoutRepo } from '../git/checkout.js'
+import { authenticatedCloneUrl, installationForRepo } from '../github/app.js'
 import { deployFromPush } from './deploy.js'
 import { dispatchEvent } from '../alerting/dispatch.js'
 import { ApiError } from './errors.js'
@@ -142,8 +143,23 @@ export async function webhookRoutes(app: FastifyInstance) {
         try {
           // Fetch the tree at the pushed commit, then deploy it. Failures are
           // recorded and alerted on rather than thrown into a dead request.
+          // Private repos need an installation token. Public ones work
+          // without the App configured at all, so a missing App is not fatal.
+          let remote = service.repoUrl!
+          if (app.ctx.github) {
+            try {
+              const fullName = normaliseRepo(remote).split('/').slice(-2).join('/')
+              const installation = await installationForRepo(app.ctx.github, fullName)
+              if (installation) {
+                remote = await authenticatedCloneUrl(app.ctx.github, installation, remote)
+              }
+            } catch (err) {
+              req.log.warn({ err, service: service.name }, 'could not obtain a GitHub installation token')
+            }
+          }
+
           const checkout = await checkoutRepo({
-            repoUrl: service.repoUrl!,
+            repoUrl: remote,
             gitSha,
             workdir: app.ctx.config.BUILD_WORKDIR,
           })

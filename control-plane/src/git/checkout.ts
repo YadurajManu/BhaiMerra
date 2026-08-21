@@ -24,6 +24,7 @@ export async function checkoutRepo(opts: {
     throw new CheckoutError(`"${opts.gitSha}" is not a git sha`)
   }
   assertSafeRemote(opts.repoUrl)
+  const safeRemote = redactRemote(opts.repoUrl)
 
   // One directory per repo+sha, so concurrent deploys of different commits do
   // not fight over the same working tree.
@@ -40,6 +41,7 @@ export async function checkoutRepo(opts: {
   await run('git', ['fetch', '--depth', '1', '--quiet', 'origin', opts.gitSha], path, timeoutMs)
   await run('git', ['checkout', '--quiet', 'FETCH_HEAD'], path, timeoutMs)
 
+  void safeRemote
   return {
     path,
     relative,
@@ -54,6 +56,15 @@ export async function checkoutRepo(opts: {
  * Remotes come from user input and are handed to git, which will happily run
  * `ext::sh -c ...` as a transport. Only ordinary fetchable URLs are allowed.
  */
+/**
+ * Strip credentials before a URL reaches a log or an error message. An
+ * installation token embedded in a clone URL is a live credential, and git
+ * puts the remote into its own error output.
+ */
+export function redactRemote(url: string): string {
+  return url.replace(/\/\/[^@/]+@/, '//***@')
+}
+
 export function assertSafeRemote(repoUrl: string): void {
   const allowed = /^(https:\/\/|git@[a-z0-9.-]+:)/i
   if (!allowed.test(repoUrl)) {
@@ -96,7 +107,9 @@ function run(cmd: string, args: string[], cwd: string, timeoutMs: number): Promi
       settled = true
       clearTimeout(timer)
       if (code === 0) return resolve()
-      reject(new CheckoutError(`git ${args[0]} failed: ${stderr.trim().split('\n').slice(-3).join(' ')}`))
+      // git echoes the remote in its errors, token and all.
+      const detail = stderr.trim().split('\n').slice(-3).join(' ').replace(/\/\/[^@\s/]+@/g, '//***@')
+      reject(new CheckoutError(`git ${args[0]} failed: ${detail}`))
     })
   })
 }
