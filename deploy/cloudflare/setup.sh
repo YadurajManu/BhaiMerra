@@ -81,7 +81,10 @@ echo "wrote $CONFIG"
 failed=0
 for host in $HOSTS; do
   printf "  %-34s " "$host"
-  out=$(cf route dns "$NAME" "$host" 2>&1 | grep -vE "outdated|recommend upgrading" || true)
+  # --overwrite-dns repoints an existing record at this tunnel. Without it a
+  # second run fails on every hostname, which is exactly what happens after a
+  # first run pointed them somewhere wrong — the state you most need to fix.
+  out=$(cf route dns --overwrite-dns "$NAME" "$host" 2>&1 | grep -vE "outdated|recommend upgrading" || true)
 
   # The tell-tale of a wrong-zone cert: the name comes back with the cert's
   # zone appended to the one we asked for.

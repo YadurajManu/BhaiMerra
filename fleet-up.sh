@@ -112,13 +112,13 @@ if [ "$WITH_TUNNEL" = 1 ]; then
 
   printf "  connecting"
   for i in $(seq 1 20); do
-    if grep -q "Registered tunnel connection" "$DEPLOY/.tunnel.log" 2>/dev/null; then
-      echo; ok "tunnel connected ($(grep -o 'protocol=[a-z0-9]*' "$DEPLOY/.tunnel.log" | head -1))"
+    if grep -aq "Registered tunnel connection" "$DEPLOY/.tunnel.log" 2>/dev/null; then
+      echo; ok "tunnel connected ($(grep -ao 'protocol=[a-z0-9]*' "$DEPLOY/.tunnel.log" | head -1))"
       break
     fi
     # QUIC is UDP/443 and a lot of home networks drop it silently. Say so
     # rather than let it look like a generic timeout.
-    if grep -q "failed to dial to edge with quic" "$DEPLOY/.tunnel.log" 2>/dev/null; then
+    if grep -aq "failed to dial to edge with quic" "$DEPLOY/.tunnel.log" 2>/dev/null; then
       echo; bad "the network is blocking QUIC (UDP/443) to Cloudflare's edge"
       echo "     add 'protocol: http2' to $CF_CONFIG"
       break
