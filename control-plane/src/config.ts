@@ -17,7 +17,27 @@ const schema = z.object({
     }),
   HEARTBEAT_INTERVAL_SEC: z.coerce.number().int().min(1).max(300).default(5),
   HEARTBEAT_MISS_THRESHOLD: z.coerce.number().int().min(1).max(20).default(3),
+  REGISTRY_URL: z.string().optional(),
+  REGISTRY_CREDENTIALS: z.string().optional(),
+  BUILDX_BUILDER: z.string().optional(),
+  /** Root the build runner checks out repositories into. */
+  BUILD_WORKDIR: z.string().default('/tmp/fleet-os/builds'),
+  BUILD_TIMEOUT_MS: z.coerce.number().int().default(20 * 60_000),
+  /** Differs between source (src/db/migrations) and the built image. */
+  MIGRATIONS_DIR: z.string().default('src/db/migrations'),
   PORT: z.coerce.number().int().default(8080),
+  /** Public edge. Separate listener from the API, which is not internet-facing. */
+  INGRESS_PORT: z.coerce.number().int().default(8081),
+  INGRESS_ENABLED: z.coerce.boolean().default(true),
+  /** Zone for managed hostnames: <service>.<fleet>.<zone> */
+  INGRESS_ZONE: z.string().default('fleetos.app'),
+  /** Shared secret for git webhook signatures. Unset disables verification. */
+  WEBHOOK_SECRET: z.string().min(16).optional(),
+  /** App ID and Client ID are public identifiers; only the key is secret. */
+  GITHUB_APP_ID: z.string().optional(),
+  GITHUB_APP_CLIENT_ID: z.string().optional(),
+  GITHUB_APP_CLIENT_SECRET: z.string().optional(),
+  GITHUB_APP_PRIVATE_KEY_PATH: z.string().default('./github-app.pem'),
   HOST: z.string().default('0.0.0.0'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),

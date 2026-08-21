@@ -1,0 +1,117 @@
+# The whole Fleet OS control plane in one command.
+#
+#   cd deploy
+#   cp .env.example .env      # then fill in the two generated secrets
+#   docker compose up -d
+#
+# What this gives you: Postgres, Redis, a container registry, and the control
+# plane itself, with the API on :8080 and the public ingress edge on :8081.
+#
+# What it does NOT give you: the agent. That runs on the machines you want to
+# deploy to, which is the whole point — install it with scripts/install.sh.
+
+name: fleet-os
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: fleet-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-fleetos}
+      POSTGRES_USER: ${POSTGRES_USER:-fleetos}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Not published by default: nothing outside this network needs it, and an
+    # exposed database is how homelabs end up in a breach report.
+    expose:
+      - '5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-fleetos}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: fleet-redis
+    restart: unless-stopped
+    # Heartbeats are the only thing in here and they are all TTL'd, so losing
+    # Redis on restart costs one detection cycle, not data.
+    command: ['redis-server', '--save', '', '--appendonly', 'no']
+    expose:
+      - '6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  registry:
+    image: registry:2
+    container_name: fleet-registry
+    restart: unless-stopped
+    ports:
+      # Published because the agents on your other machines pull from it.
+      - '${REGISTRY_PORT:-5001}:5000'
+    volumes:
+      - registrydata:/var/lib/registry
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:5000/v2/ >/dev/null || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  control-plane:
+    build:
+      context: ../control-plane
+    container_name: fleet-control-plane
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      registry: { condition: service_started }
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-fleetos}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-fleetos}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      SECRETS_MASTER_KEY: ${SECRETS_MASTER_KEY:?set SECRETS_MASTER_KEY in .env}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
+      # Agents pull by this address, so it must be what *they* can reach —
+      # not "registry", which only resolves inside this compose network.
+      REGISTRY_URL: ${REGISTRY_URL:?set REGISTRY_URL to a host:port your agents can reach}
+      BUILDX_BUILDER: ${BUILDX_BUILDER:-}
+      BUILD_WORKDIR: /var/lib/fleet-os/builds
+      INGRESS_ZONE: ${INGRESS_ZONE:-fleetos.app}
+      INGRESS_PORT: '8081'
+      HEARTBEAT_INTERVAL_SEC: ${HEARTBEAT_INTERVAL_SEC:-5}
+      HEARTBEAT_MISS_THRESHOLD: ${HEARTBEAT_MISS_THRESHOLD:-3}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - '${API_PORT:-8080}:8080'      # control-plane API
+      - '${INGRESS_PORT:-8081}:8081'  # public edge
+    volumes:
+      - builds:/var/lib/fleet-os/builds
+      # Multi-arch builds run through the host's Docker rather than a daemon
+      # inside this container. This is a privileged mount: anything that can
+      # write to it can control the host's Docker. Drop it if you only ever
+      # deploy prebuilt images.
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  dashboard:
+    build:
+      context: ../dashboard
+    container_name: fleet-dashboard
+    restart: unless-stopped
+    depends_on:
+      - control-plane
+    ports:
+      - '${DASHBOARD_PORT:-8082}:80'
+    # nginx serves the SPA and proxies /api to the control plane, so the
+    # browser only ever talks to one origin.
+
+volumes:
+  pgdata:
+  registrydata:
+  builds:

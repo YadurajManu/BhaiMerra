@@ -10,7 +10,10 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --import tsx tests/*.test.ts"
+    "test": "dotenv -e .env.test -- node --test --test-concurrency=1 --import tsx tests/*.test.ts",
+    "smoke": "tsx scripts/smoke.ts",
+    "e2e": "tsx scripts/e2e-deploy.ts",
+    "pretest": "dotenv -e .env.test -- tsx src/db/migrate.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.3.0",
@@ -26,6 +29,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
+    "dotenv-cli": "^11.0.0",
     "drizzle-kit": "^0.31.10",
     "tsx": "^4.23.12",
     "typescript": "^7.0.2"

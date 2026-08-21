@@ -7,6 +7,7 @@
 package capability
 
 import (
+	"net"
 	"os"
 	"runtime"
 	"strings"
@@ -25,6 +26,10 @@ type Report struct {
 	Connectivity string `json:"connectivity"`
 	Hostname     string `json:"hostname,omitempty"`
 	AgentVersion string `json:"agent_version,omitempty"`
+	// AdvertiseAddr is where the control plane's ingress can reach this node.
+	// Until the mesh exists this must be directly routable from the control
+	// plane, which is true on a LAN and not true through NAT.
+	AdvertiseAddr string `json:"advertise_addr,omitempty"`
 }
 
 // NormalizeArch maps Go's GOARCH onto the three architectures the control
@@ -53,16 +58,44 @@ func Detect(version string) Report {
 	host = strings.TrimSuffix(host, ".local")
 
 	return Report{
-		Arch:         NormalizeArch(runtime.GOARCH),
-		OS:           runtime.GOOS,
-		CPUCores:     runtime.NumCPU(),
-		RAMMb:        totalRAMMb(),
-		DiskMb:       freeDiskMb("/"),
-		GPU:          hasGPU(),
-		Connectivity: detectConnectivity(),
-		Hostname:     host,
-		AgentVersion: version,
+		Arch:          NormalizeArch(runtime.GOARCH),
+		OS:            runtime.GOOS,
+		CPUCores:      runtime.NumCPU(),
+		RAMMb:         totalRAMMb(),
+		DiskMb:        freeDiskMb("/"),
+		GPU:           hasGPU(),
+		Connectivity:  detectConnectivity(),
+		Hostname:      host,
+		AgentVersion:  version,
+		AdvertiseAddr: AdvertiseAddr(),
 	}
+}
+
+// AdvertiseAddr picks the address other machines should use to reach this one.
+//
+// FLEET_ADVERTISE_ADDR wins, because only the operator knows about port
+// forwards and split-horizon DNS. Otherwise it is the local address that
+// carries the default route — not a loopback, and not a guess from a list of
+// every interface, which on a laptop includes several bridges that go nowhere.
+func AdvertiseAddr() string {
+	if addr := os.Getenv("FLEET_ADVERTISE_ADDR"); addr != "" {
+		return addr
+	}
+	return outboundIP()
+}
+
+// outboundIP asks the kernel which source address it would use to reach a
+// public address. No packet is sent — a UDP socket has no handshake.
+func outboundIP() string {
+	conn, err := net.Dial("udp", "203.0.113.1:80") // TEST-NET-3, never routed
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	if addr, ok := conn.LocalAddr().(*net.UDPAddr); ok {
+		return addr.IP.String()
+	}
+	return ""
 }
 
 // freeDiskMb reports space available to an unprivileged process, not raw

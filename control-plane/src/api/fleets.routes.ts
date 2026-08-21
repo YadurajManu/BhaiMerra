@@ -1,13 +1,28 @@
 import { and, eq, desc } from 'drizzle-orm'
 import { z } from 'zod'
 import type { FastifyInstance } from 'fastify'
-import { nodes, fleets, pairingTokens, orgMembers, auditLog } from '../db/schema.js'
+import { nodes, fleets, pairingTokens, orgMembers, auditLog, alertRules } from '../db/schema.js'
 import { newPairingToken, hashToken } from '../lib/tokens.js'
 import { recordAudit } from '../lib/audit.js'
 import { ApiError } from './errors.js'
 import { requireUser, requireFleetPermission, invalidateAgentAuth } from './guards.js'
+import { dispatchEvent } from '../alerting/dispatch.js'
+import { FLEET_EVENTS } from '../lib/events.js'
 
 const PAIRING_TTL_MIN = 10
+
+/** Show the destination without handing back a reusable credential. */
+function redactTarget(config: Record<string, unknown>): string {
+  if (typeof config.to === 'string') return config.to
+  const url = typeof config.url === 'string' ? config.url : ''
+  if (!url) return 'unknown'
+  try {
+    const parsed = new URL(url)
+    return `${parsed.protocol}//${parsed.host}/…`
+  } catch {
+    return 'invalid url'
+  }
+}
 
 export async function fleetRoutes(app: FastifyInstance) {
   const { db, redis, heartbeats, config } = app.ctx
@@ -211,6 +226,111 @@ export async function fleetRoutes(app: FastifyInstance) {
         .orderBy(desc(auditLog.createdAt))
         .limit(q.limit)
       return { entries: rows }
+    }
+  )
+
+  /* ── alert rules (FR-12) ─────────────────────────────────────── */
+
+  const alertRuleBody = z.object({
+    channelType: z.enum(['webhook', 'email', 'discord', 'slack', 'push']),
+    // An empty list means every event — the sane default for someone who
+    // just wants to know when something happens.
+    eventTypes: z.array(z.enum(FLEET_EVENTS)).default([]),
+    url: z.string().url().optional(),
+    to: z.string().email().optional(),
+    secret: z.string().min(16).max(256).optional(),
+    enabled: z.boolean().default(true),
+  })
+
+  app.post(
+    '/fleets/:fleetId/alert-rules',
+    { preHandler: requireFleetPermission('alert.write') },
+    async (req, reply) => {
+      const parsed = alertRuleBody.safeParse(req.body)
+      if (!parsed.success) {
+        throw ApiError.unprocessable('invalid_alert_rule', 'Check the submitted fields', parsed.error.issues)
+      }
+      const { fleetId } = req.params as { fleetId: string }
+      const { channelType, eventTypes, enabled, ...channel } = parsed.data
+
+      if (channelType === 'email' && !channel.to) {
+        throw ApiError.unprocessable('missing_recipient', 'An email rule needs "to"')
+      }
+      if (channelType !== 'email' && !channel.url) {
+        throw ApiError.unprocessable('missing_url', `A ${channelType} rule needs "url"`)
+      }
+
+      const created = await db.transaction(async (tx) => {
+        const [row] = await tx
+          .insert(alertRules)
+          .values({ fleetId, channelType, eventTypes, enabled, channelConfig: channel })
+          .returning()
+        await recordAudit(tx, {
+          orgId: req.orgId!,
+          actorUserId: req.userId,
+          action: 'alert.rule_created',
+          targetType: 'fleet',
+          targetId: fleetId,
+          metadata: { channelType, eventTypes },
+        })
+        return row!
+      })
+
+      // The secret and URL are credentials; echoing them back into a log or a
+      // screenshot is how they leak.
+      const { channelConfig: _hidden, ...safe } = created
+      return reply.code(201).send({ rule: { ...safe, configured: Object.keys(channel) } })
+    }
+  )
+
+  app.get(
+    '/fleets/:fleetId/alert-rules',
+    { preHandler: requireFleetPermission('alert.write') },
+    async (req) => {
+      const { fleetId } = req.params as { fleetId: string }
+      const rows = await db.select().from(alertRules).where(eq(alertRules.fleetId, fleetId))
+      return {
+        rules: rows.map(({ channelConfig, ...r }) => ({
+          ...r,
+          // Enough to identify the destination, not enough to reuse it.
+          target: redactTarget(channelConfig),
+        })),
+      }
+    }
+  )
+
+  app.delete(
+    '/fleets/:fleetId/alert-rules/:ruleId',
+    { preHandler: requireFleetPermission('alert.write') },
+    async (req) => {
+      const { fleetId, ruleId } = req.params as { fleetId: string; ruleId: string }
+      const deleted = await db
+        .delete(alertRules)
+        .where(and(eq(alertRules.id, ruleId), eq(alertRules.fleetId, fleetId)))
+        .returning({ id: alertRules.id })
+      if (!deleted.length) throw ApiError.notFound('Alert rule')
+      return { removed: deleted[0]!.id }
+    }
+  )
+
+  /** Send a test event so a rule can be verified before an incident. */
+  app.post(
+    '/fleets/:fleetId/alert-rules/test',
+    { preHandler: requireFleetPermission('alert.write') },
+    async (req) => {
+      const { fleetId } = req.params as { fleetId: string }
+      const results = await dispatchEvent(
+        app.ctx,
+        {
+          type: 'node.down',
+          fleetId,
+          at: new Date().toISOString(),
+          subject: 'test-node',
+          detail: { missedThreshold: 3, intervalSec: 5, silentForMs: 15000, test: true },
+        },
+        { log: app.log }
+      )
+      return { delivered: results.filter((r) => r.ok).length, results }
     }
   )
 

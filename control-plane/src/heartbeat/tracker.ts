@@ -54,6 +54,20 @@ export class HeartbeatTracker {
     await pipe.exec()
   }
 
+  /**
+   * Put a freshly registered node into the sweep window immediately.
+   *
+   * Without this a node that registers and then never heartbeats — an agent
+   * that crashed on startup, a install that paired but never ran — has no
+   * entry in the sorted set, is therefore never returned by staleNodes(), and
+   * stays 'online' in Postgres forever while the scheduler happily places
+   * work on it. Only the score is written: there is no telemetry yet, so
+   * last() must still report null.
+   */
+  async markRegistered(fleetId: string, nodeId: string, at = Date.now()): Promise<void> {
+    await this.redis.zadd(`fleet:${fleetId}:hb`, at, nodeId)
+  }
+
   async last(nodeId: string): Promise<(HeartbeatPayload & { at: number }) | null> {
     const raw = await this.redis.get(`node:${nodeId}:hb`)
     return raw ? JSON.parse(raw) : null

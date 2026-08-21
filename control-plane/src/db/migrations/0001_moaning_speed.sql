@@ -1,0 +1,1 @@
+ALTER TYPE "public"."deployment_status" ADD VALUE 'pinned_unavailable' BEFORE 'rolled_back';
