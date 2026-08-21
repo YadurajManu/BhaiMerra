@@ -72,15 +72,21 @@ make                        # vet + test + build
 ./dist/fleet-agent -capabilities
 ```
 
-For builds, bring up a registry and a multi-arch builder:
+### Or: the whole control plane in one command
 
 ```bash
-docker compose -f deploy/docker-compose.dev.yml up -d
-./deploy/setup-builder.sh
+cd deploy
+cp .env.example .env        # fill in the three secrets it asks for
+./setup-builder.sh          # QEMU emulators + a multi-arch buildx builder
+docker compose up -d
 ```
 
-then set `REGISTRY_URL=localhost:5001` and `BUILDX_BUILDER=fleet-builder` in
-`control-plane/.env`.
+That brings up Postgres, Redis, a registry, and the control plane — API on
+:8080, public ingress on :8081. It deliberately does *not* run an agent: agents
+belong on the machines you are deploying to, which is the entire point.
+
+`REGISTRY_URL` must be reachable **from your agent machines**, so on a LAN that
+is your host's IP, not `localhost`.
 
 Pair a node:
 

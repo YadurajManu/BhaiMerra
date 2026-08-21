@@ -17,7 +17,7 @@ export async function checkoutRepo(opts: {
   gitSha: string
   workdir: string
   timeoutMs?: number
-}): Promise<{ path: string; relative: string }> {
+}): Promise<{ path: string; relative: string; dispose: () => Promise<void> }> {
   if (!/^[0-9a-f]{7,40}$/i.test(opts.gitSha)) {
     // The sha reaches a command line; anything that is not a sha is refused
     // rather than escaped, because there is no legitimate case for it.
@@ -40,7 +40,14 @@ export async function checkoutRepo(opts: {
   await run('git', ['fetch', '--depth', '1', '--quiet', 'origin', opts.gitSha], path, timeoutMs)
   await run('git', ['checkout', '--quiet', 'FETCH_HEAD'], path, timeoutMs)
 
-  return { path, relative }
+  return {
+    path,
+    relative,
+    // The caller deletes the tree once the image is built. We hold customer
+    // source only for as long as it takes to build it, which is what the
+    // privacy notice says, and it keeps the disk from filling with checkouts.
+    dispose: () => rm(path, { recursive: true, force: true }),
+  }
 }
 
 /**

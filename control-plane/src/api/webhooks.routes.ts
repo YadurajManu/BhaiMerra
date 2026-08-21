@@ -147,8 +147,13 @@ export async function webhookRoutes(app: FastifyInstance) {
             gitSha,
             workdir: app.ctx.config.BUILD_WORKDIR,
           })
-          await deployFromPush(app, service, gitSha, checkout.path)
-          req.log.info({ service: service.name, sha: gitSha.slice(0, 12) }, 'push deploy succeeded')
+          try {
+            await deployFromPush(app, service, gitSha, checkout.path)
+            req.log.info({ service: service.name, sha: gitSha.slice(0, 12) }, 'push deploy succeeded')
+          } finally {
+            // Even on failure: a broken build must not leave source on disk.
+            await checkout.dispose().catch(() => {})
+          }
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
           req.log.error({ err, service: service.name }, 'push deploy failed')
