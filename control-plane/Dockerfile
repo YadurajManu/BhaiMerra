@@ -36,6 +36,7 @@ COPY package.json ./
 COPY src/db/migrations ./dist/src/db/migrations
 
 ENV NODE_ENV=production
+ENV MIGRATIONS_DIR=/app/dist/src/db/migrations
 EXPOSE 8080 8081
 
 # Not root: ingress makes this process reachable from the internet.

@@ -128,7 +128,10 @@ everything; apart, neither is enough.
 git pull && ./fleet-up.sh
 ```
 
-Migrations run on boot and are forward-only. Snapshot the database first.
+The control plane migrates on boot and refuses to start if it cannot — a
+container serving against an un-migrated database answers every request with
+an internal error, and the cause is three layers down. Migrations are
+forward-only, so snapshot the database first.
 
 ## When something is wrong
 
@@ -145,6 +148,10 @@ be an address the agent can reach.
 cannot reach the node. Check the node is on the same network as the control
 plane, and that `advertiseAddr` on the node is right — override it with
 `FLEET_ADVERTISE_ADDR` on the agent.
+
+**`/healthz` says `postgres: false`.** The control plane is up but cannot
+reach the database. Check `POSTGRES_PASSWORD` matches between the two, and
+`docker compose logs control-plane` for the migration line.
 
 **The tunnel connects but hostnames 404.** `INGRESS_ZONE` and the tunnel
 config disagree. They must be the same zone.

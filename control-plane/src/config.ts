@@ -23,6 +23,8 @@ const schema = z.object({
   /** Root the build runner checks out repositories into. */
   BUILD_WORKDIR: z.string().default('/tmp/fleet-os/builds'),
   BUILD_TIMEOUT_MS: z.coerce.number().int().default(20 * 60_000),
+  /** Differs between source (src/db/migrations) and the built image. */
+  MIGRATIONS_DIR: z.string().default('src/db/migrations'),
   PORT: z.coerce.number().int().default(8080),
   /** Public edge. Separate listener from the API, which is not internet-facing. */
   INGRESS_PORT: z.coerce.number().int().default(8081),
