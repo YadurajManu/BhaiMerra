@@ -19,7 +19,10 @@ const GROUPS: Array<[string, Array<[string, string]>]> = [
     'getting started',
     [
       ['init', 'Scaffold a fleet.yaml from this repository'],
+      ['config show', 'Show the saved control plane and selected fleet'],
+      ['use <fleet>', 'Select the default fleet for later commands'],
       ['nodes pair', 'Mint a pairing token for a new machine'],
+      ['doctor', 'Check the control plane, nodes, services, ingress, and GitHub'],
       ['apply [file]', 'Apply a fleet.yaml to the fleet'],
       ['deploy <service>', 'Build, schedule, and roll out'],
     ],
@@ -53,6 +56,8 @@ const OPTIONS: Array<[string, string]> = [
   ['--fleet <id>', 'Operate on a specific fleet'],
   ['--api <url>', 'Control plane URL (default: saved profile)'],
   ['--json', 'Machine-readable output on stdout'],
+  ['--plan, --dry-run', 'Show the deploy placement plan without changing anything'],
+  ['--yes', 'Skip the interactive deploy confirmation'],
   ['--no-wait', 'Return once scheduled, without following the rollout'],
   ['-h, --help', 'Show help'],
 ]

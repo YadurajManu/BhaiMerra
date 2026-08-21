@@ -3,6 +3,8 @@ import { authCommand } from './auth.js'
 import { nodesCommand } from './nodes.js'
 import { statusCommand, eventsCommand } from './status.js'
 import { alertsCommand } from './alerts.js'
+import { configCommand, useCommand } from './config.js'
+import { doctorCommand } from './doctor.js'
 import {
   applyCommand,
   deployCommand,
@@ -18,6 +20,9 @@ export type Command = { run(args: string[], flags: Flags): Promise<void> }
 
 export const commands: Record<string, Command> = {
   auth: authCommand,
+  config: configCommand,
+  use: useCommand,
+  doctor: doctorCommand,
   init: initCommand,
   validate: validateCommand,
   apply: applyCommand,

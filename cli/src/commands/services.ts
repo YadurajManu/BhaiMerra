@@ -8,12 +8,21 @@ import type { Flags } from '../args.js'
 type Service = {
   id: string
   name: string
+  repoUrl: string | null
   placementPolicy: string
   requestRamMb: number
   persistentVolume: boolean
   hostname: string | null
   domain: string | null
   current: { nodeName: string | null; status: string; gitSha: string | null } | null
+}
+
+type PlacementPreview = {
+  outcome: 'placed' | 'no_eligible_node'
+  nodeName?: string
+  candidates: Array<{ nodeName: string; score: number; breakdown: { headroom: number; reliability: number; load: number } }>
+  rejected: Array<{ nodeName: string; code: string; detail: string }>
+  summary?: string
 }
 
 const manifestPath = (given?: string) => given ?? 'fleet.yaml'
@@ -130,6 +139,44 @@ async function findService(fleetId: string, name: string): Promise<Service> {
   return match
 }
 
+async function deployPlan(fleetId: string, service: Service): Promise<PlacementPreview> {
+  return (await request<{ decision: PlacementPreview }>('GET', `/services/${service.id}/placement-preview`)).body.decision
+}
+
+function printPlan(service: Service, plan: PlacementPreview, gitSha?: string) {
+  console.log(`\n${c.bold(`Plan for ${service.name}`)}`)
+  if (plan.outcome !== 'placed' || !plan.nodeName) {
+    console.log(`${c.red('  placement')}    ${plan.summary ?? 'No eligible node'}`)
+    for (const rejected of plan.rejected) console.log(`  ${c.dim(rejected.nodeName.padEnd(12))} ${rejected.detail}`)
+    return false
+  }
+  const winner = plan.candidates[0]
+  const source = service.repoUrl
+    ? `${service.repoUrl}${gitSha ? ` · ${gitSha.slice(0, 12)}` : ''}`
+    : gitSha ? gitSha.slice(0, 12) : 'service definition'
+  const target = plan.nodeName
+  const reason = winner
+    ? `highest eligible score (${winner.score.toFixed(3)}; headroom ${winner.breakdown.headroom.toFixed(2)}, load ${winner.breakdown.load.toFixed(2)})`
+    : 'eligible for this service'
+  const url = service.domain ?? service.hostname ?? 'assigned after scheduling'
+  console.log(`  ${c.dim('source'.padEnd(12))} ${source}`)
+  console.log(`  ${c.dim('target'.padEnd(12))} ${c.signal(target)}`)
+  console.log(`  ${c.dim('reason'.padEnd(12))} ${reason}`)
+  console.log(`  ${c.dim('URL'.padEnd(12))} ${url.startsWith('http') ? url : `https://${url}`}`)
+  return true
+}
+
+async function confirmDeploy(): Promise<boolean> {
+  if (!process.stdin.isTTY) return true
+  const { createInterface } = await import('node:readline/promises')
+  const rl = createInterface({ input: process.stdin, output: process.stdout })
+  try {
+    return (await rl.question('  Continue? [y/N] ')).trim().toLowerCase() === 'y'
+  } finally {
+    rl.close()
+  }
+}
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 /**
@@ -179,6 +226,24 @@ export const deployCommand = {
 
     const service = await findService(fleetId, name)
     const gitSha = typeof flags.sha === 'string' ? flags.sha : undefined
+
+    const plan = await task('checking deployment plan', async () => deployPlan(fleetId, service))
+    const viable = plan.outcome === 'placed' && Boolean(plan.nodeName)
+    if (!flags.json) printPlan(service, plan, gitSha)
+    if (flags.json && (flags.plan || flags['dry-run'])) {
+      console.log(JSON.stringify({ service: service.name, gitSha: gitSha ?? null, plan }, null, 2))
+      return
+    }
+    if (!viable) {
+      if (flags.json) console.log(JSON.stringify({ service: service.name, gitSha: gitSha ?? null, plan }, null, 2))
+      process.exitCode = EXIT.noEligibleNode
+      return
+    }
+    if (flags.plan || flags['dry-run']) return
+    if (!flags.yes && !flags.y && !(await confirmDeploy())) {
+      console.log(c.dim('Deployment cancelled. Re-run with --yes to skip confirmation.'))
+      return
+    }
 
     const body = await splash(
       `deploying ${c.bold(service.name)}${gitSha ? c.dim(` at ${gitSha.slice(0, 7)}`) : ''}`,

@@ -248,6 +248,14 @@ vpsfra      0.6810  0.750     0.50         0.78  2.0GB
 service that is down prints CRITICAL above the table, because that is the one
 case a human has to act on.
 
+`fleet doctor` is the read-only first response when something looks wrong. It
+checks the signed-in account, fleet access, live nodes, agent-version drift,
+deployment failures, public HTTPS reachability, and GitHub App status. Every
+warning says what Fleet cannot yet observe rather than claiming a check passed.
+`fleet deploy <service>` shows its candidate node, placement reason, and
+service URL before asking for confirmation; use `--plan` for a no-change
+preview or `--yes` in automation.
+
 Exit codes are a contract — `0` ok, `1` failure, `2` usage, `3` no eligible
 node, `4` health check failed — so a CI step can branch on them.
 

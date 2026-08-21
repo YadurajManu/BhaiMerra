@@ -195,6 +195,9 @@ export const PAGES = {
       H('Fleet and nodes'),
       { t: 'table', head: ['Command', 'What it does'], rows: [
         ['fleet init', 'Scaffold a fleet.yaml from the repository contents.'],
+        ['fleet config show', 'Show the saved control plane and selected fleet without exposing tokens.'],
+        ['fleet use <fleet>', 'Choose the default fleet for later commands.'],
+        ['fleet doctor', 'Check login, fleet access, nodes, deployments, HTTPS ingress, and GitHub.'],
         ['fleet nodes', 'List nodes with arch, load, service count and status.'],
         ['fleet nodes pair', 'Mint a single-use pairing token for a new machine.'],
         ['fleet nodes cordon <node>', 'Stop scheduling new work onto a node.'],
@@ -205,7 +208,8 @@ export const PAGES = {
       { t: 'table', head: ['Command', 'What it does'], rows: [
         ['fleet validate [file]', 'Check a fleet.yaml without saving it.'],
         ['fleet apply [file]', 'Save the desired service definitions from fleet.yaml.'],
-        ['fleet deploy <service> [--sha]', 'Build, schedule, and roll out one service.'],
+        ['fleet deploy <service> [--sha]', 'Show a placement plan, ask for confirmation, then build and roll out one service.'],
+        ['fleet deploy <service> --plan', 'Show the source, target, reason, and URL without changing anything.'],
         ['fleet status', 'One-screen view of the whole fleet.'],
         ['fleet deployments <svc>', 'Show deployment history and failure reasons.'],
         ['fleet reschedule <svc>', 'Force a placement decision to be recomputed.'],
