@@ -128,12 +128,19 @@ if [ "$WITH_TUNNEL" = 1 ]; then
     [ "$i" = 20 ] && { echo; bad "tunnel did not connect — see deploy/.tunnel.log"; }
   done
 
-  ZONE=$(grep -E '^\s*-?\s*hostname:' "$CF_CONFIG" | head -1 | sed 's/.*hostname: *//' | tr -d '"')
+  # Read the hostnames rather than deriving them; the shape has changed once
+  # already and a derived URL that is subtly wrong is worse than none.
   echo
-  echo "  landing     $(c 36 "https://$ZONE")"
-  echo "  dashboard   $(c 36 "https://app.$ZONE")"
-  echo "  api         $(c 36 "https://api.$ZONE")"
-  echo "  services    $(c 2 "*.$ZONE")"
+  labels=(landing dashboard api services)
+  i=0
+  while read -r host; do
+    [ -z "$host" ] && continue
+    case "$host" in
+      \**) echo "  $(printf '%-11s' "${labels[$i]:-}")$(c 2 "$host")" ;;
+      *)   echo "  $(printf '%-11s' "${labels[$i]:-}")$(c 36 "https://$host")" ;;
+    esac
+    i=$((i+1))
+  done < <(grep -E '^\s+- hostname:' "$CF_CONFIG" | sed 's/.*hostname: *//' | tr -d '"')
 fi
 
 step "ready"

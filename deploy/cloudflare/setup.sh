@@ -8,8 +8,12 @@
 # clean up afterwards.
 set -euo pipefail
 
-ZONE="${ZONE:-fleet.plastikworld.xyz}"
-APEX="${ZONE#*.}"
+# HOSTS is the exact set to route. Derived names (app.$ZONE) push hostnames a
+# level deeper than a free wildcard certificate covers, so they are listed
+# explicitly instead.
+ZONE="${ZONE:-plastikworld.xyz}"
+APEX="$ZONE"
+HOSTS="${HOSTS:-fleet.$ZONE fleetapp.$ZONE fleetapi.$ZONE *.$ZONE}"
 NAME="${TUNNEL_NAME:-fleet-os}"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG="$DIR/fleet-os.yml"
@@ -23,6 +27,15 @@ CONFIG="$DIR/fleet-os.yml"
 ORIGINCERT="${ORIGINCERT:-$HOME/.cloudflared/cert.pem}"
 export TUNNEL_ORIGIN_CERT="$ORIGINCERT"
 
+# ~/.cloudflared/config.yml is read by every `tunnel` subcommand, and if it
+# names a tunnel, that tunnel wins over the one given on the command line.
+# `route dns fleet-os host` then silently points the hostname at whichever
+# tunnel that file names — the symptom is a tunnel that connects fine and a
+# hostname that still returns error 1033. Isolate from it.
+ISOLATED="$(mktemp -d)/isolated.yml"
+printf 'no-autoupdate: true\n' > "$ISOLATED"
+cf() { cloudflared tunnel --config "$ISOLATED" "$@"; }
+
 command -v cloudflared >/dev/null || { echo "cloudflared is not installed"; exit 1; }
 [ -f "$ORIGINCERT" ] || {
   echo "No certificate at $ORIGINCERT"
@@ -32,7 +45,7 @@ command -v cloudflared >/dev/null || { echo "cloudflared is not installed"; exit
 }
 
 # --- tunnel ---------------------------------------------------------
-existing=$(cloudflared tunnel list --output json 2>/dev/null \
+existing=$(cf list --output json 2>/dev/null \
   | python3 -c "import sys,json;print(next((t['id'] for t in json.load(sys.stdin) if t['name']=='$NAME'),''))" 2>/dev/null || true)
 
 if [ -n "$existing" ]; then
@@ -40,16 +53,25 @@ if [ -n "$existing" ]; then
   ID="$existing"
 else
   echo "creating tunnel \"$NAME\""
-  cloudflared tunnel create "$NAME" >/dev/null
-  ID=$(cloudflared tunnel list --output json \
+  cf create "$NAME" >/dev/null
+  ID=$(cf list --output json \
     | python3 -c "import sys,json;print(next(t['id'] for t in json.load(sys.stdin) if t['name']=='$NAME'))")
   echo "  created $ID"
 fi
 
+# REPLACE_ZONE is a placeholder, not a real domain. Substituting a literal
+# hostname here once rewrote "fleet.plastikworld.xyz" to the bare apex and
+# would have had the tunnel claim the zone's main site.
 sed -e "s|REPLACE_WITH_TUNNEL_ID|$ID|g" \
     -e "s|/Users/REPLACE_ME|$HOME|g" \
-    -e "s|fleet\.plastikworld\.xyz|$ZONE|g" \
+    -e "s|REPLACE_ZONE|$ZONE|g" \
     "$DIR/fleet-os.yml.example" > "$CONFIG"
+
+# The apex must never be routed here by accident.
+if grep -qE "^\s+- hostname: $ZONE\s*$" "$CONFIG"; then
+  echo "refusing to write a config that claims the apex $ZONE"
+  exit 1
+fi
 echo "wrote $CONFIG"
 
 # --- dns ------------------------------------------------------------
@@ -57,9 +79,9 @@ echo "wrote $CONFIG"
 # with stderr discarded, and four writes to the wrong zone all looked like
 # successes. A check that cannot report failure is worse than no check.
 failed=0
-for host in "$ZONE" "app.$ZONE" "api.$ZONE" "*.$ZONE"; do
+for host in $HOSTS; do
   printf "  %-34s " "$host"
-  out=$(cloudflared tunnel route dns "$NAME" "$host" 2>&1 | grep -vE "outdated|recommend upgrading" || true)
+  out=$(cf route dns "$NAME" "$host" 2>&1 | grep -vE "outdated|recommend upgrading" || true)
 
   # The tell-tale of a wrong-zone cert: the name comes back with the cert's
   # zone appended to the one we asked for.
@@ -81,14 +103,19 @@ done
 [ "$failed" = 0 ] || { echo; echo "DNS routing did not complete — not writing a broken setup."; exit 1; }
 
 # --- certificate depth ----------------------------------------------
-depth=$(echo "$ZONE" | tr -cd '.' | wc -c | tr -d ' ')
-if [ "$depth" -ge 2 ]; then
-  echo
-  echo "  NOTE  $ZONE is $depth levels deep."
-  echo "        Universal SSL covers $APEX and *.$APEX only, so app.$ZONE"
-  echo "        and *.$ZONE need Advanced Certificate Manager (\$10/mo/zone)."
-  echo "        Otherwise use one level: fleet.$APEX, fleetapp.$APEX, fleetapi.$APEX"
-fi
+for host in $HOSTS; do
+  # Levels BELOW the apex, not dots in the whole name. fleet.example.com is
+  # one level and covered; app.fleet.example.com is two and is not.
+  sub="${host%.$APEX}"
+  [ "$sub" = "$host" ] && continue          # the apex itself
+  levels=$(( $(echo "$sub" | tr -cd '.' | wc -c | tr -d ' ') + 1 ))
+  if [ "$levels" -ge 2 ]; then
+    echo
+    echo "  NOTE  $host is more than one level below the apex."
+    echo "        Universal SSL covers $APEX and *.$APEX only, so this needs"
+    echo "        Advanced Certificate Manager (\$10/mo/zone) or it fails TLS."
+  fi
+done
 
 echo
 echo "Start everything with:  ./fleet-up.sh"

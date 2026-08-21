@@ -1,52 +1,54 @@
 # Cloudflare Tunnel config for Fleet OS.
 #
-# Its own file, never ~/.cloudflared/config.yml, which already routes other
-# projects and would be clobbered.
+# Its own file, never ~/.cloudflared/config.yml, which routes other projects
+# and would be clobbered.
 #
 #   cloudflared tunnel --config deploy/cloudflare/fleet-os.yml run
 #
-# Rules are matched in order and the first match wins, so every specific
-# hostname must come before the wildcard or the wildcard swallows them all.
+# Rules match in order and the first wins, so every specific hostname must
+# come before the wildcard or the wildcard swallows them all.
+#
+# Every hostname here is ONE level below the apex. Cloudflare's free Universal
+# SSL covers the apex and one level; anything deeper has no certificate and
+# fails TLS in the browser with nothing useful in the error.
 
 tunnel: REPLACE_WITH_TUNNEL_ID
 credentials-file: /Users/REPLACE_ME/.cloudflared/REPLACE_WITH_TUNNEL_ID.json
 
-# Edge transport, cloudflared -> Cloudflare. This is a different hop from
+# Edge transport, cloudflared -> Cloudflare. A different hop from
 # originRequest below, which is cloudflared -> your local server.
 #
-# QUIC is the default and it is faster where it works. It is also UDP/443,
-# which a lot of home ISPs and captive networks silently drop — the symptom is
-# "failed to dial to edge with quic: timeout: no recent network activity" and
-# a tunnel that never connects. context.txt §3 records exactly this from this
-# domain, so http2 is the default here rather than something to discover.
+# QUIC is the default and faster where it works. It is also UDP/443, which
+# many home ISPs silently drop — the symptom is "failed to dial to edge with
+# quic: timeout" and a tunnel that never connects. context.txt §3 records
+# exactly this from this domain, so http2 is the default rather than
+# something to rediscover.
 protocol: http2
 
 originRequest:
-  # QUIC is faster where it works and unreliable on networks that treat
-  # long-lived UDP as suspicious, which describes a lot of home ISPs. This is
-  # the lesson context.txt §3 records from this very domain.
   http2Origin: true
   connectTimeout: 30s
-  # A deploy builds multi-arch images and legitimately takes minutes.
-  noHappyEyeballs: false
 
 ingress:
   # The marketing site.
-  - hostname: fleet.plastikworld.xyz
+  - hostname: fleet.REPLACE_ZONE
     service: http://localhost:8083
 
-  # The dashboard. nginx there also proxies /api, so the browser stays
+  # The dashboard. Its nginx also proxies /api, so the browser stays
   # same-origin and never meets CORS.
-  - hostname: app.fleet.plastikworld.xyz
+  - hostname: fleetapp.REPLACE_ZONE
     service: http://localhost:8082
 
   # The API directly, for the CLI and for agents.
-  - hostname: api.fleet.plastikworld.xyz
+  - hostname: fleetapi.REPLACE_ZONE
     service: http://localhost:8080
 
   # Every deployed service. Managed hostnames are a single label
-  # (web-homelab-7efe4c) precisely so one wildcard covers them all.
-  - hostname: "*.fleet.plastikworld.xyz"
+  # (web-homelab-7efe4c) precisely so this one wildcard covers them all.
+  #
+  # Explicit records on the zone still win over a wildcard, so anything else
+  # already on plastikworld.xyz keeps working.
+  - hostname: "*.REPLACE_ZONE"
     service: http://localhost:8081
 
   - service: http_status:404
