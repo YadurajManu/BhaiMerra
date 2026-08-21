@@ -48,7 +48,8 @@ fleet-os/
 | Reclaim policies (FR-9) | ✅ eager / idle / manual, applied when a node returns |
 | Drift detection | ✅ reports what the node says is not running |
 | CLI (FR-17) | ✅ auth, init, validate, apply, status, nodes, deploy, where, events, alerts |
-| git webhook → deploy | ⬜ Phase 2 — the trigger, not the pipeline |
+| Public ingress (FR-8) | ✅ a URL that follows the service across a failover |
+| git webhook → deploy | ✅ signed, fetches the pushed commit, builds and rolls out |
 | Mesh / ingress | ⬜ Phase 4 |
 | Dashboard, CLI | ⬜ Phase 5 |
 
@@ -178,6 +179,48 @@ case a human has to act on.
 
 Exit codes are a contract — `0` ok, `1` failure, `2` usage, `3` no eligible
 node, `4` health check failed — so a CI step can branch on them.
+
+## Ingress
+
+Every service gets a managed hostname, `<service>.<fleet>-<id>.<zone>`, and can
+also carry its own domain. The fleet id suffix is load-bearing: fleet names are
+unique per org, not globally, and the default name for everyone's first fleet
+is `homelab` — without it two unrelated users collide on their first deploy.
+
+The routing table is derived, not stored. A hostname resolves to whichever node
+is running the service *right now*, looked up from the live deployment, so
+there is nothing to forget to update when placement changes. That is what makes
+FR-8 hold:
+
+```
+deployed to sayyestoheaven-2   url http://hello.homelab-7efe4c.fleetos.test
+curl  →  fleet-os says hello from aarch64      x-fleet-node: sayyestoheaven-2
+kill the agent on sayyestoheaven-2
+curl  →  fleet-os says hello from aarch64      x-fleet-node: sayyestoheaven
+```
+
+The edge listens on its own port, separate from the API: it faces the internet
+and the control-plane API must not. Requests stream rather than buffer, so an
+upload is not bounded by proxy memory.
+
+**What this is not, yet.** Without the mesh, a node's advertise address has to
+be directly routable from the control plane. That is true on a LAN and false
+through NAT, which is exactly what Phase 4b's WireGuard mesh is for. Set
+`FLEET_ADVERTISE_ADDR` on the agent when the automatic choice is wrong.
+
+## git push
+
+`POST /webhooks/git/:fleetId` takes a GitHub-style push event, verifies the
+HMAC over the raw body, matches the repository against services in that fleet,
+fetches the tree at that commit shallowly, and runs the same deploy path
+`fleet deploy` uses — so a push and a manual deploy cannot drift apart.
+
+It acknowledges before building. A webhook sender times out in seconds and a
+multi-arch build takes minutes; holding the connection open makes every deploy
+look like a failed delivery and get retried.
+
+Remotes are checked before they reach git: `ext::sh -c …` is a valid git
+transport that executes a command, and the remote comes from user input.
 
 ## Alerting
 

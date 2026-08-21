@@ -2,6 +2,7 @@ import { and, eq, inArray } from 'drizzle-orm'
 import { deployments, services, placementEvents, fleets } from '../db/schema.js'
 import { recordAudit } from '../lib/audit.js'
 import { place } from './placement.js'
+import { allocateHostPort, invalidateRoutesForService } from '../ingress/routes.js'
 import { fleetSnapshot, toServiceSpec } from './snapshot.js'
 import type { AppContext } from '../api/context.js'
 import type { FleetEventPayload } from '../lib/events.js'
@@ -105,6 +106,9 @@ export async function rescheduleFromNode(
       continue
     }
 
+    // A new node means a new host port, and the route must point at it.
+    const hostPort = await allocateHostPort(ctx, decision.nodeId)
+
     await ctx.db.transaction(async (tx) => {
       // The old deployment is superseded, not deleted: the timeline should
       // still show where the service used to be.
@@ -119,6 +123,7 @@ export async function rescheduleFromNode(
         imageTags: deployment.imageTags,
         nodeId: decision.nodeId,
         status: 'deploying',
+        hostPort,
       })
 
       await tx.insert(placementEvents).values({
@@ -144,6 +149,9 @@ export async function rescheduleFromNode(
         metadata: { from: downNodeId, to: decision.nodeId, reason: 'failover' },
       })
     })
+
+    // FR-8: the public route follows the service within one reschedule cycle.
+    await invalidateRoutesForService(ctx, service.id)
 
     outcomes.push({
       service: service.name,

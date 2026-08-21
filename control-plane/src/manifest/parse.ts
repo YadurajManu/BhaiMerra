@@ -80,6 +80,8 @@ const serviceFields = z
     gpu: z.boolean().default(false),
     volume: z.string().optional(),
     domain: z.string().optional(),
+    /** The port the container listens on. Ingress publishes it for you. */
+    port: z.number().int().min(1).max(65535).default(8080),
     health: healthCheck,
     env: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).default({}),
     secrets: z.array(z.string()).default([]),

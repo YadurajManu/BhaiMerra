@@ -4,6 +4,7 @@ import { createContext, closeContext } from './api/context.js'
 import { buildServer } from './server.js'
 import { startSweeper } from './heartbeat/sweeper.js'
 import { dispatchEvent } from './alerting/dispatch.js'
+import { startIngress } from './ingress/proxy.js'
 
 const config = loadConfig()
 const ctx = createContext(config)
@@ -20,9 +21,19 @@ const sweeper = startSweeper(ctx, {
   },
 })
 
+// The public edge listens separately from the API: this port faces the
+// internet, and the control-plane API must not.
+const ingress = config.INGRESS_ENABLED
+  ? await startIngress(ctx, { port: config.INGRESS_PORT, log: app.log })
+  : null
+if (ingress) {
+  app.log.info({ port: ingress.port, zone: config.INGRESS_ZONE }, 'ingress listening')
+}
+
 const shutdown = async (signal: string) => {
   app.log.info({ signal }, 'shutting down')
   sweeper.stop()
+  await ingress?.close()
   await app.close()
   await closeContext(ctx)
   process.exit(0)

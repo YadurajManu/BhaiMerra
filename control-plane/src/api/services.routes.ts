@@ -7,6 +7,7 @@ import { syncManifest } from '../manifest/sync.js'
 import { place } from '../scheduler/placement.js'
 import { fleetSnapshot, toServiceSpec } from '../scheduler/snapshot.js'
 import { platformsFor, BuildUnavailableError } from '../build/runner.js'
+import { managedHostname, allocateHostPort, invalidateRoutesForService } from '../ingress/routes.js'
 import { recordAudit } from '../lib/audit.js'
 import { ApiError } from './errors.js'
 import { requireFleetPermission } from './guards.js'
@@ -193,6 +194,9 @@ export async function serviceRoutes(app: FastifyInstance) {
         }
       }
 
+      // Allocated per node, so the ingress proxy has somewhere to send traffic.
+      const hostPort = await allocateHostPort(app.ctx, decision.nodeId)
+
       const deployment = await app.ctx.db.transaction(async (tx) => {
         // Supersede whatever was live, so a service never has two live rows.
         await tx
@@ -213,6 +217,7 @@ export async function serviceRoutes(app: FastifyInstance) {
             nodeId: decision.nodeId,
             status: 'deploying',
             imageTags: [image],
+            hostPort,
           })
           .returning()
 
@@ -243,6 +248,8 @@ export async function serviceRoutes(app: FastifyInstance) {
       return reply.code(201).send({
         deployment: { id: deployment.id, status: deployment.status },
         placedOn: { id: decision.nodeId, name: decision.nodeName },
+        // The point of the whole exercise: a URL, handed back on deploy.
+        url: service.domain ? `http://${service.domain}` : service.hostname ? `http://${service.hostname}` : null,
         score: decision.candidates[0]?.score,
         warnings: decision.warnings,
         note: 'The agent will converge on its next desired-state poll.',
@@ -281,12 +288,16 @@ export async function serviceRoutes(app: FastifyInstance) {
         throw new ApiError(422, 'no_eligible_node', decision.summary, { rejected: decision.rejected })
       }
 
+      // Ports are per node, so moving means allocating on the new one.
+      const hostPort = await allocateHostPort(app.ctx, decision.nodeId)
+
       await app.ctx.db.transaction(async (tx) => {
         await tx
           .update(deployments)
           .set({ status: 'superseded', finishedAt: new Date() })
           .where(eq(deployments.id, current.id))
         await tx.insert(deployments).values({
+          hostPort,
           serviceId: service.id,
           gitSha: current.gitSha,
           imageTags: current.imageTags,
@@ -309,6 +320,9 @@ export async function serviceRoutes(app: FastifyInstance) {
           metadata: { from: current.nodeId, to: decision.nodeId, reason: 'manual' },
         })
       })
+
+      // The URL must point at the new node before the caller sees success.
+      await invalidateRoutesForService(app.ctx, service.id)
 
       return { movedTo: { id: decision.nodeId, name: decision.nodeName }, score: decision.candidates[0]?.score }
     }

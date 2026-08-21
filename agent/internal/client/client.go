@@ -53,6 +53,7 @@ type Heartbeat struct {
 	DiskUsedMb    int         `json:"disk_used_mb"`
 	MeshConnected bool        `json:"mesh_connected"`
 	AgentVersion  string      `json:"agent_version,omitempty"`
+	AdvertiseAddr string      `json:"advertise_addr,omitempty"`
 	Containers    []Container `json:"containers"`
 }
 
@@ -68,6 +69,8 @@ type DesiredService struct {
 	HealthCheckPath string `json:"health_check_path"`
 	Volume          string `json:"volume"`
 	Replicas        int    `json:"replicas"`
+	HostPort        int    `json:"host_port"`
+	ContainerPort   int    `json:"container_port"`
 }
 
 type DesiredState struct {

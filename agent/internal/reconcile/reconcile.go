@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -118,6 +119,18 @@ func (e *Engine) start(ctx context.Context, svc client.DesiredService) error {
 		Image:        svc.Image,
 		Volume:       svc.Volume,
 		HealthPath:   svc.HealthCheckPath,
+	}
+
+	// Publish the container port on the host port the control plane allocated,
+	// so its ingress has somewhere to send traffic.
+	if svc.HostPort > 0 {
+		containerPort := svc.ContainerPort
+		if containerPort == 0 {
+			containerPort = 8080
+		}
+		spec.Ports = map[string]string{
+			fmt.Sprintf("%d/tcp", containerPort): strconv.Itoa(svc.HostPort),
+		}
 	}
 
 	if _, err := e.Docker.Create(ctx, spec); err != nil {

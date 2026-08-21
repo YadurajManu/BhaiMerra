@@ -34,11 +34,12 @@ func New(version string, containers ContainerLister) *Host {
 
 func (h *Host) Sample(ctx context.Context) (client.Heartbeat, error) {
 	hb := client.Heartbeat{
-		CPUPct:       loadPercent(),
-		RAMUsedMb:    h.usedRAMMb(),
-		DiskUsedMb:   usedDiskMb("/"),
-		AgentVersion: h.Version,
-		Containers:   []client.Container{},
+		CPUPct:        loadPercent(),
+		RAMUsedMb:     h.usedRAMMb(),
+		DiskUsedMb:    usedDiskMb("/"),
+		AgentVersion:  h.Version,
+		AdvertiseAddr: capability.AdvertiseAddr(),
+		Containers:    []client.Container{},
 	}
 
 	if h.Containers != nil {

@@ -132,6 +132,11 @@ export const nodes = pgTable(
     lastHeartbeatAt: timestamp('last_heartbeat_at', { withTimezone: true }),
     meshPubkey: text('mesh_pubkey'),
 
+    // Where the ingress proxy can actually reach this node. Until the mesh
+    // lands (Phase 4b) this must be directly routable from the control plane;
+    // afterwards it becomes the node's mesh address.
+    advertiseAddr: text('advertise_addr'),
+
     // hashed, never stored in the clear (§10)
     agentTokenHash: text('agent_token_hash').notNull(),
     agentVersion: text('agent_version'),
@@ -195,12 +200,23 @@ export const services = pgTable(
     replicas: integer('replicas').notNull().default(1),
 
     healthCheckPath: text('health_check_path').default('/'),
+    /** The port the container listens on inside itself. */
+    containerPort: integer('container_port').notNull().default(8080),
+    /** User-supplied hostname, e.g. web.yourdomain.dev. */
     domain: text('domain'),
+    /** Always-present managed hostname, e.g. web.homelab.fleetos.app. */
+    hostname: text('hostname'),
     reclaimPolicy: reclaimPolicy('reclaim_policy'),
 
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [uniqueIndex('services_fleet_name_key').on(t.fleetId, t.name)]
+  (t) => [
+    uniqueIndex('services_fleet_name_key').on(t.fleetId, t.name),
+    // Two services answering the same hostname is a routing coin-flip, so
+    // the database refuses it rather than the proxy guessing.
+    uniqueIndex('services_hostname_key').on(t.hostname),
+    uniqueIndex('services_domain_key').on(t.domain),
+  ]
 )
 
 export const deployments = pgTable(
@@ -214,6 +230,8 @@ export const deployments = pgTable(
     status: deploymentStatus('status').notNull().default('queued'),
     nodeId: uuid('node_id').references(() => nodes.id, { onDelete: 'set null' }),
     imageTags: text('image_tags').array().notNull().default([]),
+    /** Host port the agent publishes this container on, so ingress can reach it. */
+    hostPort: integer('host_port'),
     failureReason: text('failure_reason'),
     startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
     finishedAt: timestamp('finished_at', { withTimezone: true }),
@@ -221,6 +239,9 @@ export const deployments = pgTable(
   (t) => [
     index('deployments_service_idx').on(t.serviceId, t.startedAt),
     index('deployments_node_idx').on(t.nodeId),
+    // The ingress proxy resolves a hostname to a live deployment on every
+    // request; this is the index that keeps that a lookup rather than a scan.
+    index('deployments_live_idx').on(t.status, t.nodeId),
   ]
 )
 

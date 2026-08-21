@@ -10,6 +10,8 @@ type Service = {
   placementPolicy: string
   requestRamMb: number
   persistentVolume: boolean
+  hostname: string | null
+  domain: string | null
   current: { nodeName: string | null; status: string; gitSha: string | null } | null
 }
 
@@ -85,11 +87,11 @@ export const servicesCommand = {
 
     console.log(
       table(
-        ['service', 'placement', 'ram', 'node', 'sha', 'status'],
+        ['service', 'url', 'placement', 'node', 'sha', 'status'],
         body.services.map((s) => [
           s.name + (s.persistentVolume ? c.dim(' ⛁') : ''),
+          s.domain ?? s.hostname ?? c.dim('—'),
           s.placementPolicy,
-          mb(s.requestRamMb),
           s.current?.nodeName ?? c.dim('—'),
           s.current?.gitSha?.slice(0, 7) ?? c.dim('—'),
           s.current ? statusColour(s.current.status) : c.dim('not deployed'),
@@ -124,11 +126,13 @@ export const deployCommand = {
     const { body } = await request<{
       placedOn: { name: string }
       score: number
+      url: string | null
       warnings: string[]
     }>('POST', `/services/${service.id}/deploy`, { body: { gitSha } })
 
     if (flags.json) return console.log(JSON.stringify(body, null, 2))
     console.log(`${c.green('scheduled')} onto ${c.bold(body.placedOn.name)} ${c.dim(`score ${body.score?.toFixed(3)}`)}`)
+    if (body.url) console.log(`${c.green('live')}      ${c.cyan(body.url)}`)
     for (const w of body.warnings ?? []) console.log(`${c.yellow('warning')}  ${w}`)
   },
 }

@@ -24,6 +24,13 @@ const schema = z.object({
   BUILD_WORKDIR: z.string().default('/tmp/fleet-os/builds'),
   BUILD_TIMEOUT_MS: z.coerce.number().int().default(20 * 60_000),
   PORT: z.coerce.number().int().default(8080),
+  /** Public edge. Separate listener from the API, which is not internet-facing. */
+  INGRESS_PORT: z.coerce.number().int().default(8081),
+  INGRESS_ENABLED: z.coerce.boolean().default(true),
+  /** Zone for managed hostnames: <service>.<fleet>.<zone> */
+  INGRESS_ZONE: z.string().default('fleetos.app'),
+  /** Shared secret for git webhook signatures. Unset disables verification. */
+  WEBHOOK_SECRET: z.string().min(16).optional(),
   HOST: z.string().default('0.0.0.0'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),

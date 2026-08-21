@@ -1,5 +1,6 @@
 import { and, eq, inArray, notInArray } from 'drizzle-orm'
-import { services, nodes } from '../db/schema.js'
+import { managedHostname } from '../ingress/routes.js'
+import { services, nodes, fleets } from '../db/schema.js'
 import { recordAudit } from '../lib/audit.js'
 import { ApiError } from '../api/errors.js'
 import type { AppContext } from '../api/context.js'
@@ -29,6 +30,14 @@ export async function syncManifest(
   manifest: ParsedManifest,
   actorUserId?: string
 ): Promise<SyncResult> {
+  const [fleet] = await ctx.db
+    .select({ name: fleets.name })
+    .from(fleets)
+    .where(eq(fleets.id, fleetId))
+    .limit(1)
+  const fleetName = fleet?.name ?? 'fleet'
+  const zone = ctx.config.INGRESS_ZONE
+
   const fleetNodes = await ctx.db
     .select({ id: nodes.id, name: nodes.name })
     .from(nodes)
@@ -71,6 +80,10 @@ export async function syncManifest(
         replicas: svc.replicas,
         healthCheckPath: svc.health.path,
         domain: svc.domain ?? null,
+        containerPort: svc.port,
+        // Every service gets a managed hostname whether or not it brings its
+        // own domain, so there is always a URL to hand back after a deploy.
+        hostname: managedHostname(svc.name, fleetName, fleetId, zone),
         reclaimPolicy: svc.reclaim ?? null,
       }
 

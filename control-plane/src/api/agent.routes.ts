@@ -1,4 +1,4 @@
-import { and, eq, isNull, gt, inArray } from 'drizzle-orm'
+import { and, eq, isNull, gt, inArray, ne } from 'drizzle-orm'
 import { z } from 'zod'
 import type { FastifyInstance } from 'fastify'
 import { nodes, fleets, pairingTokens, deployments, services } from '../db/schema.js'
@@ -21,6 +21,8 @@ const capability = z.object({
   connectivity: z.enum(['direct', 'nat', 'unknown']).default('unknown'),
   hostname: z.string().min(1).max(64).optional(),
   agent_version: z.string().max(32).optional(),
+  /** Where ingress can reach this node. Becomes the mesh address in Phase 4b. */
+  advertise_addr: z.string().max(255).optional(),
 })
 
 const heartbeat = z.object({
@@ -29,6 +31,7 @@ const heartbeat = z.object({
   disk_used_mb: z.number().int().min(0),
   mesh_connected: z.boolean().default(false),
   agent_version: z.string().max(32).optional(),
+  advertise_addr: z.string().max(255).optional(),
   containers: z
     .array(
       z.object({
@@ -116,6 +119,7 @@ export async function agentRoutes(app: FastifyInstance) {
           connectivity: cap.connectivity,
           agentTokenHash: hashToken(agentToken),
           agentVersion: cap.agent_version,
+          advertiseAddr: cap.advertise_addr ?? null,
           status: 'online',
           lastHeartbeatAt: new Date(),
         })
@@ -202,6 +206,15 @@ export async function agentRoutes(app: FastifyInstance) {
       }
     }
 
+    if (hb.advertise_addr) {
+      // A node's address can change (DHCP, a new network). Keeping the stale
+      // one would send ingress traffic into a black hole.
+      await db
+        .update(nodes)
+        .set({ advertiseAddr: hb.advertise_addr })
+        .where(and(eq(nodes.id, nodeId), ne(nodes.advertiseAddr, hb.advertise_addr)))
+    }
+
     // Drift: what the node says is not running, that we believe is. Debounced
     // through Redis so a container restarting between two beats does not fire
     // an alert on every heartbeat.
@@ -261,6 +274,8 @@ export async function agentRoutes(app: FastifyInstance) {
         image: services.image,
         imageTags: deployments.imageTags,
         deploymentId: deployments.id,
+        hostPort: deployments.hostPort,
+        containerPort: services.containerPort,
         healthCheckPath: services.healthCheckPath,
         volumeName: services.volumeName,
         replicas: services.replicas,
@@ -286,6 +301,8 @@ export async function agentRoutes(app: FastifyInstance) {
         deployment_id: r.deploymentId,
         image: r.image ?? r.imageTags[0] ?? null,
         health_check_path: r.healthCheckPath,
+        host_port: r.hostPort,
+        container_port: r.containerPort,
         volume: r.volumeName,
         replicas: r.replicas,
       })),
