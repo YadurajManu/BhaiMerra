@@ -1,3 +1,4 @@
+import { APP_URL } from '../lib/data'
 import Reveal from './ui/Reveal'
 import MagneticButton from './ui/MagneticButton'
 import CopyLine from './ui/CopyLine'
@@ -29,7 +30,7 @@ export default function FinalCTA() {
             </Reveal>
 
             <Reveal i={4} className="mt-6 flex flex-wrap items-center gap-3">
-              <MagneticButton href="#pricing" variant="primary">
+              <MagneticButton href={APP_URL} variant="primary">
                 Start free with one node
               </MagneticButton>
               <MagneticButton href="#cli" variant="ghost" strength={0.16}>

@@ -95,6 +95,8 @@ for i in $(seq 1 60); do
   [ "$i" = 60 ] && { echo; bad "control plane did not become healthy"; compose logs --tail 30 control-plane; exit 1; }
 done
 
+curl -fsS -m 4 "http://localhost:${WWW_PORT:-8083}/" >/dev/null 2>&1 \
+  && ok "landing page serving" || bad "landing page not responding"
 curl -fsS -m 4 "http://localhost:${DASHBOARD_PORT:-8082}/" >/dev/null 2>&1 \
   && ok "dashboard serving" || bad "dashboard not responding"
 curl -fsS -m 4 "http://localhost:${REGISTRY_PORT:-5001}/v2/" >/dev/null 2>&1 \
@@ -104,20 +106,33 @@ curl -fsS -m 4 "http://localhost:${REGISTRY_PORT:-5001}/v2/" >/dev/null 2>&1 \
 if [ "$WITH_TUNNEL" = 1 ]; then
   step "cloudflare tunnel"
   stop_tunnel
-  cloudflared tunnel --config "$CF_CONFIG" run >"$DEPLOY/.tunnel.log" 2>&1 &
+  CERT_ARGS=()
+  [ -n "${ORIGINCERT:-}" ] && CERT_ARGS=(--origincert "$ORIGINCERT")
+  cloudflared "${CERT_ARGS[@]}" tunnel --config "$CF_CONFIG" run >"$DEPLOY/.tunnel.log" 2>&1 &
   echo $! > "$PIDFILE"
 
   printf "  connecting"
   for i in $(seq 1 20); do
-    grep -q "Registered tunnel connection" "$DEPLOY/.tunnel.log" 2>/dev/null && { echo; ok "tunnel connected"; break; }
+    if grep -q "Registered tunnel connection" "$DEPLOY/.tunnel.log" 2>/dev/null; then
+      echo; ok "tunnel connected ($(grep -o 'protocol=[a-z0-9]*' "$DEPLOY/.tunnel.log" | head -1))"
+      break
+    fi
+    # QUIC is UDP/443 and a lot of home networks drop it silently. Say so
+    # rather than let it look like a generic timeout.
+    if grep -q "failed to dial to edge with quic" "$DEPLOY/.tunnel.log" 2>/dev/null; then
+      echo; bad "the network is blocking QUIC (UDP/443) to Cloudflare's edge"
+      echo "     add 'protocol: http2' to $CF_CONFIG"
+      break
+    fi
     printf "."
     sleep 1
     [ "$i" = 20 ] && { echo; bad "tunnel did not connect — see deploy/.tunnel.log"; }
   done
 
-  ZONE=$(grep -E '^\s*-?\s*hostname:' "$CF_CONFIG" | head -1 | sed 's/.*hostname: *//')
+  ZONE=$(grep -E '^\s*-?\s*hostname:' "$CF_CONFIG" | head -1 | sed 's/.*hostname: *//' | tr -d '"')
   echo
-  echo "  dashboard   $(c 36 "https://$ZONE")"
+  echo "  landing     $(c 36 "https://$ZONE")"
+  echo "  dashboard   $(c 36 "https://app.$ZONE")"
   echo "  api         $(c 36 "https://api.$ZONE")"
   echo "  services    $(c 2 "*.$ZONE")"
 fi

@@ -1,3 +1,6 @@
+// Where the dashboard is deployed; baked in at build time.
+export const APP_URL = import.meta.env.VITE_APP_URL ?? 'http://localhost:8082'
+
 // Every string on this page comes from here so the copy stays auditable.
 
 export const STEPS = [
@@ -204,6 +207,7 @@ export const FOOTER_LINKS = [
     heading: 'Product',
     links: [
       ['Overview', '#top'],
+      ['Dashboard', APP_URL],
       ['How it works', '#how'],
       ['Scheduler', '#/docs/scheduler'],
       ['Mesh networking', '#/docs/mesh'],

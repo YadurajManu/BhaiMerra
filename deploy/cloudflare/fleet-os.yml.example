@@ -1,37 +1,52 @@
 # Cloudflare Tunnel config for Fleet OS.
 #
-# Kept as its own file so it never touches ~/.cloudflared/config.yml, which
-# already routes other projects. Run it with:
+# Its own file, never ~/.cloudflared/config.yml, which already routes other
+# projects and would be clobbered.
 #
 #   cloudflared tunnel --config deploy/cloudflare/fleet-os.yml run
 #
-# Three hostnames, three jobs:
-#   fleet.<zone>    the dashboard (nginx, which also proxies /api)
-#   api.fleet.<zone> the control-plane API directly — for the CLI and agents
-#   *.fleet.<zone>  every deployed service, via the ingress edge
-#
-# The wildcard is what makes a deployed service reachable at the hostname the
-# scheduler assigned it, and it is why INGRESS_ZONE must match this zone.
+# Rules are matched in order and the first match wins, so every specific
+# hostname must come before the wildcard or the wildcard swallows them all.
 
 tunnel: REPLACE_WITH_TUNNEL_ID
 credentials-file: /Users/REPLACE_ME/.cloudflared/REPLACE_WITH_TUNNEL_ID.json
 
-# Cloudflare terminates TLS; these are plain HTTP on the loopback.
+# Edge transport, cloudflared -> Cloudflare. This is a different hop from
+# originRequest below, which is cloudflared -> your local server.
+#
+# QUIC is the default and it is faster where it works. It is also UDP/443,
+# which a lot of home ISPs and captive networks silently drop — the symptom is
+# "failed to dial to edge with quic: timeout: no recent network activity" and
+# a tunnel that never connects. context.txt §3 records exactly this from this
+# domain, so http2 is the default here rather than something to discover.
+protocol: http2
+
+originRequest:
+  # QUIC is faster where it works and unreliable on networks that treat
+  # long-lived UDP as suspicious, which describes a lot of home ISPs. This is
+  # the lesson context.txt §3 records from this very domain.
+  http2Origin: true
+  connectTimeout: 30s
+  # A deploy builds multi-arch images and legitimately takes minutes.
+  noHappyEyeballs: false
+
 ingress:
+  # The marketing site.
   - hostname: fleet.plastikworld.xyz
+    service: http://localhost:8083
+
+  # The dashboard. nginx there also proxies /api, so the browser stays
+  # same-origin and never meets CORS.
+  - hostname: app.fleet.plastikworld.xyz
     service: http://localhost:8082
 
+  # The API directly, for the CLI and for agents.
   - hostname: api.fleet.plastikworld.xyz
     service: http://localhost:8080
 
-  # Every deployed service. The edge resolves the Host header to whichever
-  # node is running that service right now.
+  # Every deployed service. Managed hostnames are a single label
+  # (web-homelab-7efe4c) precisely so one wildcard covers them all.
   - hostname: "*.fleet.plastikworld.xyz"
     service: http://localhost:8081
-    originRequest:
-      # QUIC is faster where it works and unreliable on networks that treat
-      # long-lived UDP as suspicious, which describes a lot of home ISPs.
-      # This is the lesson the tech doc records from plastikworld.xyz itself.
-      http2Origin: true
 
   - service: http_status:404

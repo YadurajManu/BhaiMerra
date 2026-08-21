@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { APP_URL } from '../lib/data'
 import { motion } from 'framer-motion'
 import { EASE } from '../lib/motion'
 import StatusDot from './ui/StatusDot'
@@ -78,7 +79,7 @@ export default function Nav({ onPage = false }) {
             <a href="#/changelog" className="link-draw">v0.9.2 · beta</a>
           </span>
           <a
-            href={onPage ? '#top' : '#pricing'}
+            href={APP_URL}
             className="hidden rounded-[3px] border border-[var(--color-line-2)] px-3.5 py-[7px] font-mono text-[11.5px] sm:inline-block text-[var(--color-fg)] transition-all duration-300 hover:border-[var(--color-signal)] hover:text-[var(--color-signal)]"
           >
             Get started

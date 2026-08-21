@@ -111,6 +111,17 @@ services:
     # nginx serves the SPA and proxies /api to the control plane, so the
     # browser only ever talks to one origin.
 
+  www:
+    build:
+      context: ../www
+      args:
+        VITE_APP_URL: ${APP_URL:-http://localhost:8082}
+    container_name: fleet-www
+    restart: unless-stopped
+    ports:
+      - '${WWW_PORT:-8083}:80'
+    # The marketing site. Static, and the only service here with no state.
+
 volumes:
   pgdata:
   registrydata:

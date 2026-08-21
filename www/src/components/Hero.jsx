@@ -1,4 +1,5 @@
 import { useRef, useState, useEffect, lazy, Suspense } from 'react'
+import { APP_URL } from '../lib/data'
 import { motion, useScroll, useTransform, useReducedMotion } from 'framer-motion'
 import { EASE } from '../lib/motion'
 import { useCanRender3D } from '../lib/useCapability'
@@ -128,7 +129,7 @@ export default function Hero() {
               transition={{ duration: 0.8, ease: EASE.expo, delay: 0.6 }}
               className="mt-8 flex flex-wrap items-center gap-3"
             >
-              <MagneticButton href="#pricing" variant="primary">
+              <MagneticButton href={APP_URL} variant="primary">
                 Get started
                 <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                   <path d="M3 8h9m0 0L8.5 4.5M12 8l-3.5 3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />

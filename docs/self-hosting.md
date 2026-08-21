@@ -58,14 +58,41 @@ REGISTRY_URL=192.168.1.20:5001
 Getting this wrong is the most common setup failure: the control plane pushes
 an image successfully, and then every agent fails to pull it.
 
-Set up the tunnel once:
+### Authorise the zone
+
+`cloudflared`'s certificate is scoped to **one** zone, chosen when you log in.
+If you already use cloudflared for another domain, log in to a separate file
+so the existing certificate survives:
 
 ```bash
-./deploy/cloudflare/setup.sh
+cloudflared tunnel login --origincert ~/.cloudflared/fleet-cert.pem
 ```
 
-It is idempotent — re-running reuses a tunnel of the same name instead of
-creating duplicates.
+This matters more than it looks. Using a certificate for the wrong zone does
+not fail — cloudflared treats the hostname as *relative* and appends its own
+zone, so `fleet.example.com` silently becomes
+`fleet.example.com.otherzone.com`. `setup.sh` detects that and refuses.
+
+```bash
+ORIGINCERT=~/.cloudflared/fleet-cert.pem ./deploy/cloudflare/setup.sh
+```
+
+Idempotent — re-running reuses a tunnel of the same name instead of creating
+duplicates.
+
+### Certificates and subdomain depth
+
+Cloudflare's free Universal SSL covers the apex and **one** level of
+subdomain. `app.fleet.example.com` is two levels deep and has no certificate,
+so it fails TLS in the browser with nothing useful in the error.
+
+Either keep everything one level deep — `fleet.example.com`,
+`fleetapp.example.com`, `fleetapi.example.com` — or buy Advanced Certificate
+Manager ($10/month per zone).
+
+This is also why managed service hostnames are a single label
+(`web-homelab-7efe4c.fleet.example.com`, not `web.homelab-7efe4c.fleet...`):
+one wildcard certificate covers exactly one level.
 
 ## Hostnames
 
@@ -152,6 +179,14 @@ plane, and that `advertiseAddr` on the node is right — override it with
 **`/healthz` says `postgres: false`.** The control plane is up but cannot
 reach the database. Check `POSTGRES_PASSWORD` matches between the two, and
 `docker compose logs control-plane` for the migration line.
+
+**The tunnel will not connect: `failed to dial to edge with quic`.** The
+network is dropping UDP/443. Add `protocol: http2` to the tunnel config — it
+is the default in the shipped one for this reason.
+
+**DNS records appear with two domains stuck together.** The certificate is for
+a different zone. Log in again with `--origincert` for the right one, and
+delete the junk records from the Cloudflare dashboard.
 
 **The tunnel connects but hostnames 404.** `INGRESS_ZONE` and the tunnel
 config disagree. They must be the same zone.
