@@ -40,3 +40,8 @@ Thumbs.db
 *.swp
 .vscode/*
 !.vscode/extensions.json
+
+# tunnel runtime state
+deploy/.tunnel.pid
+deploy/.tunnel.log
+deploy/cloudflare/fleet-os.yml

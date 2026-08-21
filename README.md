@@ -74,19 +74,29 @@ make                        # vet + test + build
 ./dist/fleet-agent -capabilities
 ```
 
-### Public, from your own machine
+### Public, from your own machine — one command
 
 Everything runs locally — Postgres, Redis, registry, control plane, dashboard —
 and Cloudflare Tunnel puts it on the internet without forwarding a port.
 
 ```bash
-cd deploy
-cp .env.example .env          # fill in the secrets
-docker compose up -d --build
-
-./cloudflare/setup.sh         # creates the tunnel and routes DNS
-cloudflared tunnel --config cloudflare/fleet-os.yml run
+./fleet-up.sh
 ```
+
+It preflights first (Docker running, secrets set, tunnel configured), starts
+the stack, waits until the control plane actually answers rather than merely
+started, then attaches the tunnel and prints the URLs.
+
+```
+./fleet-up.sh              start everything
+./fleet-up.sh --no-tunnel  local only
+./fleet-up.sh status       what is running, and where
+./fleet-up.sh logs         follow the control plane
+./fleet-up.sh down         stop everything (data is kept)
+```
+
+First run only: `cp deploy/.env.example deploy/.env`, fill in the secrets, and
+`./deploy/cloudflare/setup.sh`. See [docs/self-hosting.md](docs/self-hosting.md).
 
 Three hostnames, three jobs:
 
