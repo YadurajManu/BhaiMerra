@@ -106,9 +106,8 @@ curl -fsS -m 4 "http://localhost:${REGISTRY_PORT:-5001}/v2/" >/dev/null 2>&1 \
 if [ "$WITH_TUNNEL" = 1 ]; then
   step "cloudflare tunnel"
   stop_tunnel
-  CERT_ARGS=()
-  [ -n "${ORIGINCERT:-}" ] && CERT_ARGS=(--origincert "$ORIGINCERT")
-  cloudflared "${CERT_ARGS[@]}" tunnel --config "$CF_CONFIG" run >"$DEPLOY/.tunnel.log" 2>&1 &
+  [ -n "${ORIGINCERT:-}" ] && export TUNNEL_ORIGIN_CERT="$ORIGINCERT"
+  cloudflared tunnel --config "$CF_CONFIG" run >"$DEPLOY/.tunnel.log" 2>&1 &
   echo $! > "$PIDFILE"
 
   printf "  connecting"

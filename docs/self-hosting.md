@@ -65,13 +65,17 @@ If you already use cloudflared for another domain, log in to a separate file
 so the existing certificate survives:
 
 ```bash
-cloudflared tunnel login --origincert ~/.cloudflared/fleet-cert.pem
+TUNNEL_ORIGIN_CERT=~/.cloudflared/fleet-cert.pem cloudflared tunnel login
 ```
 
 This matters more than it looks. Using a certificate for the wrong zone does
 not fail — cloudflared treats the hostname as *relative* and appends its own
 zone, so `fleet.example.com` silently becomes
 `fleet.example.com.otherzone.com`. `setup.sh` detects that and refuses.
+
+`--origincert` is a flag on `tunnel`, not on `login` and not global, so its
+position on the command line is easy to get wrong. `TUNNEL_ORIGIN_CERT` is the
+same setting without the ambiguity.
 
 ```bash
 ORIGINCERT=~/.cloudflared/fleet-cert.pem ./deploy/cloudflare/setup.sh
