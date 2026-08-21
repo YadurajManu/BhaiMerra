@@ -55,6 +55,28 @@ type Heartbeat struct {
 	AgentVersion  string      `json:"agent_version,omitempty"`
 	AdvertiseAddr string      `json:"advertise_addr,omitempty"`
 	Containers    []Container `json:"containers"`
+	Runtime       Runtime     `json:"runtime"`
+	Logs          []LogTail   `json:"logs"`
+}
+
+// Runtime is deliberately observational. In particular registryStatus becomes
+// "ok" only after reconciliation has completed an authenticated image pull.
+type Runtime struct {
+	DockerAvailable    bool   `json:"docker_available"`
+	DockerVersion      string `json:"docker_version,omitempty"`
+	DockerAPIVersion   string `json:"docker_api_version,omitempty"`
+	DockerError        string `json:"docker_error,omitempty"`
+	RegistryStatus     string `json:"registry_status,omitempty"` // ok | failed | not_tested
+	RegistryError      string `json:"registry_error,omitempty"`
+	LastReconcileError string `json:"last_reconcile_error,omitempty"`
+}
+
+// LogTail is a bounded latest snapshot, never an unbounded stream. It lets
+// the control plane offer live tails without making inbound connections to a
+// private node or storing application output indefinitely.
+type LogTail struct {
+	Service string `json:"service"`
+	Text    string `json:"text"`
 }
 
 type HeartbeatResponse struct {

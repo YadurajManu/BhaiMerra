@@ -372,6 +372,56 @@ export const deploymentsCommand = {
   },
 }
 
+export const restartCommand = {
+  async run(args: string[], flags: Flags) {
+    const fleetId = await requireFleet(typeof flags.fleet === 'string' ? flags.fleet : undefined)
+    const [name] = args
+    if (!name) throw new CliError('usage: fleet restart <service>', EXIT.usage)
+    const service = await findService(fleetId, name)
+    const { body } = await request<{ deployment: { id: string } }>('POST', `/services/${service.id}/restart`, { body: {} })
+    if (flags.json) return console.log(JSON.stringify(body, null, 2))
+    console.log(`${glyph.ok} ${c.green('restart scheduled')}  ${service.name} ${c.dim(body.deployment.id.slice(0, 8))}`)
+    if (!flags['no-wait']) await waitUntilRunning(fleetId, service.name)
+  },
+}
+
+export const rollbackCommand = {
+  async run(args: string[], flags: Flags) {
+    const fleetId = await requireFleet(typeof flags.fleet === 'string' ? flags.fleet : undefined)
+    const [name, deploymentId] = args
+    if (!name) throw new CliError('usage: fleet rollback <service> [deployment-id]', EXIT.usage)
+    const service = await findService(fleetId, name)
+    if (!flags.yes && !flags.y && !(await confirmDeploy())) { console.log(c.dim('Rollback cancelled.')); return }
+    const { body } = await request<{ rolledBackTo: string }>('POST', `/services/${service.id}/rollback`, { body: deploymentId ? { deploymentId } : {} })
+    if (flags.json) return console.log(JSON.stringify(body, null, 2))
+    console.log(`${glyph.ok} ${c.green('rollback scheduled')}  ${service.name} ← ${c.dim(body.rolledBackTo.slice(0, 8))}`)
+    if (!flags['no-wait']) await waitUntilRunning(fleetId, service.name)
+  },
+}
+
+export const logsCommand = {
+  async run(args: string[], flags: Flags) {
+    const fleetId = await requireFleet(typeof flags.fleet === 'string' ? flags.fleet : undefined)
+    const [name] = args
+    if (!name) throw new CliError('usage: fleet logs <service> [--follow] [--since 1h]', EXIT.usage)
+    const service = await findService(fleetId, name)
+    if (flags.since) console.error(c.dim('note: agent log tails are live snapshots; --since is limited to the current retained tail.'))
+    let previous = ''
+    const render = async () => {
+      const { body } = await request<{ lines: string[]; node: { name: string }; diagnostic: string | null }>('GET', `/services/${service.id}/logs`)
+      const next = body.lines.join('\n')
+      if (!next) { if (body.diagnostic) console.log(c.yellow(`waiting: ${body.diagnostic}`)); return }
+      const output = next.startsWith(previous) ? next.slice(previous.length) : next
+      if (output) process.stdout.write(output + (output.endsWith('\n') ? '' : '\n'))
+      previous = next
+    }
+    await render()
+    if (!flags.follow && !flags.f) return
+    if (!process.stdout.isTTY) throw new CliError('--follow needs an interactive terminal', EXIT.usage)
+    while (true) { await sleep(2000); await render() }
+  },
+}
+
 const TEMPLATE = (name: string, hasDockerfile: boolean) => `fleet: homelab
 
 services:

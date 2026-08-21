@@ -105,6 +105,86 @@ export async function serviceRoutes(app: FastifyInstance) {
     }
   )
 
+  /** Latest node-provided log tail. Nodes only make outbound connections, so
+   * this is served from the heartbeat snapshot rather than opening SSH/Docker
+   * ports back into private networks. */
+  app.get(
+    '/services/:serviceId/logs',
+    { preHandler: requireServicePermission('service.read') },
+    async (req) => {
+      const { service } = await loadService(app, req.params as { serviceId: string })
+      const query = z.object({ node: z.string().uuid().optional() }).parse(req.query ?? {})
+      const current = await db
+        .select({ nodeId: deployments.nodeId, nodeName: nodes.name })
+        .from(deployments).leftJoin(nodes, eq(nodes.id, deployments.nodeId))
+        .where(and(eq(deployments.serviceId, service.id), inArray(deployments.status, ['deploying', 'running'])))
+        .orderBy(desc(deployments.startedAt)).limit(1)
+      const target = query.node
+        ? (await db.select({ id: nodes.id, name: nodes.name }).from(nodes).where(eq(nodes.id, query.node)).limit(1))[0]
+        : current[0]?.nodeId ? { id: current[0].nodeId, name: current[0].nodeName ?? 'unknown' } : null
+      if (!target) throw ApiError.unprocessable('logs_unavailable', `No active node for "${service.name}"`)
+      const hb = await app.ctx.heartbeats.last(target.id)
+      const log = hb?.logs?.find((entry) => entry.service === service.name)
+      return {
+        service: service.name,
+        node: { id: target.id, name: target.name },
+        capturedAt: hb ? new Date(hb.at).toISOString() : null,
+        available: Boolean(log),
+        lines: log?.text.split(/\r?\n/).filter(Boolean) ?? [],
+        diagnostic: log ? null : 'The agent has not reported a container log tail yet. Confirm Docker is available and the service has started.',
+      }
+    }
+  )
+
+  /** Restart is an immutable replacement: a new deployment ID asks the agent
+   * to recreate the same artifact, preserving a truthful deployment history. */
+  app.post(
+    '/services/:serviceId/restart',
+    { preHandler: requireServicePermission('service.deploy') },
+    async (req, reply) => {
+      const { service, orgId } = await loadService(app, req.params as { serviceId: string })
+      const [current] = await db.select().from(deployments)
+        .where(and(eq(deployments.serviceId, service.id), inArray(deployments.status, ['deploying', 'running'])))
+        .orderBy(desc(deployments.startedAt)).limit(1)
+      if (!current || !current.nodeId) throw ApiError.unprocessable('not_running', `"${service.name}" has no deployment to restart`)
+      const [created] = await db.transaction(async (tx) => {
+        await tx.update(deployments).set({ status: 'superseded', finishedAt: new Date() }).where(eq(deployments.id, current.id))
+        const created = await tx.insert(deployments).values({ serviceId: service.id, gitSha: current.gitSha, imageTags: current.imageTags, nodeId: current.nodeId, hostPort: current.hostPort, status: 'deploying' }).returning()
+        await recordAudit(tx, { orgId, actorUserId: req.userId, action: 'service.restarted', targetType: 'service', targetId: service.id, metadata: { fromDeployment: current.id, deployment: created[0]!.id } })
+        return created
+      })
+      await invalidateRoutesForService(app.ctx, service.id)
+      return reply.code(201).send({ deployment: created!, note: 'The agent will replace the container on its next reconciliation.' })
+    }
+  )
+
+  /** Roll back to a previously successful artifact. The old release remains
+   * visible and a new deployment records the recovery action. */
+  app.post(
+    '/services/:serviceId/rollback',
+    { preHandler: requireServicePermission('service.deploy') },
+    async (req, reply) => {
+      const body = z.object({ deploymentId: z.string().uuid().optional() }).parse(req.body ?? {})
+      const { service, orgId } = await loadService(app, req.params as { serviceId: string })
+      const history = await db.select().from(deployments).where(eq(deployments.serviceId, service.id)).orderBy(desc(deployments.startedAt)).limit(50)
+      const current = history.find((d) => d.status === 'deploying' || d.status === 'running')
+      const target = body.deploymentId
+        ? history.find((d) => d.id === body.deploymentId)
+        : history.find((d) => d.id !== current?.id && d.status === 'superseded' && d.imageTags.length)
+      if (!target || !target.imageTags.length) throw ApiError.unprocessable('no_rollback_target', `No previous release is available for "${service.name}"`)
+      const nodeId = current?.nodeId ?? target.nodeId
+      if (!nodeId) throw ApiError.unprocessable('no_rollback_target', 'The previous release has no node assignment')
+      const [created] = await db.transaction(async (tx) => {
+        if (current) await tx.update(deployments).set({ status: 'superseded', finishedAt: new Date() }).where(eq(deployments.id, current.id))
+        const created = await tx.insert(deployments).values({ serviceId: service.id, gitSha: target.gitSha, imageTags: target.imageTags, nodeId, hostPort: current?.hostPort ?? target.hostPort, status: 'deploying' }).returning()
+        await recordAudit(tx, { orgId, actorUserId: req.userId, action: 'service.rolled_back', targetType: 'service', targetId: service.id, metadata: { fromDeployment: current?.id, targetDeployment: target.id, deployment: created[0]!.id } })
+        return created
+      })
+      await invalidateRoutesForService(app.ctx, service.id)
+      return reply.code(201).send({ deployment: created!, rolledBackTo: target.id, note: 'The agent will restore this release on its next reconciliation.' })
+    }
+  )
+
   /**
    * Where would this go, and why? Answers the question before a deploy rather
    * than after, and is the same code path the scheduler actually uses.

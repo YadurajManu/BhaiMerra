@@ -207,6 +207,36 @@ first push can create services from that manifest; later pushes apply the
 exact pushed configuration before building and deploying. Disconnecting a
 repository stops future webhook deployments but never deletes a live service.
 
+## Diagnose, inspect logs, and recover
+
+Fleet agents report runtime facts on their normal outbound heartbeat. No
+inbound Docker or SSH port is opened. Start incident response with:
+
+```sh
+fleet doctor
+fleet logs <service> --follow
+fleet deployments <service>
+```
+
+`fleet doctor` shows the daemon/version seen by every agent, the result of the
+last real image pull (including registry authentication failures), disk use,
+and the latest reconciliation error. `fleet logs` is a live, bounded container
+tail; it refreshes every two seconds and is not a retained logging system.
+
+Recovery operations are immutable: they create a new deployment record instead
+of overwriting the old one, so the dashboard timeline remains trustworthy.
+
+```sh
+fleet restart <service>              # recreate the current image on its node
+fleet rollback <service>             # use the most recent earlier release
+fleet rollback <service> <release>   # choose a deployment ID explicitly
+```
+
+Use the Dashboard **Doctor** page for the same node facts, copyable repair
+commands, and the Dashboard **Logs** page to choose a service and view its
+current node tail. The service detail page includes restart/rollback controls
+and a rollback confirmation dialog.
+
 ## Ports
 
 | Port | Service | Exposed |

@@ -133,6 +133,7 @@ export type Node = {
     meshConnected: boolean
     ageMs: number
     containers: Array<{ name: string; state: string; health?: string }>
+    runtime: { dockerAvailable: boolean; dockerVersion?: string; dockerApiVersion?: string; dockerError?: string; registryStatus?: 'ok' | 'failed' | 'not_tested'; registryError?: string; lastReconcileError?: string }
   } | null
 }
 

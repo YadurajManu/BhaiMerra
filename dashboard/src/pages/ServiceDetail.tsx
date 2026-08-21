@@ -30,10 +30,12 @@ export default function ServiceDetail() {
     8000
   )
   const preview = usePoll(() => api<Preview>(`/services/${serviceId}/placement-preview`), [serviceId], 10000)
+  const logs = usePoll(() => api<{ node: { name: string }; lines: string[]; diagnostic: string | null }>(`/services/${serviceId}/logs`), [serviceId], 2000)
 
   const service = services.data?.services.find((s) => s.id === serviceId)
 
   async function act(path: string, key: string) {
+    if (key === 'rollback' && !window.confirm('Roll back to the previous release? The current release will be preserved in deployment history.')) return
     setBusy(key)
     setActionError(null)
     try {
@@ -90,6 +92,12 @@ export default function ServiceDetail() {
                 }
               >
                 {busy === 'move' ? 'moving…' : 'Reschedule'}
+              </Button>
+              <Button onClick={() => void act(`/services/${serviceId}/restart`, 'restart')} disabled={busy !== null}>
+                {busy === 'restart' ? 'restarting…' : 'Restart'}
+              </Button>
+              <Button variant="danger" onClick={() => void act(`/services/${serviceId}/rollback`, 'rollback')} disabled={busy !== null}>
+                {busy === 'rollback' ? 'rolling back…' : 'Rollback'}
               </Button>
             </div>
           )}
@@ -204,6 +212,12 @@ export default function ServiceDetail() {
             </p>
           )}
         </div>
+      </Panel>
+
+      <Panel title={logs.data ? `live log tail · ${logs.data.node.name}` : 'live log tail'}>
+        <pre className="max-h-[360px] overflow-auto p-5 font-mono text-[10.5px] leading-5 text-[var(--color-fg-muted)]">
+          {logs.data?.lines.join('\n') || logs.data?.diagnostic || 'waiting for agent telemetry…'}
+        </pre>
       </Panel>
     </div>
   )

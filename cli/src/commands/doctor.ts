@@ -6,7 +6,7 @@ import type { Flags } from '../args.js'
 
 type CheckState = 'ok' | 'warn' | 'fail'
 type Check = { state: CheckState; label: string; detail: string; remedy?: string }
-type Node = { name: string; status: string; live: boolean; lastHeartbeatAt: string | null; agentVersion: string | null; telemetry: unknown }
+type Node = { name: string; status: string; live: boolean; lastHeartbeatAt: string | null; agentVersion: string | null; diskMb: number; telemetry: { diskUsedMb: number; runtime: { dockerAvailable: boolean; dockerVersion?: string; dockerError?: string; registryStatus?: 'ok' | 'failed' | 'not_tested'; registryError?: string; lastReconcileError?: string } } | null }
 type Service = { id: string; name: string; domain: string | null; hostname: string | null; current: { status: string } | null }
 type Deployment = { status: string; failureReason: string | null; startedAt: string }
 
@@ -33,12 +33,13 @@ export const doctorCommand = {
     const fleetId = await requireFleet(typeof flags.fleet === 'string' ? flags.fleet : undefined)
 
     const result = await task('checking Fleet health', async () => {
-      const [identity, fleet, nodes, services, github] = await Promise.all([
+      const [identity, fleet, nodes, services, github, health] = await Promise.all([
         request<{ user: { email: string } }>('GET', '/auth/me'),
         request<{ fleet: { name: string }; role: string }>('GET', `/fleets/${fleetId}`),
         request<{ nodes: Node[] }>('GET', `/fleets/${fleetId}/nodes`),
         request<{ services: Service[] }>('GET', `/fleets/${fleetId}/services`),
         request<{ configured: boolean; error?: string; installations?: unknown[] }>('GET', `/fleets/${fleetId}/github/status`),
+        request<{ version?: string }>('GET', '/healthz'),
       ])
 
       const deploymentHistory = await Promise.all(
@@ -51,7 +52,7 @@ export const doctorCommand = {
         .map((service) => ({ name: service.name, hostname: service.domain ?? service.hostname }))
         .filter((service): service is { name: string; hostname: string } => Boolean(service.hostname))
       const ingress = await Promise.all(urls.map(async (service) => ({ ...service, ...(await reach(`https://${service.hostname}`)) })))
-      return { identity: identity.body, fleet: fleet.body, nodes: nodes.body.nodes, services: services.body.services, github: github.body, deploymentHistory, ingress }
+      return { identity: identity.body, fleet: fleet.body, nodes: nodes.body.nodes, services: services.body.services, github: github.body, health: health.body, deploymentHistory, ingress }
     })
 
     const checks: Check[] = [
@@ -82,12 +83,14 @@ export const doctorCommand = {
         detail: versions.size ? [...versions].join(', ') : 'agent version not reported',
         remedy: versions.size > 1 ? 'Update nodes so all agents run the same compatible release.' : undefined,
       })
-      checks.push({
-        state: 'warn',
-        label: 'container runtime',
-        detail: 'Remote Docker health is not reported by this agent version.',
-        remedy: 'Fleet will add explicit Docker and registry probes to agent heartbeats; for now inspect the agent log on each affected node.',
-      })
+      for (const node of result.nodes) {
+        const runtime = node.telemetry?.runtime
+        const diskPercent = node.diskMb ? Math.round(((node.telemetry?.diskUsedMb ?? 0) / node.diskMb) * 100) : 0
+        checks.push({ state: runtime?.dockerAvailable ? 'ok' : 'fail', label: `Docker ${node.name}`, detail: runtime?.dockerAvailable ? `available${runtime.dockerVersion ? ` · ${runtime.dockerVersion}` : ''}` : runtime?.dockerError ?? 'No Docker runtime reported', remedy: runtime?.dockerAvailable ? undefined : 'Start Docker, then inspect the local fleet-agent log.' })
+        checks.push({ state: runtime?.registryStatus === 'ok' ? 'ok' : runtime?.registryStatus === 'failed' ? 'fail' : 'warn', label: `registry ${node.name}`, detail: runtime?.registryStatus === 'ok' ? 'latest real image pull succeeded' : runtime?.registryError ?? 'not tested by a real image pull yet', remedy: runtime?.registryStatus === 'ok' ? undefined : 'Use a LAN-reachable REGISTRY_URL, then restart a service to run an authenticated pull.' })
+        checks.push({ state: diskPercent >= 90 ? 'fail' : diskPercent >= 80 ? 'warn' : 'ok', label: `disk ${node.name}`, detail: `${diskPercent}% used`, remedy: diskPercent >= 80 ? 'Free space from Docker images/volumes before the node becomes unschedulable.' : undefined })
+        if (runtime?.lastReconcileError) checks.push({ state: 'fail', label: `reconcile ${node.name}`, detail: runtime.lastReconcileError, remedy: 'Run `fleet logs <service> --follow` and inspect the deployment history.' })
+      }
     }
 
     const failed = result.deploymentHistory.flatMap(({ service, deployments }) =>
@@ -99,7 +102,7 @@ export const doctorCommand = {
             state: 'fail',
             label: 'deployments',
             detail: failed.map(({ service, deployment }) => `${service}: ${deployment.failureReason ?? deployment.status}`).join('; '),
-            remedy: 'Run `fleet deployments <service>` for history. Centralized `fleet logs` is the next diagnostic surface.',
+            remedy: 'Run `fleet deployments <service>` for history and `fleet logs <service> --follow` for the current container tail.',
           }
         : { state: 'ok', label: 'deployments', detail: result.services.length ? 'No recorded deployment failures.' : 'No services declared yet.' }
     )
@@ -127,12 +130,7 @@ export const doctorCommand = {
             remedy: 'Set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY, restart the control plane, then connect repositories in Dashboard → Settings.',
           }
     )
-    checks.push({
-      state: 'warn',
-      label: 'registry and secrets',
-      detail: 'Agent-side registry reachability and a secret inventory are not yet exposed to doctor.',
-      remedy: 'Use a registry address reachable from every node—not localhost. The next agent telemetry release will verify this automatically.',
-    })
+    checks.push({ state: 'ok', label: 'control-plane version', detail: result.health.version ?? 'version not reported' })
 
     if (flags.json) return console.log(JSON.stringify({ fleetId, checks }, null, 2))
     console.log(`\n${rule(`doctor · ${result.fleet.fleet.name}`)}`)

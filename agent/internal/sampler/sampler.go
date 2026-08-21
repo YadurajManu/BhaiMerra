@@ -18,17 +18,24 @@ type ContainerLister interface {
 	List(ctx context.Context) ([]client.Container, error)
 }
 
-type Host struct {
-	Version    string
-	Containers ContainerLister
-	totalRAMMb int
+type Diagnostics interface {
+	Snapshot(context.Context) client.Runtime
+	Logs() []client.LogTail
 }
 
-func New(version string, containers ContainerLister) *Host {
+type Host struct {
+	Version     string
+	Containers  ContainerLister
+	Diagnostics Diagnostics
+	totalRAMMb  int
+}
+
+func New(version string, containers ContainerLister, diagnostics Diagnostics) *Host {
 	return &Host{
-		Version:    version,
-		Containers: containers,
-		totalRAMMb: capability.Detect(version).RAMMb,
+		Version:     version,
+		Containers:  containers,
+		Diagnostics: diagnostics,
+		totalRAMMb:  capability.Detect(version).RAMMb,
 	}
 }
 
@@ -40,6 +47,9 @@ func (h *Host) Sample(ctx context.Context) (client.Heartbeat, error) {
 		AgentVersion:  h.Version,
 		AdvertiseAddr: capability.AdvertiseAddr(),
 		Containers:    []client.Container{},
+	}
+	if h.Diagnostics != nil {
+		hb.Runtime, hb.Logs = h.Diagnostics.Snapshot(ctx), h.Diagnostics.Logs()
 	}
 
 	if h.Containers != nil {

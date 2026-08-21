@@ -249,9 +249,10 @@ service that is down prints CRITICAL above the table, because that is the one
 case a human has to act on.
 
 `fleet doctor` is the read-only first response when something looks wrong. It
-checks the signed-in account, fleet access, live nodes, agent-version drift,
-deployment failures, public HTTPS reachability, and GitHub App status. Every
-warning says what Fleet cannot yet observe rather than claiming a check passed.
+checks the signed-in account, fleet access, live nodes, Docker daemon/version,
+real registry-pull results, disk pressure, reconciliation failures, deployment
+failures, public HTTPS reachability, and GitHub App status. Every warning says
+what Fleet cannot yet observe rather than claiming a check passed.
 `fleet deploy <service>` shows its candidate node, placement reason, and
 service URL before asking for confirmation; use `--plan` for a no-change
 preview or `--yes` in automation.
@@ -351,8 +352,6 @@ verified before an incident rather than during one.
 
 ## Known gaps
 
-- The Docker module is stubbed. `sampler.New(version, nil)` reports no
-  containers; the interface is in place, the implementation is Phase 2.
 - `connectivity` is reported as `unknown` rather than guessed — a wrong value
   would make the control plane pick the wrong ingress path.
 - No git webhook yet: deploys are triggered through the API, and the build
@@ -362,8 +361,9 @@ verified before an incident rather than during one.
   at a public URL — that is Phase 4 (mesh, tunnels, TLS).
 - Email alerts are an interface with no provider wired in; webhook, Discord
   and Slack deliver for real.
-- `fleet logs` is not built yet. The agent can already read container logs;
-  shipping and aggregating them centrally is the remaining half.
+- `fleet logs <service> --follow` exposes a bounded, live agent-reported tail.
+  It is intentionally not durable log storage; use an external log sink for
+  retention, search, or compliance.
 - Concurrent control planes (PRD 7.5 HA) are safe for *detection* — marking a
   node down is a single conditional UPDATE ... RETURNING, so only one instance
   gets the row — but two instances rescheduling different downed nodes at the

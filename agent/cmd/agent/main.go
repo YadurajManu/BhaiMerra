@@ -19,6 +19,7 @@ import (
 
 	"github.com/fleet-os/fleet-os/agent/internal/capability"
 	"github.com/fleet-os/fleet-os/agent/internal/client"
+	"github.com/fleet-os/fleet-os/agent/internal/diagnostics"
 	"github.com/fleet-os/fleet-os/agent/internal/docker"
 	"github.com/fleet-os/fleet-os/agent/internal/heartbeat"
 	"github.com/fleet-os/fleet-os/agent/internal/reconcile"
@@ -38,7 +39,7 @@ func main() {
 
 func run() error {
 	var (
-		controlPlane = flag.String("control-plane", envOr("FLEET_CONTROL_PLANE", "https://api.fleet-os.dev"), "control plane base URL")
+		controlPlane = flag.String("control-plane", envOr("FLEET_CONTROL_PLANE", "https://fleetapi.plastikworld.xyz"), "control plane base URL")
 		pairingToken = flag.String("token", os.Getenv("FLEET_PAIRING_TOKEN"), "single-use pairing token (first run only)")
 		statePath    = flag.String("state", state.DefaultPath(), "path to the agent state file")
 		logLevel     = flag.String("log-level", envOr("FLEET_LOG_LEVEL", "info"), "debug|info|warn|error")
@@ -93,6 +94,7 @@ func run() error {
 	}
 
 	dockerClient := docker.New()
+	reporter := diagnostics.New(dockerClient)
 	engine := &reconcile.Engine{
 		Docker: dockerClient,
 		Client: api,
@@ -111,14 +113,14 @@ func run() error {
 
 	loop := &heartbeat.Loop{
 		Client:   api,
-		Sampler:  sampler.New(Version, engine),
+		Sampler:  sampler.New(Version, engine, reporter),
 		Interval: interval,
 		Log:      log,
 	}
 
 	// Reconciliation runs alongside the heartbeat rather than inside it, so a
 	// slow image pull never delays liveness and get the node marked down.
-	go runReconciler(ctx, engine, api, interval, log)
+	go runReconciler(ctx, engine, api, reporter, interval, log)
 
 	log.Info("agent started",
 		"version", Version,
@@ -177,7 +179,7 @@ func register(ctx context.Context, log *slog.Logger, controlPlane, token, stateP
 // Losing the control plane is not fatal (PRD §9): already-running containers
 // keep serving, and the agent simply retries. It never stops workloads because
 // it cannot reach the control plane.
-func runReconciler(ctx context.Context, engine *reconcile.Engine, api *client.Client, interval time.Duration, log *slog.Logger) {
+func runReconciler(ctx context.Context, engine *reconcile.Engine, api *client.Client, reporter *diagnostics.Reporter, interval time.Duration, log *slog.Logger) {
 	period := interval * 2
 	if period < 5*time.Second {
 		period = 5 * time.Second
@@ -195,15 +197,20 @@ func runReconciler(ctx context.Context, engine *reconcile.Engine, api *client.Cl
 
 		desired, err := api.DesiredState(ctx)
 		if err != nil {
+			reporter.ObserveReconcile(nil, err)
 			log.Debug("could not fetch desired state, keeping current workloads", "err", err)
 			continue
 		}
 
 		actions, err := engine.Reconcile(ctx, desired)
+		reporter.ObserveReconcile(actions, err)
 		if err != nil {
 			log.Warn("reconcile failed", "err", err)
 			continue
 		}
+		logCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		reporter.CaptureLogs(logCtx, desired)
+		cancel()
 
 		for _, a := range actions {
 			if a.Verb == "unchanged" {

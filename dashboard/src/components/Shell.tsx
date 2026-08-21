@@ -8,6 +8,8 @@ const NAV = [
   ['Services', '/services'],
   ['Events', '/events'],
   ['Alerts', '/alerts'],
+  ['Doctor', '/doctor'],
+  ['Logs', '/logs'],
   ['Settings', '/settings'],
 ] as const
 

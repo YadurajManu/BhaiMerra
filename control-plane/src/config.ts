@@ -17,6 +17,8 @@ const schema = z.object({
     }),
   HEARTBEAT_INTERVAL_SEC: z.coerce.number().int().min(1).max(300).default(5),
   HEARTBEAT_MISS_THRESHOLD: z.coerce.number().int().min(1).max(20).default(3),
+  /** Publicly reported to agents and diagnostics; set during release builds. */
+  CONTROL_PLANE_VERSION: z.string().max(32).default('0.1.0'),
   REGISTRY_URL: z.string().optional(),
   REGISTRY_CREDENTIALS: z.string().optional(),
   BUILDX_BUILDER: z.string().optional(),

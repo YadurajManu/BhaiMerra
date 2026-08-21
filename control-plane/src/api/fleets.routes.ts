@@ -93,6 +93,7 @@ export async function fleetRoutes(app: FastifyInstance) {
                   diskUsedMb: hb.diskUsedMb,
                   containers: hb.containers,
                   meshConnected: hb.meshConnected,
+                  runtime: hb.runtime ?? { dockerAvailable: false, registryStatus: 'not_tested' },
                   ageMs: Date.now() - hb.at,
                 }
               : null,
@@ -350,6 +351,7 @@ export async function fleetRoutes(app: FastifyInstance) {
       redis: redisOk.status === 'fulfilled',
       heartbeat_interval_sec: config.HEARTBEAT_INTERVAL_SEC,
       heartbeat_miss_threshold: config.HEARTBEAT_MISS_THRESHOLD,
+      version: config.CONTROL_PLANE_VERSION,
     }
   })
 }
