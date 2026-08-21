@@ -48,7 +48,11 @@ export const nodesCommand = {
     if (sub === 'pair') {
       const { body } = await request<{ token: string; expires_at: string; install_command: string }>(
         'POST',
-        `/fleets/${fleetId}/nodes/pair-token`
+        `/fleets/${fleetId}/nodes/pair-token`,
+        // Fastify requires a recognised media type for a POST. Supplying an
+        // explicit empty JSON object keeps this body-less operation portable
+        // through proxies and avoids Node fetch's implicit text/plain type.
+        { body: {} }
       )
       if (flags.json) return console.log(JSON.stringify(body, null, 2))
       console.log(`Run this on the machine you want to add:\n`)
