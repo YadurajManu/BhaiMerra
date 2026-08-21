@@ -167,6 +167,35 @@ export const pairingTokens = pgTable(
   (t) => [uniqueIndex('pairing_tokens_hash_key').on(t.tokenHash)]
 )
 
+/**
+ * A repository deliberately connected to one fleet. This is distinct from a
+ * service's repoUrl: it lets a first push create services from fleet.yaml,
+ * and retains the selected GitHub account, branch and manifest location.
+ */
+export const githubRepositories = pgTable(
+  'github_repositories',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    fleetId: uuid('fleet_id')
+      .notNull()
+      .references(() => fleets.id, { onDelete: 'cascade' }),
+    installationId: text('installation_id'),
+    account: text('account').notNull(),
+    fullName: text('full_name').notNull(),
+    cloneUrl: text('clone_url').notNull(),
+    defaultBranch: text('default_branch').notNull(),
+    branch: text('branch').notNull(),
+    manifestPath: text('manifest_path').notNull().default('fleet.yaml'),
+    isPrivate: boolean('is_private').notNull().default(false),
+    createdByUserId: uuid('created_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('github_repositories_fleet_full_name_key').on(t.fleetId, t.fullName),
+    index('github_repositories_fleet_idx').on(t.fleetId),
+  ]
+)
+
 /* ── workloads ─────────────────────────────────────────────────── */
 
 export const services = pgTable(

@@ -199,6 +199,14 @@ webhook endpoint. A push then fetches that commit, applies its root
 `fleet.yaml`, builds the configured services, and deploys them. Never commit
 the private key or webhook secret.
 
+Once configured, **Settings → GitHub workspace** provides the day-to-day
+connection flow: select one of the App's installed GitHub accounts, filter the
+repositories it can access, then explicitly connect a repository to a fleet.
+For each connection you choose a watched branch and the manifest path. The
+first push can create services from that manifest; later pushes apply the
+exact pushed configuration before building and deploying. Disconnecting a
+repository stops future webhook deployments but never deletes a live service.
+
 ## Ports
 
 | Port | Service | Exposed |
