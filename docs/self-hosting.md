@@ -121,6 +121,22 @@ fleet nodes pair
 Run the printed line on the machine you want to add. The token is single-use
 and expires in ten minutes.
 
+The control plane serves its own installer and agent binaries — a self-hosted
+install has no CDN behind it, so the command it prints points at *your* server,
+not at a download host that only exists for the hosted product:
+
+```
+curl -fsSL https://fleetapi.example.com/install | sh -s -- --token flp_...
+```
+
+Build the binaries it serves with:
+
+```bash
+make -C agent dist
+```
+
+`GET /install/manifest` lists what your control plane can currently hand out.
+
 Agents reach the control plane at `api.fleet.<zone>`, so they work from
 anywhere. **Ingress reaches agents by their address**, which today means the
 control plane and the nodes need to be on the same network. A node in another

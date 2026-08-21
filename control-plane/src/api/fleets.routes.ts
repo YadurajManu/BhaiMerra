@@ -7,6 +7,7 @@ import { recordAudit } from '../lib/audit.js'
 import { ApiError } from './errors.js'
 import { requireUser, requireFleetPermission, invalidateAgentAuth } from './guards.js'
 import { dispatchEvent } from '../alerting/dispatch.js'
+import { publicOrigin } from './install.routes.js'
 import { FLEET_EVENTS } from '../lib/events.js'
 
 const PAIRING_TTL_MIN = 10
@@ -133,7 +134,10 @@ export async function fleetRoutes(app: FastifyInstance) {
         // Returned once. Only the hash is stored.
         token,
         expires_at: expiresAt.toISOString(),
-        install_command: `curl -fsSL fleet-os.dev/install | sh -s -- --token ${token}`,
+        // Built from the address the caller actually reached us on. Hardcoding
+        // a domain here handed self-hosters a command pointing at a host that
+        // does not resolve for them.
+        install_command: `curl -fsSL ${publicOrigin(req)}/install | sh -s -- --token ${token}`,
       })
     }
   )

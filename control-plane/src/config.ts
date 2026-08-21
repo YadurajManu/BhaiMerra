@@ -25,6 +25,10 @@ const schema = z.object({
   BUILD_TIMEOUT_MS: z.coerce.number().int().default(20 * 60_000),
   /** Differs between source (src/db/migrations) and the built image. */
   MIGRATIONS_DIR: z.string().default('src/db/migrations'),
+  /** Served at /install, with this control plane's address substituted in. */
+  INSTALL_SCRIPT_PATH: z.string().default('../scripts/install.sh'),
+  /** Cross-compiled agent binaries, served at /install/fleet-agent-<os>-<arch>. */
+  AGENT_BIN_DIR: z.string().default('../agent/dist'),
   PORT: z.coerce.number().int().default(8080),
   /** Public edge. Separate listener from the API, which is not internet-facing. */
   INGRESS_PORT: z.coerce.number().int().default(8081),

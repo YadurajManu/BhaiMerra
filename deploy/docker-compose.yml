@@ -83,6 +83,8 @@ services:
       REGISTRY_URL: ${REGISTRY_URL:?set REGISTRY_URL to a host:port your agents can reach}
       BUILDX_BUILDER: ${BUILDX_BUILDER:-}
       BUILD_WORKDIR: /var/lib/fleet-os/builds
+      INSTALL_SCRIPT_PATH: /app/install/install.sh
+      AGENT_BIN_DIR: /app/install/bin
       INGRESS_ZONE: ${INGRESS_ZONE:-fleetos.app}
       INGRESS_PORT: '8081'
       HEARTBEAT_INTERVAL_SEC: ${HEARTBEAT_INTERVAL_SEC:-5}
@@ -93,6 +95,10 @@ services:
       - '${INGRESS_PORT:-8081}:8081'  # public edge
     volumes:
       - builds:/var/lib/fleet-os/builds
+      # The installer and the cross-compiled agents, served at /install so a
+      # self-hosted control plane needs no CDN behind it.
+      - ../scripts/install.sh:/app/install/install.sh:ro
+      - ../agent/dist:/app/install/bin:ro
       # Multi-arch builds run through the host's Docker rather than a daemon
       # inside this container. This is a privileged mount: anything that can
       # write to it can control the host's Docker. Drop it if you only ever
@@ -121,6 +127,20 @@ services:
     ports:
       - '${WWW_PORT:-8083}:80'
     # The marketing site. Static, and the only service here with no state.
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: fleet-tunnel
+    # Supervised. Run as a bare background process it exits after a few failed
+    # reconnects and the site goes down with nothing watching.
+    restart: unless-stopped
+    depends_on:
+      control-plane: { condition: service_healthy }
+    command: tunnel --config /etc/cloudflared/config.yml run
+    volumes:
+      - ./cloudflare/fleet-os.yml:/etc/cloudflared/config.yml:ro
+      - ${TUNNEL_CREDENTIALS:?set TUNNEL_CREDENTIALS in .env}:/etc/cloudflared/credentials.json:ro
+    profiles: ['tunnel']
 
 volumes:
   pgdata:

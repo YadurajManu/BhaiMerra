@@ -7,8 +7,8 @@
 # both have bash, and an installer is a bad place to discover that.
 set -eu
 
-CONTROL_PLANE="${FLEET_CONTROL_PLANE:-https://api.fleet-os.dev}"
-DOWNLOAD_BASE="${FLEET_DOWNLOAD_BASE:-https://dl.fleet-os.dev}"
+CONTROL_PLANE="${FLEET_CONTROL_PLANE:-https://api.fleet-os.dev}"   # rewritten by GET /install
+DOWNLOAD_BASE="${FLEET_DOWNLOAD_BASE:-https://dl.fleet-os.dev}"   # rewritten by GET /install
 VERSION="${FLEET_VERSION:-latest}"
 TOKEN="${FLEET_PAIRING_TOKEN:-}"
 BIN_DIR="${FLEET_BIN_DIR:-/usr/local/bin}"
@@ -66,7 +66,10 @@ else die "neither curl nor wget is available"
 fi
 
 asset="fleet-agent-${os}-${arch}"
-url="${DOWNLOAD_BASE}/${VERSION}/${asset}"
+case "$DOWNLOAD_BASE" in
+  */install) url="${DOWNLOAD_BASE}/${asset}" ;;      # self-hosted control plane
+  *)         url="${DOWNLOAD_BASE}/${VERSION}/${asset}" ;;
+esac
 
 echo "fleet-os: installing agent (${os}/${arch}, ${VERSION})"
 
@@ -79,7 +82,7 @@ $fetch "$url" > "$tmp/fleet-agent" || die "download failed: $url"
 # Verify against the published checksums when they are reachable. A failed
 # checksum aborts; an unreachable checksum file only warns, so a temporary
 # CDN problem does not block an install.
-if $fetch "${DOWNLOAD_BASE}/${VERSION}/SHA256SUMS" > "$tmp/SHA256SUMS" 2>/dev/null; then
+if $fetch "$(dirname "$url")/SHA256SUMS" > "$tmp/SHA256SUMS" 2>/dev/null; then
   expected=$(grep " ${asset}\$" "$tmp/SHA256SUMS" | awk '{print $1}')
   if [ -n "$expected" ]; then
     if have sha256sum; then actual=$(sha256sum "$tmp/fleet-agent" | awk '{print $1}')

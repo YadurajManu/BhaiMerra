@@ -13,7 +13,17 @@
 # fails TLS in the browser with nothing useful in the error.
 
 tunnel: REPLACE_WITH_TUNNEL_ID
-credentials-file: /Users/REPLACE_ME/.cloudflared/REPLACE_WITH_TUNNEL_ID.json
+credentials-file: /etc/cloudflared/credentials.json
+
+# Origins are compose service names, not localhost: the tunnel runs as a
+# container beside them, so it reaches them on the compose network and the
+# public path needs no published host port at all.
+
+# Keep reconnecting. cloudflared gives up after a few attempts by default and
+# exits, which takes the site down silently — the container restart policy is
+# the backstop, this is the first line of defence.
+retries: 20
+grace-period: 30s
 
 # Edge transport, cloudflared -> Cloudflare. A different hop from
 # originRequest below, which is cloudflared -> your local server.
@@ -32,16 +42,16 @@ originRequest:
 ingress:
   # The marketing site.
   - hostname: fleet.REPLACE_ZONE
-    service: http://localhost:8083
+    service: http://www:80
 
   # The dashboard. Its nginx also proxies /api, so the browser stays
   # same-origin and never meets CORS.
   - hostname: fleetapp.REPLACE_ZONE
-    service: http://localhost:8082
+    service: http://dashboard:80
 
   # The API directly, for the CLI and for agents.
   - hostname: fleetapi.REPLACE_ZONE
-    service: http://localhost:8080
+    service: http://control-plane:8080
 
   # Every deployed service. Managed hostnames are a single label
   # (web-homelab-7efe4c) precisely so this one wildcard covers them all.
@@ -49,6 +59,6 @@ ingress:
   # Explicit records on the zone still win over a wildcard, so anything else
   # already on plastikworld.xyz keeps working.
   - hostname: "*.REPLACE_ZONE"
-    service: http://localhost:8081
+    service: http://control-plane:8081
 
   - service: http_status:404
