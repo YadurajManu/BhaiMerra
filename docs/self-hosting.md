@@ -112,7 +112,7 @@ one wildcard certificate covers exactly one level.
 | | |
 | --- | --- |
 | `fleet.<zone>` | dashboard (nginx, which also proxies `/api`) |
-| `api.fleet.<zone>` | control-plane API, for the CLI and agents |
+| `fleetapi.<zone>` | control-plane API, for the CLI and agents |
 | `*.fleet.<zone>` | every deployed service |
 
 The wildcard is what lets a deploy hand back a working URL without writing
@@ -146,7 +146,7 @@ make -C agent dist
 
 `GET /install/manifest` lists what your control plane can currently hand out.
 
-Agents reach the control plane at `api.fleet.<zone>`, so they work from
+Agents reach the control plane at `fleetapi.<zone>`, so they work from
 anywhere. **Ingress reaches agents by their address**, which today means the
 control plane and the nodes need to be on the same network. A node in another
 building needs the reverse tunnel in [ADR 0001](adr/0001-mesh-and-ingress.md).

@@ -81,7 +81,7 @@ export const FEATURES = [
     tag: 'resilience',
     title: 'Failover and reclaim policy',
     body: 'Heartbeat TTL in Redis detects a dark node without polling. Rescheduling is automatic for flexible services; reclaim behaviour when the node returns is yours to declare.',
-    points: ['Configurable heartbeat window', 'Drift detection', 'reclaim: eager | idle | never'],
+    points: ['Configurable heartbeat window', 'Drift detection', 'reclaim: eager | idle | manual'],
     span: 'md',
   },
   {

@@ -103,7 +103,7 @@ Three hostnames, three jobs:
 | | |
 | --- | --- |
 | `fleet.<zone>` | the dashboard (nginx, which also proxies `/api`) |
-| `api.fleet.<zone>` | the control-plane API, for the CLI and agents |
+| `fleetapi.<zone>` | the control-plane API, for the CLI and agents |
 | `*.fleet.<zone>` | every deployed service, via the ingress edge |
 
 The wildcard is what makes a deployed service reachable at the hostname the
