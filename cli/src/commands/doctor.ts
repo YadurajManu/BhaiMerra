@@ -16,7 +16,9 @@ const icon = (state: CheckState) =>
 async function reach(url: string): Promise<{ ok: boolean; detail: string }> {
   try {
     const response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(8_000) })
-    return { ok: true, detail: `HTTPS answered ${response.status}` }
+    return response.status >= 200 && response.status < 400
+      ? { ok: true, detail: `HTTPS answered ${response.status}` }
+      : { ok: false, detail: `HTTPS answered ${response.status}` }
   } catch (error) {
     return { ok: false, detail: error instanceof Error ? error.message : String(error) }
   }
@@ -86,6 +88,19 @@ export const doctorCommand = {
       for (const node of result.nodes) {
         const runtime = node.telemetry?.runtime
         const diskPercent = node.diskMb ? Math.round(((node.telemetry?.diskUsedMb ?? 0) / node.diskMb) * 100) : 0
+        // Redis intentionally retains the last heartbeat briefly, but a node
+        // that has stopped reporting must not have old host facts rendered as
+        // current failures. The heartbeat check above is the only actionable
+        // check until the agent resumes.
+        if (!node.live || !node.telemetry) {
+          checks.push({
+            state: 'warn',
+            label: `runtime ${node.name}`,
+            detail: 'Unavailable because this node is not reporting a current heartbeat.',
+            remedy: 'Restart the agent, then run `fleet doctor` again for live Docker, registry, and disk checks.',
+          })
+          continue
+        }
         checks.push({ state: runtime?.dockerAvailable ? 'ok' : 'fail', label: `Docker ${node.name}`, detail: runtime?.dockerAvailable ? `available${runtime.dockerVersion ? ` · ${runtime.dockerVersion}` : ''}` : runtime?.dockerError ?? 'No Docker runtime reported', remedy: runtime?.dockerAvailable ? undefined : 'Start Docker, then inspect the local fleet-agent log.' })
         checks.push({ state: runtime?.registryStatus === 'ok' ? 'ok' : runtime?.registryStatus === 'failed' ? 'fail' : 'warn', label: `registry ${node.name}`, detail: runtime?.registryStatus === 'ok' ? 'latest real image pull succeeded' : runtime?.registryError ?? 'not tested by a real image pull yet', remedy: runtime?.registryStatus === 'ok' ? undefined : 'Use a LAN-reachable REGISTRY_URL, then restart a service to run an authenticated pull.' })
         checks.push({ state: diskPercent >= 90 ? 'fail' : diskPercent >= 80 ? 'warn' : 'ok', label: `disk ${node.name}`, detail: `${diskPercent}% used`, remedy: diskPercent >= 80 ? 'Free space from Docker images/volumes before the node becomes unschedulable.' : undefined })
