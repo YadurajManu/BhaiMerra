@@ -56,16 +56,31 @@ export async function request<T = any>(
 
   // Access tokens are short-lived; refresh once and retry rather than making
   // the user log in again mid-command.
-  if (res.status === 401 && profile.refreshToken) {
-    const refreshed = await fetch(profile.api.replace(/\/+$/, '') + '/auth/refresh', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ refreshToken: profile.refreshToken }),
-    })
-    if (refreshed.ok) {
-      const tokens = (await refreshed.json()) as { accessToken: string; refreshToken: string }
-      await saveProfile({ ...profile, ...tokens })
-      res = await send(tokens.accessToken)
+  if (res.status === 401) {
+    if (profile.refreshToken) {
+      try {
+        const refreshed = await fetch(profile.api.replace(/\/+$/, '') + '/auth/refresh', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ refreshToken: profile.refreshToken }),
+          signal: AbortSignal.timeout(15_000),
+        })
+        if (refreshed.ok) {
+          const tokens = (await refreshed.json()) as { accessToken: string; refreshToken: string }
+          await saveProfile({ ...profile, ...tokens })
+          res = await send(tokens.accessToken)
+        }
+      } catch {
+        // Fall through to a deliberate, actionable session-expired message.
+        // A network error while refreshing must not turn into a misleading
+        // "invalid token" response from the original request.
+      }
+    }
+    if (res.status === 401) {
+      throw new CliError(
+        'Your Fleet session has expired. Run `fleet auth login` to sign in again.',
+        EXIT.usage
+      )
     }
   }
 
