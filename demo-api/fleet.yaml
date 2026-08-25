@@ -3,7 +3,8 @@ fleet: homelab
 services:
   demo-api:
     image: nginx:1.27-alpine
-    placement: flexible
+    placement: pinned
+    node: vattyji
     resources: { ram: 128Mi, cpu: 0.2 }
     health: { path: / }
     container_port: 80

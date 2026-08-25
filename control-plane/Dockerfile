@@ -46,8 +46,10 @@ ENV MIGRATIONS_DIR=/app/dist/src/db/migrations
 EXPOSE 8080 8081
 
 # Not root: ingress makes this process reachable from the internet.
-RUN groupadd -r fleet && useradd -m -r -g fleet fleet \
+RUN groupadd -r fleet && useradd -m -r -g fleet -G root fleet \
  && mkdir -p /var/lib/fleet-os/builds /home/fleet/.docker && chown -R fleet:fleet /var/lib/fleet-os /home/fleet
+USER root
+RUN chmod 666 /var/run/docker.sock 2>/dev/null || true
 USER fleet
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=40s --retries=5 \

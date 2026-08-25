@@ -103,13 +103,6 @@ fi
 
 banner
 
-# ── preflight ───────────────────────────────────────────────────────
-if [ "$os" = linux ] && ! have docker; then
-  warn "docker not found on PATH"
-  printf "     ${DIM}the agent will register but cannot run workloads${RESET_C}\n"
-  printf "     ${DIM}until a container runtime is installed${RESET_C}\n"
-fi
-
 SUDO=""
 if [ "$(id -u)" -ne 0 ]; then
   have sudo || die "not running as root and sudo is unavailable; re-run as root"
@@ -119,6 +112,39 @@ fi
 if have curl; then fetch="curl -fsSL"
 elif have wget; then fetch="wget -qO-"
 else die "neither curl nor wget is available"
+fi
+
+# ── preflight & runtime setup ───────────────────────────────────────
+if [ "$os" = linux ]; then
+  if ! have docker; then
+    step "runtime setup"
+    info "docker was not found — installing Docker automatically..."
+    if [ -n "$fetch" ]; then
+      $fetch https://get.docker.com | $SUDO sh 2>/dev/null || {
+        if have apt-get; then
+          $SUDO apt-get update -y && $SUDO apt-get install -y docker.io
+        elif have yum; then
+          $SUDO yum install -y docker
+        elif have dnf; then
+          $SUDO dnf install -y docker
+        fi
+      }
+    fi
+  fi
+
+  if have systemctl; then
+    if ! systemctl is-active --quiet docker 2>/dev/null; then
+      $SUDO systemctl enable --now docker 2>/dev/null || true
+    fi
+  elif have service; then
+    $SUDO service docker start 2>/dev/null || true
+  fi
+
+  if have docker; then
+    info "docker container runtime is active"
+  else
+    warn "docker not found on PATH — workloads will wait until docker is installed"
+  fi
 fi
 
 asset="fleet-agent-${os}-${arch}"
