@@ -256,14 +256,15 @@ export async function agentRoutes(app: FastifyInstance) {
       }
     }
 
-    // A node that was marked down and is beating again comes back here rather
-    // than waiting for the sweeper, so recovery is as fast as failure.
-    const wasDown = await redis.getdel(`node:${nodeId}:down`)
-    if (wasDown) {
-      await db
-        .update(nodes)
-        .set({ status: 'online', lastHeartbeatAt: new Date() })
-        .where(and(eq(nodes.id, nodeId), eq(nodes.status, 'offline')))
+    // A node that was marked down and is beating again comes back here immediately.
+    const [recovered] = await db
+      .update(nodes)
+      .set({ status: 'online', lastHeartbeatAt: new Date() })
+      .where(and(eq(nodes.id, nodeId), eq(nodes.status, 'offline')))
+      .returning({ id: nodes.id, name: nodes.name })
+
+    if (recovered) {
+      await redis.del(`node:${nodeId}:down`)
       req.log.info({ nodeId }, 'node recovered')
 
       // FR-9: apply the reclaim policy now that it is back. Failures here
@@ -276,6 +277,11 @@ export async function agentRoutes(app: FastifyInstance) {
       } catch (err) {
         req.log.error({ err, nodeId }, 'reclaim failed after node returned')
       }
+    } else {
+      await db
+        .update(nodes)
+        .set({ lastHeartbeatAt: new Date() })
+        .where(eq(nodes.id, nodeId))
     }
 
     return { ok: true, interval_sec: app.ctx.config.HEARTBEAT_INTERVAL_SEC }
