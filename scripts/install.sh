@@ -18,18 +18,19 @@ ADVERTISE_ADDR="${FLEET_ADVERTISE_ADDR:-}"
 CONFIGURE=0
 
 # ── colors ──────────────────────────────────────────────────────────
+ESC=$(printf '\033')
 if [ -t 1 ]; then
-  GREEN='\033[32m' CYAN='\033[36m' DIM='\033[2m' BOLD='\033[1m'
-  RED='\033[31m' YELLOW='\033[33m' RESET_C='\033[0m'
+  GREEN="${ESC}[32m" CYAN="${ESC}[36m" DIM="${ESC}[2m" BOLD="${ESC}[1m"
+  RED="${ESC}[31m" YELLOW="${ESC}[33m" RESET_C="${ESC}[0m"
 else
   GREEN='' CYAN='' DIM='' BOLD='' RED='' YELLOW='' RESET_C=''
 fi
 
-info()  { printf "  ${GREEN}✔${RESET_C}  %s\n" "$*"; }
-warn()  { printf "  ${YELLOW}▲${RESET_C}  %s\n" "$*"; }
-fail()  { printf "  ${RED}✖${RESET_C}  %s\n" "$*" >&2; exit 1; }
-step()  { printf "\n${DIM}── %s ─────────────────────────────────────────────${RESET_C}\n" "$*"; }
-kv()    { printf "     ${DIM}%-16s${RESET_C} %s\n" "$1" "$2"; }
+info()  { printf "  %s✔%s  %s\n" "$GREEN" "$RESET_C" "$*"; }
+warn()  { printf "  %s▲%s  %s\n" "$YELLOW" "$RESET_C" "$*"; }
+fail()  { printf "  %s✖%s  %s\n" "$RED" "$RESET_C" "$*" >&2; exit 1; }
+step()  { printf "\n%s── %s ─────────────────────────────────────────────%s\n" "$DIM" "$*" "$RESET_C"; }
+kv()    { printf "     %s%-16s%s %s\n" "$DIM" "$1" "$RESET_C" "$2"; }
 
 banner() {
   printf "\n"
