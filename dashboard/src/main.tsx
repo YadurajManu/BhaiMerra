@@ -13,6 +13,7 @@ import Alerts from './pages/Alerts'
 import Settings from './pages/Settings'
 import Doctor from './pages/Doctor'
 import Logs from './pages/Logs'
+import CliAuth from './pages/CliAuth'
 import { Logo } from './components/ui'
 import './index.css'
 
@@ -30,6 +31,7 @@ function Gate() {
 
   return (
     <Routes>
+      <Route path="cli-auth" element={<CliAuth />} />
       <Route element={<Shell />}>
         <Route index element={<Overview />} />
         <Route path="nodes" element={<Nodes />} />
