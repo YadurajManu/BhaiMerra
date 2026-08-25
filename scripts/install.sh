@@ -17,6 +17,30 @@ RESET=0
 ADVERTISE_ADDR="${FLEET_ADVERTISE_ADDR:-}"
 CONFIGURE=0
 
+# ── colors ──────────────────────────────────────────────────────────
+if [ -t 1 ]; then
+  GREEN='\033[32m' CYAN='\033[36m' DIM='\033[2m' BOLD='\033[1m'
+  RED='\033[31m' YELLOW='\033[33m' RESET_C='\033[0m'
+else
+  GREEN='' CYAN='' DIM='' BOLD='' RED='' YELLOW='' RESET_C=''
+fi
+
+info()  { printf "  ${GREEN}✔${RESET_C}  %s\n" "$*"; }
+warn()  { printf "  ${YELLOW}▲${RESET_C}  %s\n" "$*"; }
+fail()  { printf "  ${RED}✖${RESET_C}  %s\n" "$*" >&2; exit 1; }
+step()  { printf "\n${DIM}── %s ─────────────────────────────────────────────${RESET_C}\n" "$*"; }
+kv()    { printf "     ${DIM}%-16s${RESET_C} %s\n" "$1" "$2"; }
+
+banner() {
+  printf "\n"
+  printf "  ${BOLD}${GREEN}    ○     ○     ○${RESET_C}\n"
+  printf "  ${BOLD}${GREEN}     ╲    │    ╱       █▀▀ █   █▀▀ █▀▀ ▀█▀${RESET_C}\n"
+  printf "  ${BOLD}${GREEN}  ○───────◉───────○    █▀  █   █▀  █▀   █${RESET_C}\n"
+  printf "  ${BOLD}${GREEN}     ╱    │    ╲       ▀   ▀▀▀ ▀▀▀ ▀▀▀  ▀${RESET_C}\n"
+  printf "  ${BOLD}${GREEN}    ○     ○     ○${RESET_C}      ${DIM}agent installer${RESET_C}\n"
+  printf "\n"
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --token)         TOKEN="$2"; shift 2 ;;
@@ -33,7 +57,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-die() { echo "fleet-os: $*" >&2; exit 1; }
+die() { fail "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # ── platform ────────────────────────────────────────────────────────
@@ -51,9 +75,7 @@ case "$(uname -m)" in
 esac
 
 # A Mac agent is deliberately a per-user LaunchAgent, so its state belongs in
-# that user's Library rather than under /var/lib. Resolve this before any work
-# so a repeat of the one-line installer can return cleanly without sudo,
-# downloads, or rewriting the service definition.
+# that user's Library rather than under /var/lib.
 if [ "$os" = darwin ]; then
   STATE_DIR="${FLEET_STATE_DIR_DARWIN:-${FLEET_STATE_DIR:-$HOME/Library/Application Support/fleet-os}}"
 fi
@@ -64,10 +86,13 @@ if [ -f "$state_file" ] && [ "$RESET" != 1 ] && [ "$CONFIGURE" != 1 ]; then
   if [ -x "$BIN_DIR/fleet-agent" ]; then
     installed_version=$("$BIN_DIR/fleet-agent" --version 2>/dev/null || true)
   fi
-  echo "fleet-os: agent already installed${installed_version:+ ($installed_version)}"
-  echo "          state: $state_file"
-  echo "          no changes made"
-  echo "          to deliberately pair this machine again: add --reset with a fresh token"
+  banner
+  step "already installed"
+  kv "version" "${installed_version:-unknown}"
+  kv "state" "$state_file"
+  printf "\n"
+  info "no changes made"
+  printf "     ${DIM}to re-pair: add ${CYAN}--reset${RESET_C}${DIM} with a fresh token${RESET_C}\n\n"
   exit 0
 fi
 
@@ -75,13 +100,13 @@ if [ "$CONFIGURE" != 1 ]; then
   [ -n "$TOKEN" ] || die "a pairing token is required: generate one in the dashboard, then pass --token"
 fi
 
+banner
+
 # ── preflight ───────────────────────────────────────────────────────
-# Check before downloading anything, so a machine that cannot run the agent
-# fails in two seconds rather than after a install.
 if [ "$os" = linux ] && ! have docker; then
-  echo "fleet-os: warning — docker was not found on PATH."
-  echo "          the agent will register and report health, but cannot run"
-  echo "          workloads until a container runtime is installed."
+  warn "docker not found on PATH"
+  printf "     ${DIM}the agent will register but cannot run workloads${RESET_C}\n"
+  printf "     ${DIM}until a container runtime is installed${RESET_C}\n"
 fi
 
 SUDO=""
@@ -97,11 +122,13 @@ fi
 
 asset="fleet-agent-${os}-${arch}"
 case "$DOWNLOAD_BASE" in
-  */install) url="${DOWNLOAD_BASE}/${asset}" ;;      # self-hosted control plane
+  */install) url="${DOWNLOAD_BASE}/${asset}" ;;
   *)         url="${DOWNLOAD_BASE}/${VERSION}/${asset}" ;;
 esac
 
-echo "fleet-os: installing agent (${os}/${arch}, ${VERSION})"
+step "download"
+kv "platform" "${os}/${arch}"
+kv "version" "${VERSION}"
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT INT TERM
@@ -109,9 +136,6 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 $fetch "$url" > "$tmp/fleet-agent" || die "download failed: $url"
 [ -s "$tmp/fleet-agent" ] || die "downloaded file is empty: $url"
 
-# Verify against the published checksums when they are reachable. A failed
-# checksum aborts; an unreachable checksum file only warns, so a temporary
-# CDN problem does not block an install.
 if $fetch "$(dirname "$url")/SHA256SUMS" > "$tmp/SHA256SUMS" 2>/dev/null; then
   expected=$(grep " ${asset}\$" "$tmp/SHA256SUMS" | awk '{print $1}')
   if [ -n "$expected" ]; then
@@ -122,10 +146,10 @@ if $fetch "$(dirname "$url")/SHA256SUMS" > "$tmp/SHA256SUMS" 2>/dev/null; then
     if [ -n "$actual" ] && [ "$actual" != "$expected" ]; then
       die "checksum mismatch — refusing to install (expected $expected, got $actual)"
     fi
-    [ -n "$actual" ] && echo "fleet-os: checksum verified"
+    [ -n "$actual" ] && info "checksum verified"
   fi
 else
-  echo "fleet-os: warning — could not fetch SHA256SUMS, skipping verification"
+  warn "could not fetch SHA256SUMS, skipping verification"
 fi
 
 chmod +x "$tmp/fleet-agent"
@@ -138,30 +162,58 @@ else
   $SUDO chmod 700 "$STATE_DIR"
 fi
 $SUDO mv "$tmp/fleet-agent" "$BIN_DIR/fleet-agent"
+info "binary installed to ${BIN_DIR}/fleet-agent"
 
-echo "fleet-os: detected capability:"
-"$BIN_DIR/fleet-agent" -capabilities | sed 's/^/          /'
+step "capability detection"
+cap_json=$("$BIN_DIR/fleet-agent" -capabilities 2>/dev/null || echo '{}')
+cap_arch=$(echo "$cap_json" | grep '"arch"' | head -1 | sed 's/.*: *"\([^"]*\)".*/\1/')
+cap_os=$(echo "$cap_json" | grep '"os"' | head -1 | sed 's/.*: *"\([^"]*\)".*/\1/')
+cap_cpu=$(echo "$cap_json" | grep '"cpu_cores"' | head -1 | sed 's/.*: *\([0-9]*\).*/\1/')
+cap_ram=$(echo "$cap_json" | grep '"ram_mb"' | head -1 | sed 's/.*: *\([0-9]*\).*/\1/')
+cap_disk=$(echo "$cap_json" | grep '"disk_mb"' | head -1 | sed 's/.*: *\([0-9]*\).*/\1/')
+cap_gpu=$(echo "$cap_json" | grep '"gpu"' | head -1 | sed 's/.*: *\([a-z]*\).*/\1/')
+cap_host=$(echo "$cap_json" | grep '"hostname"' | head -1 | sed 's/.*: *"\([^"]*\)".*/\1/')
+cap_addr=$(echo "$cap_json" | grep '"advertise_addr"' | head -1 | sed 's/.*: *"\([^"]*\)".*/\1/')
+
+if [ -n "$cap_ram" ] && [ "$cap_ram" -ge 1024 ] 2>/dev/null; then
+  ram_display="$(echo "$cap_ram" | awk '{printf "%.1f GB", $1/1024}')"
+else
+  ram_display="${cap_ram:-?} MB"
+fi
+if [ -n "$cap_disk" ] && [ "$cap_disk" -ge 1024 ] 2>/dev/null; then
+  disk_display="$(echo "$cap_disk" | awk '{printf "%.0f GB", $1/1024}')"
+else
+  disk_display="${cap_disk:-?} MB"
+fi
+
+kv "hostname" "${BOLD}${cap_host:-unknown}${RESET_C}"
+kv "arch" "${cap_arch:-?}"
+kv "os" "${cap_os:-?}"
+kv "cpu" "${cap_cpu:-?} cores"
+kv "ram" "$ram_display"
+kv "disk" "$disk_display"
+kv "gpu" "${cap_gpu:-false}"
+kv "address" "${cap_addr:-not detected}"
 
 # ── service ────────────────────────────────────────────────────────
 register_now() {
   state_file="$STATE_DIR/agent.json"
   if [ "$CONFIGURE" = 1 ]; then
     [ -f "$state_file" ] || die "--configure needs an existing agent state at $state_file"
-    echo "fleet-os: updating agent configuration; keeping the existing node identity"
+    info "updating agent configuration; keeping existing node identity"
     return
   fi
   if [ -f "$state_file" ]; then
     if [ "$RESET" != 1 ]; then
-      die "this machine is already registered ($state_file); a pairing token would be ignored. If its credential was revoked, rerun with --reset to pair it again"
+      die "already registered ($state_file). Rerun with --reset to pair again."
     fi
     backup="$STATE_DIR/agent.revoked-$(date +%Y%m%d-%H%M%S).json"
     mv "$state_file" "$backup"
-    echo "fleet-os: saved previous agent state to $backup"
+    warn "saved previous state to $backup"
   fi
 
-  # Pair in the foreground so a bad token is an error the user is still
-  # watching, rather than a restart loop found later in a log.
-  echo "fleet-os: pairing with ${CONTROL_PLANE}"
+  step "pairing"
+  kv "control plane" "$CONTROL_PLANE"
   if [ -n "$ADVERTISE_ADDR" ]; then
     $1 env FLEET_STATE_DIR="$STATE_DIR" FLEET_ADVERTISE_ADDR="$ADVERTISE_ADDR" "$BIN_DIR/fleet-agent" \
       --control-plane "$CONTROL_PLANE" --token "$TOKEN" --register-only \
@@ -171,6 +223,7 @@ register_now() {
       --control-plane "$CONTROL_PLANE" --token "$TOKEN" --register-only \
       || die "pairing failed — the token may be expired or already used"
   fi
+  info "paired successfully"
 }
 
 if [ "$os" = linux ] && have systemctl; then
@@ -201,12 +254,16 @@ UNIT
   register_now "$SUDO"
   $SUDO systemctl daemon-reload
   $SUDO systemctl enable --now fleet-agent
-  echo "fleet-os: agent installed and running (systemctl status fleet-agent)"
+
+  step "ready"
+  info "agent installed and running"
+  printf "\n"
+  kv "status" "systemctl status fleet-agent"
+  kv "logs" "journalctl -fu fleet-agent"
+  kv "stop" "systemctl stop fleet-agent"
+  printf "\n"
 
 elif [ "$os" = darwin ]; then
-  # launchd, as a per-user LaunchAgent. A LaunchDaemon would need root and a
-  # root-owned state directory; the agent only needs the Docker socket, which
-  # Docker Desktop exposes to the logged-in user anyway.
   register_now ""
 
   PLIST="$HOME/Library/LaunchAgents/dev.fleet-os.agent.plist"
@@ -238,12 +295,19 @@ PLISTEOF
 
   launchctl unload "$PLIST" 2>/dev/null || true
   launchctl load "$PLIST"
-  echo "fleet-os: agent installed and running"
-  echo "          logs:  tail -f \"$STATE_DIR/agent.log\""
-  echo "          stop:  launchctl unload \"$PLIST\""
+
+  step "ready"
+  info "agent installed and running"
+  printf "\n"
+  kv "logs" "tail -f \"$STATE_DIR/agent.log\""
+  kv "stop" "launchctl unload \"$PLIST\""
+  kv "dashboard" "${CYAN}fleet status${RESET_C}"
+  printf "\n"
 
 else
   register_now "$SUDO"
-  echo "fleet-os: no service manager found — start the agent yourself:"
-  echo "          FLEET_STATE_DIR=$STATE_DIR${ADVERTISE_ADDR:+ FLEET_ADVERTISE_ADDR=$ADVERTISE_ADDR} $BIN_DIR/fleet-agent --control-plane $CONTROL_PLANE"
+
+  step "ready"
+  warn "no service manager found — start the agent yourself:"
+  printf "\n     ${DIM}FLEET_STATE_DIR=$STATE_DIR${ADVERTISE_ADDR:+ FLEET_ADVERTISE_ADDR=$ADVERTISE_ADDR} $BIN_DIR/fleet-agent --control-plane $CONTROL_PLANE${RESET_C}\n\n"
 fi
