@@ -25,8 +25,14 @@ WORKDIR /app
 # and docker children that builds spawn.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates tini curl \
- && curl -fsSL https://download.docker.com/linux/static/stable/$(uname -m)/docker-27.3.1.tgz \
+ && ARCH=$(uname -m) \
+ && if [ "$ARCH" = "aarch64" ]; then BUILDX_ARCH="arm64"; else BUILDX_ARCH="amd64"; fi \
+ && curl -fsSL https://download.docker.com/linux/static/stable/${ARCH}/docker-27.3.1.tgz \
     | tar -xz -C /usr/local/bin --strip-components=1 docker/docker \
+ && mkdir -p /usr/libexec/docker/cli-plugins \
+ && curl -fsSL "https://github.com/docker/buildx/releases/download/v0.19.3/buildx-v0.19.3.linux-${BUILDX_ARCH}" \
+    -o /usr/libexec/docker/cli-plugins/docker-buildx \
+ && chmod +x /usr/libexec/docker/cli-plugins/docker-buildx \
  && apt-get purge -y curl && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*
 
@@ -40,8 +46,8 @@ ENV MIGRATIONS_DIR=/app/dist/src/db/migrations
 EXPOSE 8080 8081
 
 # Not root: ingress makes this process reachable from the internet.
-RUN groupadd -r fleet && useradd -r -g fleet fleet \
- && mkdir -p /var/lib/fleet-os/builds && chown -R fleet:fleet /var/lib/fleet-os
+RUN groupadd -r fleet && useradd -m -r -g fleet fleet \
+ && mkdir -p /var/lib/fleet-os/builds /home/fleet/.docker && chown -R fleet:fleet /var/lib/fleet-os /home/fleet
 USER fleet
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=40s --retries=5 \

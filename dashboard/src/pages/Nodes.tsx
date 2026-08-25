@@ -104,9 +104,13 @@ export default function Nodes() {
             </div>
 
             <div>
-              <div className="mono-label">run this on the machine you want to add</div>
+              <div className="mono-label">run this on the machine you want to add (curl or npm)</div>
               <div className="mt-2 overflow-x-auto rounded-[3px] border border-[var(--color-line)] bg-[var(--color-ink-950)] px-4 py-3">
                 <Copyable text={pairing.install_command} className="text-[var(--color-signal)]" />
+              </div>
+              <div className="mt-3 flex items-center gap-2 font-mono text-[11px] text-[var(--color-fg-dim)]">
+                <span>Or run CLI:</span>
+                <code className="rounded bg-[var(--color-bg-subtle)] px-2 py-0.5 text-[var(--color-fg)]">npx @yadurajfleetos/cli nodes pair</code>
               </div>
             </div>
             <p className="font-mono text-[10.5px] text-[var(--color-fg-dim)]">

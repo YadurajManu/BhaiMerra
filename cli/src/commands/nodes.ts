@@ -54,9 +54,9 @@ export const nodesCommand = {
         // through proxies and avoids Node fetch's implicit text/plain type.
         { body: {} }
       )
-      if (flags.json) return console.log(JSON.stringify(body, null, 2))
       console.log(`Run this on the machine you want to add:\n`)
       console.log(`  ${c.cyan(body.install_command)}\n`)
+      console.log(c.dim(`  Or with npm:   npx @yadurajfleetos/cli nodes pair\n`))
       console.log(c.dim(`The token is single-use and expires ${relativeTime(body.expires_at)}.`))
       return
     }

@@ -23,7 +23,7 @@ export default function CliAuth() {
         user: { email: string }
       }>('/auth/cli-session/approve', {
         method: 'POST',
-        body: JSON.stringify({ code }),
+        body: { code },
       })
 
       // Send to local callback if port is provided
