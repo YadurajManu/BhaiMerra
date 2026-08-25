@@ -62,9 +62,9 @@ function validApi(value: string): string {
 }
 
 function getWebUrl(api: string): string {
-  if (api.includes('fleetapi.plastikworld.xyz')) return 'https://fleet.plastikworld.xyz'
+  if (api.includes('fleetapi.plastikworld.xyz')) return 'https://fleetapp.plastikworld.xyz'
   if (api.includes('localhost:8080') || api.includes('127.0.0.1:8080')) return 'http://localhost:5173'
-  return api.replace(/fleetapi\./, 'fleet.')
+  return api.replace(/fleetapi\./, 'fleetapp.')
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
