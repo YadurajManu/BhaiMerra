@@ -229,8 +229,31 @@ export const authCommand = {
             { hints: ['the control plane never stores your password in this CLI'] }
           )
         } else {
-          // Default: Modern Browser Web OAuth Login
-          authData = await browserAuth(profile)
+          // Default: Modern Browser Web OAuth Login with fallback for older control planes
+          try {
+            authData = await browserAuth(profile)
+          } catch (err) {
+            const isNotFound = err instanceof CliError && /no route|not found|404/i.test(err.message)
+            if (isNotFound) {
+              console.log(c.dim('  (control plane does not support browser auth — using terminal login)\n'))
+              const email = await requiredPrompt('email')
+              const password = await requiredPrompt('password', { silent: true, hint: 'Password is hidden while you type.' })
+              authData = await task(
+                'verifying credentials',
+                async () =>
+                  (
+                    await request<{
+                      accessToken: string
+                      refreshToken: string
+                      user: { email: string }
+                    }>('POST', '/auth/login', { body: { email, password }, auth: false, profile })
+                  ).body,
+                { hints: ['the control plane never stores your password in this CLI'] }
+              )
+            } else {
+              throw err
+            }
+          }
         }
 
         await saveProfile({
