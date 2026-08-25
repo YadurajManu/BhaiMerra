@@ -259,7 +259,7 @@ if [ "$os" = linux ] && have systemctl; then
 Description=Fleet OS agent
 Documentation=${CONTROL_PLANE}
 After=network-online.target docker.service
-Wants=network-online.target
+Wants=network-online.target docker.service
 
 [Service]
 Type=simple
@@ -280,6 +280,7 @@ UNIT
 
   register_now "$SUDO"
   $SUDO systemctl daemon-reload
+  $SUDO systemctl enable --now docker 2>/dev/null || true
   $SUDO systemctl enable --now fleet-agent
 
   step "ready"

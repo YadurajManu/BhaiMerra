@@ -17,6 +17,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -214,13 +216,29 @@ func asError(err error, target **Error) bool {
 	return false
 }
 
-// Ping reports whether the daemon is reachable. A node whose Docker is down
-// still heartbeats — it is alive, it just cannot run workloads — so callers
-// treat this as information, not a fatal error.
+// EnsureRunning attempts to automatically start the container daemon if it was stopped.
+func (c *Client) EnsureRunning(ctx context.Context) {
+	if runtime.GOOS == "linux" {
+		_ = exec.Command("systemctl", "start", "docker").Run()
+		_ = exec.Command("service", "docker", "start").Run()
+	} else if runtime.GOOS == "darwin" {
+		_ = exec.Command("open", "-a", "Docker").Run()
+	}
+}
+
+// Ping reports whether the daemon is reachable. If down, it attempts self-healing
+// to start the Docker daemon automatically.
 func (c *Client) Ping(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	ctxTimeout, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	return c.do(ctx, http.MethodGet, "/"+c.api(ctx)+"/_ping", nil, nil)
+	err := c.do(ctxTimeout, http.MethodGet, "/"+c.api(ctxTimeout)+"/_ping", nil, nil)
+	if err != nil {
+		c.EnsureRunning(ctx)
+		secondCtx, secondCancel := context.WithTimeout(ctx, 2*time.Second)
+		defer secondCancel()
+		return c.do(secondCtx, http.MethodGet, "/"+c.api(secondCtx)+"/_ping", nil, nil)
+	}
+	return nil
 }
 
 type ContainerSummary struct {
