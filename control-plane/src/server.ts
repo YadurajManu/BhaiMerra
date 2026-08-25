@@ -9,6 +9,7 @@ import { webhookRoutes } from './api/webhooks.routes.js'
 import { githubRoutes } from './api/github.routes.js'
 import { installRoutes } from './api/install.routes.js'
 import { serviceRoutes } from './api/services.routes.js'
+import { setupTunnelServer } from './tunnel/registry.js'
 import type { AppContext } from './api/context.js'
 
 export async function buildServer(ctx: AppContext): Promise<FastifyInstance> {
@@ -70,6 +71,8 @@ export async function buildServer(ctx: AppContext): Promise<FastifyInstance> {
   await app.register(githubRoutes)
   await app.register(installRoutes)
   await app.register(serviceRoutes)
+
+  setupTunnelServer(app, ctx, ctx.tunnels)
 
   return app
 }

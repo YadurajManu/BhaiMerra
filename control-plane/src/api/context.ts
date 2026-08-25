@@ -5,6 +5,7 @@ import { BuildxRunner } from '../build/buildx.js'
 import type { BuildRunner } from '../build/runner.js'
 import type { GitHubConfig } from '../github/app.js'
 import type { Config } from '../config.js'
+import { TunnelRegistry } from '../tunnel/registry.js'
 
 export type AppContext = {
   config: Config
@@ -15,6 +16,7 @@ export type AppContext = {
   builds: BuildRunner
   /** null when no GitHub App is configured — private repos simply will not work. */
   github: GitHubConfig | null
+  tunnels: TunnelRegistry
 }
 
 export function createContext(config: Config): AppContext {
@@ -41,7 +43,10 @@ export function createContext(config: Config): AppContext {
       }
     : null
 
-  return { config, db, sql, redis, heartbeats, builds, github }
+  const ctx: Partial<AppContext> = { config, db, sql, redis, heartbeats, builds, github }
+  ctx.tunnels = new TunnelRegistry(ctx as AppContext)
+
+  return ctx as AppContext
 }
 
 export async function closeContext(ctx: AppContext): Promise<void> {

@@ -25,6 +25,7 @@ import (
 	"github.com/fleet-os/fleet-os/agent/internal/reconcile"
 	"github.com/fleet-os/fleet-os/agent/internal/sampler"
 	"github.com/fleet-os/fleet-os/agent/internal/state"
+	"github.com/fleet-os/fleet-os/agent/internal/tunnel"
 )
 
 // Version is stamped at build time: -ldflags "-X main.Version=0.1.0"
@@ -121,6 +122,11 @@ func run() error {
 	// Reconciliation runs alongside the heartbeat rather than inside it, so a
 	// slow image pull never delays liveness and get the node marked down.
 	go runReconciler(ctx, engine, api, reporter, interval, log)
+
+	// Reverse tunnel connects to the control plane and multiplexes incoming
+	// HTTP ingress requests directly to local containers behind NAT/firewalls.
+	tunnelClient := tunnel.New(saved.ControlPlaneURL, saved.AgentToken, log)
+	go tunnelClient.Run(ctx)
 
 	log.Info("agent started",
 		"version", Version,
