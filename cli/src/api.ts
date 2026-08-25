@@ -46,7 +46,7 @@ export async function request<T = any>(
 
   let res: Response
   try {
-    res = await send(profile.accessToken)
+    res = await send(opts.auth === false ? undefined : profile.accessToken)
   } catch (err) {
     throw new CliError(
       `Could not reach ${profile.api}. Is the control plane running?\n  ${String(err)}`,
