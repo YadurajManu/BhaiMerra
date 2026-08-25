@@ -422,19 +422,10 @@ export const logsCommand = {
   },
 }
 
-const TEMPLATE = (name: string, hasDockerfile: boolean) => `fleet: homelab
-
-services:
-  ${name}:
-    ${hasDockerfile ? 'build: .' : 'image: nginx:1.27   # or build: . once you add a Dockerfile'}
-    placement: flexible
-    resources: { ram: 512Mi, cpu: 0.5 }
-    health: { path: /healthz }
-    # domain: ${name}.yourdomain.dev
-`
-
 export const initCommand = {
   async run(args: string[], flags: Flags) {
+    const { detect, manifestTemplate } = await import('../detect.js')
+
     const path = manifestPath(args[0])
     try {
       await access(path)
@@ -450,18 +441,26 @@ export const initCommand = {
       process.cwd().split('/').pop()?.toLowerCase().replace(/[^a-z0-9-]+/g, '-') ||
       'app'
 
-    let hasDockerfile = true
-    try {
-      await access(join(process.cwd(), 'Dockerfile'))
-    } catch {
-      hasDockerfile = false
+    const d = await detect()
+
+    // Write a Dockerfile if we generated one and none exists.
+    if (d.dockerfile) {
+      await writeFile(join(process.cwd(), 'Dockerfile'), d.dockerfile)
+      console.log(`${c.green('created')} Dockerfile  ${c.dim(`(${d.label}, port ${d.port})`)}`)
     }
 
-    await writeFile(path, TEMPLATE(name, hasDockerfile))
+    await writeFile(path, manifestTemplate(name, d))
     console.log(`${c.green('created')} ${path}`)
-    if (!hasDockerfile) {
-      console.log(c.dim('  no Dockerfile found, so it starts from a prebuilt image'))
+
+    if (d.framework === 'unknown' && !d.hasDockerfile) {
+      console.log(c.dim('  could not detect framework — using defaults. Edit fleet.yaml to tune.'))
+    } else if (d.hasDockerfile) {
+      console.log(c.dim(`  using existing Dockerfile (detected EXPOSE ${d.port})`))
+    } else {
+      console.log(c.dim(`  detected ${c.bold(d.label)} → optimised Dockerfile + manifest`))
     }
+
     console.log(`\nNext:\n  fleet validate\n  fleet apply\n  fleet deploy ${name}`)
+    console.log(c.dim(`\n  …or just run: fleet up`))
   },
 }

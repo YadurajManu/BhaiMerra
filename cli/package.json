@@ -1,14 +1,23 @@
 {
-  "name": "@fleet-os/cli",
-  "private": true,
+  "name": "@yadurajfleetos/cli",
   "version": "0.1.0",
+  "description": "Fleet OS command-line interface for deploying and orchestrating services on user-owned hardware",
   "type": "module",
+  "license": "MIT",
   "bin": {
-    "fleet": "./dist/src/index.js"
+    "fleet": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build && npm test",
     "typecheck": "tsc --noEmit",
     "test": "node --test --import tsx tests/*.test.ts"
   },
@@ -19,5 +28,13 @@
     "@types/node": "^26.2.0",
     "tsx": "^4.23.12",
     "typescript": "^7.0.2"
-  }
+  },
+  "keywords": [
+    "fleet",
+    "orchestration",
+    "deployment",
+    "homelab",
+    "docker",
+    "self-hosted"
+  ]
 }

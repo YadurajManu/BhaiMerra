@@ -158,6 +158,42 @@ export async function serviceRoutes(app: FastifyInstance) {
     }
   )
 
+  /** POST /services/:serviceId/stop — stop running deployments for a service. */
+  app.post(
+    '/services/:serviceId/stop',
+    { preHandler: requireServicePermission('service.deploy') },
+    async (req, reply) => {
+      const { service, orgId } = await loadService(app, req.params as { serviceId: string })
+      const active = await db.select().from(deployments)
+        .where(and(eq(deployments.serviceId, service.id), inArray(deployments.status, ['deploying', 'running'])))
+
+      if (!active.length) {
+        return reply.code(200).send({ stopped: 0, service: service.name, message: `"${service.name}" is not currently running.` })
+      }
+
+      await db.transaction(async (tx) => {
+        for (const dep of active) {
+          await tx.update(deployments).set({ status: 'superseded', finishedAt: new Date() }).where(eq(deployments.id, dep.id))
+        }
+        await recordAudit(tx, {
+          orgId,
+          actorUserId: req.userId,
+          action: 'service.stopped',
+          targetType: 'service',
+          targetId: service.id,
+          metadata: { count: active.length, stoppedDeploymentIds: active.map((d) => d.id) },
+        })
+      })
+
+      await invalidateRoutesForService(app.ctx, service.id)
+      return reply.code(200).send({
+        stopped: active.length,
+        service: service.name,
+        note: 'Service stopped. The agent will remove the container on its next reconciliation.',
+      })
+    }
+  )
+
   /** Roll back to a previously successful artifact. The old release remains
    * visible and a new deployment records the recovery action. */
   app.post(

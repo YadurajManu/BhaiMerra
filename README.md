@@ -230,13 +230,23 @@ is not access control, and the Settings page says so.
 ## The CLI
 
 ```bash
-cd cli && npm install && npm run build
-node dist/src/index.js --help
+# Global install via npm
+npm install -g @yadurajfleetos/cli
+
+# Run directly on the fly
+npx @yadurajfleetos/cli up
 ```
 
 ```
-$ fleet where web
-would place on homeserver
+$ fleet up
+✔ detecting project framework  Next.js
+✔ created Dockerfile (Next.js, port 3000)
+✔ created fleet.yaml (Next.js)
+✔ applied 1 service(s)
+✔ built and scheduled onto homeserver  score 0.790
+✔ waiting for web to come up — web is running
+✔ live  https://web-homelab-44a1fc.plastikworld.xyz
+```
 
 NODE        SCORE   HEADROOM  RELIABILITY  LOAD  FREE
 homeserver  0.7904  0.969     0.50         0.78  16.0GB

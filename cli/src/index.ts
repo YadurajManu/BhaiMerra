@@ -18,7 +18,8 @@ const GROUPS: Array<[string, Array<[string, string]>]> = [
   [
     'getting started',
     [
-      ['init', 'Scaffold a fleet.yaml from this repository'],
+      ['up [service]', 'Detect, scaffold, apply, and deploy in one command'],
+      ['init', 'Scaffold a fleet.yaml and Dockerfile from this repository'],
       ['config show', 'Show the saved control plane and selected fleet'],
       ['use <fleet>', 'Select the default fleet for later commands'],
       ['auth login', 'Sign in and save a secure local session'],
@@ -31,6 +32,7 @@ const GROUPS: Array<[string, Array<[string, string]>]> = [
   [
     'looking around',
     [
+      ['open [service]', 'Open the live service in your default browser'],
       ['status', 'One-screen view of the whole fleet'],
       ['services', 'List services and where they are running'],
       ['nodes', 'List nodes'],
@@ -43,6 +45,7 @@ const GROUPS: Array<[string, Array<[string, string]>]> = [
   [
     'operating',
     [
+      ['down <service>', 'Stop and tear down a service deployment'],
       ['validate [file]', 'Check a fleet.yaml without applying it'],
       ['reschedule <service>', 'Force a service to move'],
       ['restart <service>', 'Replace the current release on its node'],

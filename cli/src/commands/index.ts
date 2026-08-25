@@ -5,6 +5,9 @@ import { statusCommand, eventsCommand } from './status.js'
 import { alertsCommand } from './alerts.js'
 import { configCommand, useCommand } from './config.js'
 import { doctorCommand } from './doctor.js'
+import { upCommand } from './up.js'
+import { openCommand } from './open.js'
+import { downCommand } from './down.js'
 import {
   applyCommand,
   deployCommand,
@@ -22,6 +25,9 @@ import {
 export type Command = { run(args: string[], flags: Flags): Promise<void> }
 
 export const commands: Record<string, Command> = {
+  up: upCommand,
+  open: openCommand,
+  down: downCommand,
   auth: authCommand,
   config: configCommand,
   use: useCommand,
@@ -42,3 +48,4 @@ export const commands: Record<string, Command> = {
   events: eventsCommand,
   alerts: alertsCommand,
 }
+
