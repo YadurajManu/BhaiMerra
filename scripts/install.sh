@@ -172,10 +172,22 @@ elif [ "$os" = windows ]; then
       cmd.exe /c "start \"\" \"C:\\Program Files\\Docker\\Docker Desktop.exe\"" 2>/dev/null || true
       sleep 3
     elif have winget.exe; then
-      info "docker not found — installing Docker Desktop via winget..."
-      winget.exe install -e --id Docker.DockerDesktop --accept-package-agreements --accept-source-agreements --silent 2>/dev/null || true
+      info "docker was not found — installing Docker Desktop automatically via winget..."
+      winget.exe install -e --id Docker.DockerDesktop --accept-package-agreements --accept-source-agreements || true
+      info "launching Docker Desktop..."
+      cmd.exe /c "start \"\" \"C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe\"" 2>/dev/null || true
     else
-      warn "docker not found — install Docker Desktop from https://docker.com to run workloads on this node"
+      info "docker was not found — downloading Docker Desktop installer..."
+      d_tmp=$(mktemp -d)
+      if $fetch "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe" > "$d_tmp/DockerInstaller.exe" 2>/dev/null; then
+        info "installing Docker Desktop..."
+        win_d_tmp=$(cygpath -w "$d_tmp/DockerInstaller.exe" 2>/dev/null || echo "$d_tmp/DockerInstaller.exe")
+        powershell.exe -Command "Start-Process '$win_d_tmp' -ArgumentList 'install --quiet --accept-license' -Wait" 2>/dev/null || true
+        rm -rf "$d_tmp"
+        cmd.exe /c "start \"\" \"C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe\"" 2>/dev/null || true
+      else
+        warn "docker not found — install Docker Desktop from https://docker.com to run workloads on this node"
+      fi
     fi
   fi
 elif [ "$os" = darwin ]; then
