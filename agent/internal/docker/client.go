@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -46,19 +47,43 @@ type Client struct {
 	apiVersion string // "v1.44", once negotiated
 }
 
-// New connects over the unix socket, honouring DOCKER_HOST when set.
+// New connects over the unix socket or TCP socket, honouring DOCKER_HOST when set.
 func New() *Client {
-	socket := "/var/run/docker.sock"
-	if host := os.Getenv("DOCKER_HOST"); strings.HasPrefix(host, "unix://") {
-		socket = strings.TrimPrefix(host, "unix://")
+	dockerHost := os.Getenv("DOCKER_HOST")
+	proto := "unix"
+	addr := "/var/run/docker.sock"
+
+	if dockerHost != "" {
+		if strings.HasPrefix(dockerHost, "unix://") {
+			proto = "unix"
+			addr = strings.TrimPrefix(dockerHost, "unix://")
+		} else if strings.HasPrefix(dockerHost, "tcp://") {
+			proto = "tcp"
+			addr = strings.TrimPrefix(dockerHost, "tcp://")
+		} else if strings.HasPrefix(dockerHost, "http://") {
+			proto = "tcp"
+			addr = strings.TrimPrefix(dockerHost, "http://")
+		}
+	} else if runtime.GOOS == "windows" {
+		if _, err := os.Stat("/var/run/docker.sock"); err != nil {
+			proto = "tcp"
+			addr = "127.0.0.1:2375"
+		}
 	}
 
 	return &Client{
-		host: socket,
+		host: addr,
 		http: &http.Client{
 			Transport: &http.Transport{
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+					if proto == "tcp" {
+						conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+						if err == nil {
+							return conn, nil
+						}
+						return (&net.Dialer{}).DialContext(ctx, "unix", "/var/run/docker.sock")
+					}
+					return (&net.Dialer{}).DialContext(ctx, proto, addr)
 				},
 			},
 			// Image pulls can be slow on a domestic connection; the caller
@@ -219,9 +244,12 @@ func asError(err error, target **Error) bool {
 // EnsureRunning attempts to automatically start the container daemon across all platforms.
 func (c *Client) EnsureRunning(ctx context.Context) {
 	if runtime.GOOS == "linux" {
-		// If running under WSL or Windows Git Bash, launch Docker Desktop on host
+		// If running under WSL, launch Docker Desktop on Windows host only if present
 		if os.Getenv("WSL_DISTRO_NAME") != "" || strings.Contains(os.Getenv("PATH"), "/mnt/c") {
-			_ = exec.Command("cmd.exe", "/c", "start", "", "C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe").Run()
+			tryStartExecutable(
+				"/mnt/c/Program Files/Docker/Docker/Docker Desktop.exe",
+				"/mnt/c/Program Files/Docker/Docker Desktop.exe",
+			)
 		}
 		_ = exec.Command("systemctl", "start", "docker").Run()
 		_ = exec.Command("service", "docker", "start").Run()
@@ -229,8 +257,32 @@ func (c *Client) EnsureRunning(ctx context.Context) {
 	} else if runtime.GOOS == "darwin" {
 		_ = exec.Command("open", "-a", "Docker").Run()
 	} else if runtime.GOOS == "windows" {
-		_ = exec.Command("cmd.exe", "/c", "start", "", "C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe").Run()
+		programFiles := os.Getenv("ProgramFiles")
+		if programFiles == "" {
+			programFiles = `C:\Program Files`
+		}
+		localAppData := os.Getenv("LocalAppData")
+
+		candidates := []string{
+			filepath.Join(programFiles, "Docker", "Docker", "Docker Desktop.exe"),
+			filepath.Join(programFiles, "Docker", "Docker Desktop.exe"),
+		}
+		if localAppData != "" {
+			candidates = append(candidates, filepath.Join(localAppData, "Programs", "Docker", "Docker", "Docker Desktop.exe"))
+		}
+
+		tryStartExecutable(candidates...)
 		_ = exec.Command("net", "start", "docker").Run()
+	}
+}
+
+func tryStartExecutable(paths ...string) {
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			cmd := exec.Command(p)
+			_ = cmd.Start()
+			return
+		}
 	}
 }
 

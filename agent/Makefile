@@ -23,8 +23,9 @@ fmt:
 	gofmt -l -w .
 
 ## dist cross-compiles every architecture the control plane schedules onto.
-dist: clean
+dist:
 	@mkdir -p $(OUT)
+	@rm -f $(OUT)/*
 	GOOS=linux   GOARCH=arm64        $(GO_BUILD) -o $(OUT)/fleet-agent-linux-arm64       ./cmd/agent
 	GOOS=linux   GOARCH=arm GOARM=7  $(GO_BUILD) -o $(OUT)/fleet-agent-linux-armv7       ./cmd/agent
 	GOOS=linux   GOARCH=amd64        $(GO_BUILD) -o $(OUT)/fleet-agent-linux-amd64       ./cmd/agent

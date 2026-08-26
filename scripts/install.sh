@@ -124,10 +124,12 @@ if [ "$os" = linux ]; then
   # Check if running in WSL or Windows Git Bash
   if [ -n "${WSL_DISTRO_NAME:-}" ] || echo "$PATH" | grep -q "/mnt/c"; then
     if ! have docker || ! docker info >/dev/null 2>&1; then
-      step "runtime setup"
-      info "launching Docker Desktop on Windows..."
-      cmd.exe /c "start \"\" \"C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe\"" 2>/dev/null || true
-      sleep 3
+      if [ -f "/mnt/c/Program Files/Docker/Docker/Docker Desktop.exe" ]; then
+        step "runtime setup"
+        info "launching Docker Desktop on Windows..."
+        cmd.exe /c "start \"\" \"C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe\"" 2>/dev/null || true
+        sleep 3
+      fi
     fi
   elif ! have docker; then
     step "runtime setup"
