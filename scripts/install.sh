@@ -353,18 +353,41 @@ PLISTEOF
 elif [ "$os" = windows ]; then
   register_now ""
 
-  # Launch as a persistent background process in Windows
+  # Launch as a persistent background process in Windows.
+  # Git Bash (MSYS2/MinGW) uses POSIX paths internally; we must convert them
+  # to Windows-native paths before handing off to PowerShell or cmd.exe.
   win_bin=$(cygpath -w "$BIN_DIR/$bin_name" 2>/dev/null || echo "$BIN_DIR/$bin_name")
-  win_state=$(cygpath -w "$STATE_DIR" 2>/dev/null || echo "$STATE_DIR")
+  win_state_dir=$(cygpath -w "$STATE_DIR" 2>/dev/null || echo "$STATE_DIR")
 
-  powershell.exe -WindowStyle Hidden -Command "Start-Process -FilePath '$win_bin' -ArgumentList '--control-plane $CONTROL_PLANE --state \`\"$win_state\\agent.json\`\"' -RedirectStandardOutput '$win_state\\agent.log' -RedirectStandardError '$win_state\\agent.err.log'" 2>/dev/null || {
-    cmd.exe /c "start /b \"\" \"$win_bin\" --control-plane $CONTROL_PLANE --state \"$win_state\\agent.json\" > \"$win_state\\agent.log\" 2>&1" 2>/dev/null || true
-  }
+  # Kill any existing agent so a --reset truly restarts clean.
+  taskkill.exe /IM "$bin_name" /F >/dev/null 2>&1 || true
+  sleep 1
+
+  # The agent reads FLEET_STATE_DIR to find agent.json. Passing it as an
+  # environment variable is more reliable than quoting a --state path through
+  # three layers of shell escaping (sh → PowerShell → CreateProcess).
+  if powershell.exe -NoProfile -NonInteractive -Command "
+    \$env:FLEET_STATE_DIR = '$win_state_dir'
+    Start-Process -FilePath '$win_bin' \`
+      -ArgumentList '--control-plane','$CONTROL_PLANE' \`
+      -WindowStyle Hidden \`
+      -RedirectStandardOutput '$win_state_dir\\agent.log' \`
+      -RedirectStandardError  '$win_state_dir\\agent.err.log'
+  " 2>/dev/null; then
+    info "agent launched via PowerShell"
+  else
+    # Fallback for environments where PowerShell is unavailable (rare).
+    FLEET_STATE_DIR="$STATE_DIR" nohup "$BIN_DIR/$bin_name" \
+      --control-plane "$CONTROL_PLANE" \
+      > "$STATE_DIR/agent.log" 2>&1 &
+    info "agent launched via nohup"
+  fi
 
   step "ready"
   info "agent installed and running in background"
   printf "\n"
   kv "logs" "tail -f \"$STATE_DIR/agent.log\""
+  kv "stop" "taskkill /IM $bin_name /F"
   kv "dashboard" "${CYAN}fleet status${RESET_C}"
   printf "\n"
 
