@@ -216,13 +216,21 @@ func asError(err error, target **Error) bool {
 	return false
 }
 
-// EnsureRunning attempts to automatically start the container daemon if it was stopped.
+// EnsureRunning attempts to automatically start the container daemon across all platforms.
 func (c *Client) EnsureRunning(ctx context.Context) {
 	if runtime.GOOS == "linux" {
+		// If running under WSL or Windows Git Bash, launch Docker Desktop on host
+		if os.Getenv("WSL_DISTRO_NAME") != "" || strings.Contains(os.Getenv("PATH"), "/mnt/c") {
+			_ = exec.Command("cmd.exe", "/c", "start", "", "C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe").Run()
+		}
 		_ = exec.Command("systemctl", "start", "docker").Run()
 		_ = exec.Command("service", "docker", "start").Run()
+		_ = exec.Command("/etc/init.d/docker", "start").Run()
 	} else if runtime.GOOS == "darwin" {
 		_ = exec.Command("open", "-a", "Docker").Run()
+	} else if runtime.GOOS == "windows" {
+		_ = exec.Command("cmd.exe", "/c", "start", "", "C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe").Run()
+		_ = exec.Command("net", "start", "docker").Run()
 	}
 }
 
