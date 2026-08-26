@@ -353,15 +353,18 @@ PLISTEOF
 elif [ "$os" = windows ]; then
   register_now ""
 
-  # Start the background daemon on Windows
-  nohup "$BIN_DIR/$bin_name" --control-plane "$CONTROL_PLANE" > "$STATE_DIR/agent.log" 2>&1 &
-  echo $! > "$STATE_DIR/agent.pid"
+  # Launch as a persistent background process in Windows
+  win_bin=$(cygpath -w "$BIN_DIR/$bin_name" 2>/dev/null || echo "$BIN_DIR/$bin_name")
+  win_state=$(cygpath -w "$STATE_DIR" 2>/dev/null || echo "$STATE_DIR")
+
+  powershell.exe -WindowStyle Hidden -Command "Start-Process -FilePath '$win_bin' -ArgumentList '--control-plane $CONTROL_PLANE' -RedirectStandardOutput '$win_state\\agent.log' -RedirectStandardError '$win_state\\agent.err.log'" 2>/dev/null || {
+    cmd.exe /c "start /b \"\" \"$win_bin\" --control-plane $CONTROL_PLANE > \"$win_state\\agent.log\" 2>&1" 2>/dev/null || true
+  }
 
   step "ready"
-  info "agent installed and running"
+  info "agent installed and running in background"
   printf "\n"
   kv "logs" "tail -f \"$STATE_DIR/agent.log\""
-  kv "stop" "kill \$(cat \"$STATE_DIR/agent.pid\")"
   kv "dashboard" "${CYAN}fleet status${RESET_C}"
   printf "\n"
 
