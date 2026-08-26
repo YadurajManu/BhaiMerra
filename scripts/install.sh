@@ -167,8 +167,8 @@ fi
 
 asset="fleet-agent-${os}-${arch}${ext}"
 case "$DOWNLOAD_BASE" in
-  */install) url="${DOWNLOAD_BASE}/${asset}" ;;
-  *)         url="${DOWNLOAD_BASE}/${VERSION}/${asset}" ;;
+  */install) url="${DOWNLOAD_BASE}/${asset}?v=0.1.0" ;;
+  *)         url="${DOWNLOAD_BASE}/${VERSION}/${asset}?v=0.1.0" ;;
 esac
 
 step "download"

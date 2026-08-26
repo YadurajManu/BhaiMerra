@@ -13,7 +13,7 @@ import { ApiError } from './errors.js'
  */
 
 const ARCHES = new Set(['arm64', 'armv7', 'amd64'])
-const PLATFORMS = new Set(['linux', 'darwin'])
+const PLATFORMS = new Set(['linux', 'darwin', 'windows'])
 
 /** The public origin of *this* control plane, as the caller reached it. */
 export function publicOrigin(req: FastifyRequest): string {
@@ -88,13 +88,13 @@ export async function installRoutes(app: FastifyInstance) {
   })
 
   /** Agent binaries, named the way the install script asks for them. */
-  app.get('/install/fleet-agent-:platform-:arch', async (req, reply) => {
-    const { platform, arch } = req.params as { platform: string; arch: string }
-    if (!PLATFORMS.has(platform) || !ARCHES.has(arch)) {
-      throw ApiError.notFound(`Agent build for ${platform}/${arch}`)
+  app.get('/install/fleet-agent-*', async (req, reply) => {
+    const filename = (req.url.split('/install/')[1] || '').split('?')[0]
+    if (!filename || filename.includes('..') || filename.includes('/')) {
+      throw ApiError.badRequest('invalid_asset', 'Invalid agent asset name')
     }
 
-    const file = join(binDir, `fleet-agent-${platform}-${arch}`)
+    const file = join(binDir, filename)
     try {
       const info = await stat(file)
       return reply
@@ -106,8 +106,7 @@ export async function installRoutes(app: FastifyInstance) {
       throw new ApiError(
         404,
         'agent_build_missing',
-        `No ${platform}/${arch} agent build on this control plane. ` +
-          `Build them with "make -C agent dist" and restart.`
+        `No ${filename} build found on this control plane.`
       )
     }
   })
