@@ -160,6 +160,24 @@ if [ "$os" = linux ]; then
   else
     warn "docker not found on PATH — workloads will wait until docker is installed"
   fi
+elif [ "$os" = windows ]; then
+  if ! have docker || ! docker info >/dev/null 2>&1; then
+    step "runtime setup"
+    if [ -f "/c/Program Files/Docker/Docker/Docker Desktop.exe" ]; then
+      info "launching Docker Desktop on Windows..."
+      cmd.exe /c "start \"\" \"C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe\"" 2>/dev/null || true
+      sleep 3
+    elif [ -f "/c/Program Files/Docker/Docker Desktop.exe" ]; then
+      info "launching Docker Desktop on Windows..."
+      cmd.exe /c "start \"\" \"C:\\Program Files\\Docker\\Docker Desktop.exe\"" 2>/dev/null || true
+      sleep 3
+    elif have winget.exe; then
+      info "docker not found — installing Docker Desktop via winget..."
+      winget.exe install -e --id Docker.DockerDesktop --accept-package-agreements --accept-source-agreements --silent 2>/dev/null || true
+    else
+      warn "docker not found — install Docker Desktop from https://docker.com to run workloads on this node"
+    fi
+  fi
 elif [ "$os" = darwin ]; then
   if ! docker info >/dev/null 2>&1; then
     info "launching Docker Desktop on macOS..."
