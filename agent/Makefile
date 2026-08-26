@@ -25,11 +25,12 @@ fmt:
 ## dist cross-compiles every architecture the control plane schedules onto.
 dist: clean
 	@mkdir -p $(OUT)
-	GOOS=linux  GOARCH=arm64        $(GO_BUILD) -o $(OUT)/fleet-agent-linux-arm64  ./cmd/agent
-	GOOS=linux  GOARCH=arm GOARM=7  $(GO_BUILD) -o $(OUT)/fleet-agent-linux-armv7  ./cmd/agent
-	GOOS=linux  GOARCH=amd64        $(GO_BUILD) -o $(OUT)/fleet-agent-linux-amd64  ./cmd/agent
-	GOOS=darwin GOARCH=arm64        $(GO_BUILD) -o $(OUT)/fleet-agent-darwin-arm64 ./cmd/agent
-	GOOS=darwin GOARCH=amd64        $(GO_BUILD) -o $(OUT)/fleet-agent-darwin-amd64 ./cmd/agent
+	GOOS=linux   GOARCH=arm64        $(GO_BUILD) -o $(OUT)/fleet-agent-linux-arm64       ./cmd/agent
+	GOOS=linux   GOARCH=arm GOARM=7  $(GO_BUILD) -o $(OUT)/fleet-agent-linux-armv7       ./cmd/agent
+	GOOS=linux   GOARCH=amd64        $(GO_BUILD) -o $(OUT)/fleet-agent-linux-amd64       ./cmd/agent
+	GOOS=darwin  GOARCH=arm64        $(GO_BUILD) -o $(OUT)/fleet-agent-darwin-arm64      ./cmd/agent
+	GOOS=darwin  GOARCH=amd64        $(GO_BUILD) -o $(OUT)/fleet-agent-darwin-amd64      ./cmd/agent
+	GOOS=windows GOARCH=amd64        $(GO_BUILD) -o $(OUT)/fleet-agent-windows-amd64.exe  ./cmd/agent
 	@$(MAKE) checksums
 	@ls -lh $(OUT)
 

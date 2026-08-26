@@ -65,6 +65,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 os=$(uname -s | tr '[:upper:]' '[:lower:]')
 case "$os" in
   linux|darwin) ;;
+  mingw*|msys*|cygwin*|windows*) os=windows ;;
   *) die "unsupported operating system: $os" ;;
 esac
 
@@ -75,17 +76,21 @@ case "$(uname -m)" in
   *) die "unsupported architecture: $(uname -m) (arm64, armv7 and amd64 are supported)" ;;
 esac
 
-# A Mac agent is deliberately a per-user LaunchAgent, so its state belongs in
-# that user's Library rather than under /var/lib.
-if [ "$os" = darwin ]; then
+ext=""
+if [ "$os" = windows ]; then
+  ext=".exe"
+  BIN_DIR="${FLEET_BIN_DIR:-$HOME/bin}"
+  STATE_DIR="${FLEET_STATE_DIR_WINDOWS:-${FLEET_STATE_DIR:-$HOME/.fleet-os}}"
+elif [ "$os" = darwin ]; then
   STATE_DIR="${FLEET_STATE_DIR_DARWIN:-${FLEET_STATE_DIR:-$HOME/Library/Application Support/fleet-os}}"
 fi
 
+bin_name="fleet-agent${ext}"
 state_file="$STATE_DIR/agent.json"
 if [ -f "$state_file" ] && [ "$RESET" != 1 ] && [ "$CONFIGURE" != 1 ]; then
   installed_version=""
-  if [ -x "$BIN_DIR/fleet-agent" ]; then
-    installed_version=$("$BIN_DIR/fleet-agent" --version 2>/dev/null || true)
+  if [ -x "$BIN_DIR/$bin_name" ]; then
+    installed_version=$("$BIN_DIR/$bin_name" --version 2>/dev/null || true)
   fi
   banner
   step "already installed"
@@ -104,7 +109,7 @@ fi
 banner
 
 SUDO=""
-if [ "$(id -u)" -ne 0 ]; then
+if [ "$os" != windows ] && [ "$(id -u)" -ne 0 ]; then
   have sudo || die "not running as root and sudo is unavailable; re-run as root"
   SUDO="sudo"
 fi
@@ -160,7 +165,7 @@ elif [ "$os" = darwin ]; then
   fi
 fi
 
-asset="fleet-agent-${os}-${arch}"
+asset="fleet-agent-${os}-${arch}${ext}"
 case "$DOWNLOAD_BASE" in
   */install) url="${DOWNLOAD_BASE}/${asset}" ;;
   *)         url="${DOWNLOAD_BASE}/${VERSION}/${asset}" ;;
@@ -173,14 +178,14 @@ kv "version" "${VERSION}"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
-$fetch "$url" > "$tmp/fleet-agent" || die "download failed: $url"
-[ -s "$tmp/fleet-agent" ] || die "downloaded file is empty: $url"
+$fetch "$url" > "$tmp/$bin_name" || die "download failed: $url"
+[ -s "$tmp/$bin_name" ] || die "downloaded file is empty: $url"
 
 if $fetch "$(dirname "$url")/SHA256SUMS" > "$tmp/SHA256SUMS" 2>/dev/null; then
   expected=$(grep " ${asset}\$" "$tmp/SHA256SUMS" | awk '{print $1}')
   if [ -n "$expected" ]; then
-    if have sha256sum; then actual=$(sha256sum "$tmp/fleet-agent" | awk '{print $1}')
-    elif have shasum;    then actual=$(shasum -a 256 "$tmp/fleet-agent" | awk '{print $1}')
+    if have sha256sum; then actual=$(sha256sum "$tmp/$bin_name" | awk '{print $1}')
+    elif have shasum;    then actual=$(shasum -a 256 "$tmp/$bin_name" | awk '{print $1}')
     else actual=""
     fi
     if [ -n "$actual" ] && [ "$actual" != "$expected" ]; then
@@ -192,20 +197,20 @@ else
   warn "could not fetch SHA256SUMS, skipping verification"
 fi
 
-chmod +x "$tmp/fleet-agent"
+chmod +x "$tmp/$bin_name"
 $SUDO mkdir -p "$BIN_DIR"
-if [ "$os" = darwin ]; then
+if [ "$os" = darwin ] || [ "$os" = windows ]; then
   mkdir -p "$STATE_DIR"
-  chmod 700 "$STATE_DIR"
+  chmod 700 "$STATE_DIR" 2>/dev/null || true
 else
   $SUDO mkdir -p "$STATE_DIR"
   $SUDO chmod 700 "$STATE_DIR"
 fi
-$SUDO mv "$tmp/fleet-agent" "$BIN_DIR/fleet-agent"
-info "binary installed to ${BIN_DIR}/fleet-agent"
+$SUDO mv "$tmp/$bin_name" "$BIN_DIR/$bin_name"
+info "binary installed to ${BIN_DIR}/$bin_name"
 
 step "capability detection"
-cap_json=$("$BIN_DIR/fleet-agent" -capabilities 2>/dev/null || echo '{}')
+cap_json=$("$BIN_DIR/$bin_name" -capabilities 2>/dev/null || echo '{}')
 cap_arch=$(echo "$cap_json" | grep '"arch"' | head -1 | sed 's/.*: *"\([^"]*\)".*/\1/')
 cap_os=$(echo "$cap_json" | grep '"os"' | head -1 | sed 's/.*: *"\([^"]*\)".*/\1/')
 cap_cpu=$(echo "$cap_json" | grep '"cpu_cores"' | head -1 | sed 's/.*: *\([0-9]*\).*/\1/')
@@ -255,11 +260,11 @@ register_now() {
   step "pairing"
   kv "control plane" "$CONTROL_PLANE"
   if [ -n "$ADVERTISE_ADDR" ]; then
-    $1 env FLEET_STATE_DIR="$STATE_DIR" FLEET_ADVERTISE_ADDR="$ADVERTISE_ADDR" "$BIN_DIR/fleet-agent" \
+    $1 env FLEET_STATE_DIR="$STATE_DIR" FLEET_ADVERTISE_ADDR="$ADVERTISE_ADDR" "$BIN_DIR/$bin_name" \
       --control-plane "$CONTROL_PLANE" --token "$TOKEN" --register-only \
       || die "pairing failed — the token may be expired or already used"
   else
-    $1 env FLEET_STATE_DIR="$STATE_DIR" "$BIN_DIR/fleet-agent" \
+    $1 env FLEET_STATE_DIR="$STATE_DIR" "$BIN_DIR/$bin_name" \
       --control-plane "$CONTROL_PLANE" --token "$TOKEN" --register-only \
       || die "pairing failed — the token may be expired or already used"
   fi
@@ -276,7 +281,7 @@ Wants=network-online.target docker.service
 
 [Service]
 Type=simple
-ExecStart=${BIN_DIR}/fleet-agent --control-plane ${CONTROL_PLANE}
+ExecStart=${BIN_DIR}/$bin_name --control-plane ${CONTROL_PLANE}
 Environment=FLEET_STATE_DIR=${STATE_DIR}
 ${ADVERTISE_ADDR:+Environment=FLEET_ADVERTISE_ADDR=${ADVERTISE_ADDR}}
 Restart=always
@@ -317,7 +322,7 @@ elif [ "$os" = darwin ]; then
   <key>Label</key><string>dev.fleet-os.agent</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${BIN_DIR}/fleet-agent</string>
+    <string>${BIN_DIR}/$bin_name</string>
     <string>--control-plane</string>
     <string>${CONTROL_PLANE}</string>
   </array>
@@ -345,10 +350,25 @@ PLISTEOF
   kv "dashboard" "${CYAN}fleet status${RESET_C}"
   printf "\n"
 
+elif [ "$os" = windows ]; then
+  register_now ""
+
+  # Start the background daemon on Windows
+  nohup "$BIN_DIR/$bin_name" --control-plane "$CONTROL_PLANE" > "$STATE_DIR/agent.log" 2>&1 &
+  echo $! > "$STATE_DIR/agent.pid"
+
+  step "ready"
+  info "agent installed and running"
+  printf "\n"
+  kv "logs" "tail -f \"$STATE_DIR/agent.log\""
+  kv "stop" "kill \$(cat \"$STATE_DIR/agent.pid\")"
+  kv "dashboard" "${CYAN}fleet status${RESET_C}"
+  printf "\n"
+
 else
   register_now "$SUDO"
 
   step "ready"
   warn "no service manager found — start the agent yourself:"
-  printf "\n     ${DIM}FLEET_STATE_DIR=$STATE_DIR${ADVERTISE_ADDR:+ FLEET_ADVERTISE_ADDR=$ADVERTISE_ADDR} $BIN_DIR/fleet-agent --control-plane $CONTROL_PLANE${RESET_C}\n\n"
+  printf "\n     ${DIM}FLEET_STATE_DIR=$STATE_DIR${ADVERTISE_ADDR:+ FLEET_ADVERTISE_ADDR=$ADVERTISE_ADDR} $BIN_DIR/$bin_name --control-plane $CONTROL_PLANE${RESET_C}\n\n"
 fi

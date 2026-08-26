@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
-	"syscall"
 )
 
 // Report is the payload sent to POST /agent/register. Field names are the
@@ -134,16 +133,6 @@ func outboundIP() string {
 		return addr.IP.String()
 	}
 	return ""
-}
-
-// freeDiskMb reports space available to an unprivileged process, not raw
-// capacity — the scheduler cares about what a container can actually use.
-func freeDiskMb(path string) int {
-	var fs syscall.Statfs_t
-	if err := syscall.Statfs(path, &fs); err != nil {
-		return 0
-	}
-	return int((uint64(fs.Bavail) * uint64(fs.Bsize)) / (1024 * 1024))
 }
 
 // detectConnectivity is a placeholder until the mesh module lands in Phase 4.
