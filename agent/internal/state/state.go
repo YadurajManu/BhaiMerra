@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 // State is what the agent must remember. The token is a credential, so the
@@ -24,7 +25,16 @@ func DefaultPath() string {
 	if dir := os.Getenv("FLEET_STATE_DIR"); dir != "" {
 		return filepath.Join(dir, "agent.json")
 	}
-	// Matches the systemd unit shipped by the install script.
+	if runtime.GOOS == "windows" {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, ".fleet-os", "agent.json")
+		}
+	} else if runtime.GOOS == "darwin" {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, "Library", "Application Support", "fleet-os", "agent.json")
+		}
+	}
+	// Matches the systemd unit shipped by the install script on Linux.
 	return "/var/lib/fleet-os/agent.json"
 }
 

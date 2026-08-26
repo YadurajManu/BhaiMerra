@@ -357,8 +357,8 @@ elif [ "$os" = windows ]; then
   win_bin=$(cygpath -w "$BIN_DIR/$bin_name" 2>/dev/null || echo "$BIN_DIR/$bin_name")
   win_state=$(cygpath -w "$STATE_DIR" 2>/dev/null || echo "$STATE_DIR")
 
-  powershell.exe -WindowStyle Hidden -Command "Start-Process -FilePath '$win_bin' -ArgumentList '--control-plane $CONTROL_PLANE' -RedirectStandardOutput '$win_state\\agent.log' -RedirectStandardError '$win_state\\agent.err.log'" 2>/dev/null || {
-    cmd.exe /c "start /b \"\" \"$win_bin\" --control-plane $CONTROL_PLANE > \"$win_state\\agent.log\" 2>&1" 2>/dev/null || true
+  powershell.exe -WindowStyle Hidden -Command "Start-Process -FilePath '$win_bin' -ArgumentList '--control-plane $CONTROL_PLANE --state \`\"$win_state\\agent.json\`\"' -RedirectStandardOutput '$win_state\\agent.log' -RedirectStandardError '$win_state\\agent.err.log'" 2>/dev/null || {
+    cmd.exe /c "start /b \"\" \"$win_bin\" --control-plane $CONTROL_PLANE --state \"$win_state\\agent.json\" > \"$win_state\\agent.log\" 2>&1" 2>/dev/null || true
   }
 
   step "ready"
