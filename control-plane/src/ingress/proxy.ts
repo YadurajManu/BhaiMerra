@@ -86,6 +86,8 @@ async function handle(
   const [upstreamHost, upstreamPort] = route.upstream.split(':')
   const targetPort = Number(upstreamPort)
 
+  const headers = forwardedHeaders(req, host, route)
+
   // If the node has an active reverse tunnel, proxy through the tunnel!
   if (ctx.tunnels && ctx.tunnels.has(route.nodeId)) {
     const chunks: Buffer[] = []
@@ -93,7 +95,12 @@ async function handle(
     req.on('end', async () => {
       try {
         const bodyBuf = Buffer.concat(chunks)
-        const tunnelRes = await ctx.tunnels.forwardHttpRequest(route.nodeId, targetPort, req, bodyBuf)
+        const tunnelRes = await ctx.tunnels.forwardHttpRequest(
+          route.nodeId,
+          targetPort,
+          { method: req.method, url: req.url, headers },
+          bodyBuf
+        )
 
         const outHeaders: Record<string, string> = { ...(tunnelRes.headers || {}) }
         for (const key of Object.keys(outHeaders)) {
@@ -117,20 +124,6 @@ async function handle(
     })
     return
   }
-
-  const headers = { ...req.headers }
-  for (const key of Object.keys(headers)) {
-    if (HOP_BY_HOP.has(key.toLowerCase())) delete headers[key]
-  }
-  // Standard forwarding headers so the app behind us can build correct URLs
-  // and see the real client rather than the proxy.
-  const existingFor = req.headers['x-forwarded-for']
-  const clientIp = req.socket.remoteAddress ?? ''
-  headers['x-forwarded-for'] = existingFor ? `${existingFor}, ${clientIp}` : clientIp
-  headers['x-forwarded-host'] = host
-  headers['x-forwarded-proto'] = 'http'
-  headers['x-fleet-node'] = route.nodeName
-  headers['x-fleet-service'] = route.serviceName
 
   const upstream = httpRequest(
     {
@@ -173,6 +166,48 @@ async function handle(
   })
 
   req.pipe(upstream)
+}
+
+/**
+ * The headers to send upstream, for either route to the node.
+ *
+ * Shared by the direct and the tunnel branch deliberately. These used to be
+ * built inline on the direct path only, so a service reached through a tunnel
+ * saw the control plane as its client: no real IP to rate-limit or audit by, and
+ * no forwarded host to build absolute URLs from. Which headers go upstream is a
+ * policy question and belongs in one place; how the bytes reach the node is the
+ * transport's problem.
+ */
+export function forwardedHeaders(
+  req: Pick<IncomingMessage, 'headers'> & { socket: Pick<IncomingMessage['socket'], 'remoteAddress'> },
+  host: string,
+  route: { nodeName: string; serviceName: string }
+): Record<string, string | string[]> {
+  const headers: Record<string, string | string[]> = {}
+  for (const [key, value] of Object.entries(req.headers)) {
+    if (value === undefined) continue
+    if (HOP_BY_HOP.has(key.toLowerCase())) continue
+    headers[key] = value
+  }
+
+  // Append rather than replace: we are one hop in a chain that starts at
+  // Cloudflare, and an app that wants the original client reads the first entry.
+  const priorFor = req.headers['x-forwarded-for']
+  const chain = Array.isArray(priorFor) ? priorFor.join(', ') : priorFor
+  const clientIp = req.socket.remoteAddress ?? ''
+  headers['x-forwarded-for'] = chain ? `${chain}, ${clientIp}` : clientIp
+
+  headers['x-forwarded-host'] = host
+
+  // Whatever is in front of us terminated TLS and said so. Overwriting that
+  // with "http" is how an app ends up issuing http:// redirects for an https://
+  // site, so an inbound value wins; "http" is only the direct-connection case.
+  const proto = req.headers['x-forwarded-proto']
+  headers['x-forwarded-proto'] = (Array.isArray(proto) ? proto[0] : proto) ?? 'http'
+
+  headers['x-fleet-node'] = route.nodeName
+  headers['x-fleet-service'] = route.serviceName
+  return headers
 }
 
 function fail(res: ServerResponse, status: number, code: string, message: string) {

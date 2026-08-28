@@ -35,6 +35,26 @@ type TunnelResponse struct {
 	Error   string            `json:"error,omitempty"`
 }
 
+// Keepalive timings. Both ends ping, because both failures are real: the control
+// plane needs to know it is routing ingress to a live tunnel, and we need to know
+// our socket has not been quietly dropped by whatever NAT we sit behind. A socket
+// whose mapping has expired stays open on both ends and never delivers anything,
+// so silence is the only signal available.
+const (
+	// Shorter than the idle timeout of the NATs and stateful firewalls agents
+	// commonly sit behind, so this also keeps the mapping from expiring.
+	pingPeriod = 25 * time.Second
+	// Must stay longer than the control plane's ping period (25s) or a healthy
+	// but idle tunnel would tear itself down on schedule.
+	pongWait = 70 * time.Second
+	// Control frames are tiny; if one cannot go out in this long the socket is
+	// not usable anyway.
+	writeWait = 10 * time.Second
+	// Response bodies are not tiny, and an upload on a slow uplink is allowed to
+	// take its time — but not forever, which is what no deadline at all meant.
+	dataWriteWait = 60 * time.Second
+)
+
 type Client struct {
 	controlPlaneURL string
 	agentToken      string
@@ -108,6 +128,61 @@ func (c *Client) connectAndServe(ctx context.Context, wsURL string) error {
 	c.conn = conn
 	c.mu.Unlock()
 
+	// Stop writing responses to a socket we have already left, which otherwise
+	// happens for any request still in flight when the tunnel drops.
+	defer func() {
+		c.mu.Lock()
+		if c.conn == conn {
+			c.conn = nil
+		}
+		c.mu.Unlock()
+	}()
+
+	// Silence past pongWait means the socket is gone, whatever the OS thinks.
+	// Every ping and pong pushes the deadline out again.
+	_ = conn.SetReadDeadline(time.Now().Add(pongWait))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(pongWait))
+	})
+	// Replaces gorilla's default ping handler, which replies but does not extend
+	// the read deadline — without this a tunnel that is idle apart from the
+	// control plane's own pings would hit the deadline and reconnect every 70s.
+	conn.SetPingHandler(func(appData string) error {
+		_ = conn.SetReadDeadline(time.Now().Add(pongWait))
+		// WriteControl is the one write method safe to use concurrently with the
+		// response writer, so this needs no lock.
+		err := conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(writeWait))
+		if err == websocket.ErrCloseSent {
+			return nil
+		}
+		return err
+	})
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		ticker := time.NewTicker(pingPeriod)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ctx.Done():
+				// Unblock the read loop rather than let shutdown wait out the
+				// read deadline.
+				_ = conn.Close()
+				return
+			case <-ticker.C:
+				if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeWait)); err != nil {
+					// Close so the read loop returns now and reconnects, instead
+					// of sitting on a socket we already know is broken.
+					_ = conn.Close()
+					return
+				}
+			}
+		}
+	}()
+
 	c.log.Info("reverse tunnel established successfully")
 
 	for {
@@ -150,6 +225,15 @@ func (c *Client) handleHttpRequest(req *TunnelRequest) {
 	}
 
 	for k, v := range req.Headers {
+		// Go builds the outgoing Host from the URL and ignores this header, so
+		// setting it like the rest would leave the container seeing
+		// "127.0.0.1:32768" as the name it was asked for — and building its
+		// redirects and absolute URLs from that. The direct ingress path passes
+		// the real Host through, so this one has to as well.
+		if strings.EqualFold(k, "host") {
+			httpReq.Host = v
+			continue
+		}
 		httpReq.Header.Set(k, v)
 	}
 
@@ -195,5 +279,6 @@ func (c *Client) sendResponse(resp *TunnelResponse) {
 		return
 	}
 
+	_ = c.conn.SetWriteDeadline(time.Now().Add(dataWriteWait))
 	_ = c.conn.WriteMessage(websocket.TextMessage, payload)
 }

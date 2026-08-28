@@ -15,7 +15,7 @@ import {
   allocateHostPort,
   PORT_RANGE,
 } from '../src/ingress/routes.js'
-import { startIngress, type IngressServer } from '../src/ingress/proxy.js'
+import { startIngress, forwardedHeaders, type IngressServer } from '../src/ingress/proxy.js'
 
 describe('managed hostnames', () => {
   const FLEET_A = '11111111-1111-1111-1111-111111111111'
@@ -51,6 +51,54 @@ describe('managed hostnames', () => {
       managedHostname('Img Proxy', "Yad's Lab", FLEET_A, 'fleetos.app'),
       /^img-proxy-yad-s-lab-[0-9a-f]{6}\.fleetos\.app$/
     )
+  })
+})
+
+describe('forwarded headers', () => {
+  const route = { nodeName: 'pi-01', serviceName: 'web' }
+  const fake = (headers: Record<string, string | string[]>, remoteAddress = '203.0.113.9') =>
+    ({ headers, socket: { remoteAddress } }) as Parameters<typeof forwardedHeaders>[0]
+
+  test('tells the app who its actual client is', () => {
+    // The whole reason this is shared between the direct and tunnel paths: a
+    // service that cannot see the client IP cannot rate-limit or audit by it.
+    const h = forwardedHeaders(fake({ host: 'web.fleetos.app' }), 'web.fleetos.app', route)
+    assert.equal(h['x-forwarded-for'], '203.0.113.9')
+    assert.equal(h['x-forwarded-host'], 'web.fleetos.app')
+    assert.equal(h['x-fleet-node'], 'pi-01')
+    assert.equal(h['x-fleet-service'], 'web')
+  })
+
+  test('appends to an existing forwarded-for chain rather than replacing it', () => {
+    // Cloudflare is in front of us, so the original client is already in there
+    // and an app reading the first entry must keep getting the same answer.
+    const h = forwardedHeaders(fake({ 'x-forwarded-for': '198.51.100.4' }), 'web.fleetos.app', route)
+    assert.equal(h['x-forwarded-for'], '198.51.100.4, 203.0.113.9')
+  })
+
+  test('keeps the inbound proto, so an https site does not get http redirects', () => {
+    const h = forwardedHeaders(fake({ 'x-forwarded-proto': 'https' }), 'web.fleetos.app', route)
+    assert.equal(h['x-forwarded-proto'], 'https')
+  })
+
+  test('falls back to http only when nothing in front of us terminated TLS', () => {
+    const h = forwardedHeaders(fake({}), 'web.fleetos.app', route)
+    assert.equal(h['x-forwarded-proto'], 'http')
+  })
+
+  test('strips hop-by-hop headers', () => {
+    // These describe our connection to the client, not the request. Passing
+    // `transfer-encoding` on to a node that is handed an already-buffered body
+    // is the one that actually breaks.
+    const h = forwardedHeaders(
+      fake({ connection: 'keep-alive', 'transfer-encoding': 'chunked', upgrade: 'h2c', accept: '*/*' }),
+      'web.fleetos.app',
+      route
+    )
+    assert.equal(h['connection'], undefined)
+    assert.equal(h['transfer-encoding'], undefined)
+    assert.equal(h['upgrade'], undefined)
+    assert.equal(h['accept'], '*/*')
   })
 })
 

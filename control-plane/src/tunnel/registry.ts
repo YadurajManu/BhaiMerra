@@ -1,5 +1,4 @@
 import { WebSocketServer, WebSocket } from 'ws'
-import type { IncomingMessage } from 'node:http'
 import type { FastifyInstance } from 'fastify'
 import type { AppContext } from '../api/context.js'
 import { nodes } from '../db/schema.js'
@@ -34,15 +33,79 @@ type PendingRequest = {
   timer: NodeJS.Timeout
 }
 
+/**
+ * How often to ping an idle tunnel, and how long to wait for the pong.
+ *
+ * 25s is chosen to sit under the idle timeout of the NATs and load balancers
+ * agents sit behind, which are commonly 30-60s — the ping is as much about
+ * keeping the mapping alive as about detecting that it is gone.
+ *
+ * The agent's own read deadline must stay longer than this period, or a healthy
+ * but idle tunnel tears itself down on schedule. See agent/internal/tunnel.
+ */
+const PING_PERIOD_MS = 25_000
+
+/** Just enough of Fastify's logger to report a tunnel dying, passed in by the caller. */
+type TunnelLogger = { warn: (obj: unknown, msg: string) => void }
+
 export class TunnelRegistry {
   private sockets = new Map<string, WebSocket>()
   private pending = new Map<string, PendingRequest>()
 
   constructor(private ctx: AppContext) {}
 
+  /**
+   * Is this node reachable through a tunnel right now?
+   *
+   * `readyState` alone cannot answer that: a socket whose NAT mapping has expired
+   * stays OPEN on both ends and simply never delivers anything, so ingress would
+   * keep choosing a tunnel that swallows every request until the 30s timeout. The
+   * keepalive below is what makes this answer trustworthy — it terminates a
+   * socket that stops answering pings, which flips this to false and lets ingress
+   * fall back to a direct connection.
+   */
   public has(nodeId: string): boolean {
     const ws = this.sockets.get(nodeId)
     return Boolean(ws && ws.readyState === WebSocket.OPEN)
+  }
+
+  /**
+   * Ping an idle tunnel and terminate it if it stops answering.
+   *
+   * Returns a stop function; the caller must call it on close, or the interval
+   * outlives the socket it was watching.
+   */
+  private startKeepalive(nodeId: string, ws: WebSocket, log?: TunnelLogger): () => void {
+    let awaitingPong = false
+
+    const timer = setInterval(() => {
+      if (ws.readyState !== WebSocket.OPEN) {
+        clearInterval(timer)
+        return
+      }
+      if (awaitingPong) {
+        // A full period with no reply. As far as the OS is concerned this socket
+        // is fine, which is precisely the failure readyState cannot see, so take
+        // it down hard — `close()` waits for a peer that is not listening.
+        clearInterval(timer)
+        log?.warn({ nodeId }, 'reverse tunnel stopped answering pings, terminating')
+        ws.terminate()
+        return
+      }
+      awaitingPong = true
+      try {
+        ws.ping()
+      } catch {
+        clearInterval(timer)
+        ws.terminate()
+      }
+    }, PING_PERIOD_MS)
+
+    ws.on('pong', () => {
+      awaitingPong = false
+    })
+
+    return () => clearInterval(timer)
   }
 
   /**
@@ -80,13 +143,15 @@ export class TunnelRegistry {
     return true
   }
 
-  public register(nodeId: string, ws: WebSocket) {
+  public register(nodeId: string, ws: WebSocket, log?: TunnelLogger) {
     // Close existing socket if any
     const existing = this.sockets.get(nodeId)
     if (existing && existing !== ws) {
       existing.close()
     }
     this.sockets.set(nodeId, ws)
+
+    const stopKeepalive = this.startKeepalive(nodeId, ws, log)
 
     ws.on('message', (data) => {
       try {
@@ -105,22 +170,36 @@ export class TunnelRegistry {
     })
 
     ws.on('close', () => {
+      stopKeepalive()
       if (this.sockets.get(nodeId) === ws) {
         this.sockets.delete(nodeId)
       }
     })
 
     ws.on('error', () => {
+      stopKeepalive()
       if (this.sockets.get(nodeId) === ws) {
         this.sockets.delete(nodeId)
       }
     })
   }
 
+  /**
+   * Send one HTTP request down a node's tunnel and wait for its response.
+   *
+   * Takes the headers already decided by the caller rather than reading them off
+   * the raw request: the ingress proxy owns forwarding policy for both paths to a
+   * node, and this only has to carry them. Multi-value headers are flattened
+   * because the wire format is one string per name.
+   */
   public async forwardHttpRequest(
     nodeId: string,
     port: number,
-    req: IncomingMessage,
+    req: {
+      method?: string
+      url?: string
+      headers: Record<string, string | string[] | undefined>
+    },
     bodyBuf?: Buffer
   ): Promise<TunnelResponse> {
     const ws = this.sockets.get(nodeId)
@@ -200,7 +279,7 @@ export function setupTunnelServer(app: FastifyInstance, ctx: AppContext, registr
 
       wss.handleUpgrade(req, socket, head, (ws) => {
         app.log.info({ nodeId: node.id }, 'reverse tunnel connected')
-        registry.register(node.id, ws)
+        registry.register(node.id, ws, app.log)
       })
     } catch (err) {
       app.log.error({ err }, 'error authenticating tunnel upgrade')
