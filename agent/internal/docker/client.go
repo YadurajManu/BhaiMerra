@@ -45,6 +45,11 @@ type Client struct {
 
 	mu         sync.Mutex
 	apiVersion string // "v1.44", once negotiated
+
+	startMu     sync.Mutex
+	everHealthy bool      // the daemon has answered at least once in this process
+	lastAttempt time.Time // when auto-start was last tried, for the cooldown
+	attempts    int
 }
 
 // New connects over the unix socket or TCP socket, honouring DOCKER_HOST when set.
@@ -241,8 +246,77 @@ func asError(err error, target **Error) bool {
 	return false
 }
 
-// EnsureRunning attempts to automatically start the container daemon across all platforms.
-func (c *Client) EnsureRunning(ctx context.Context) {
+// Auto-start policy, from FLEET_DOCKER_AUTOSTART.
+//
+//	"cold" (default) — start the daemon only if it has never answered in this
+//	                   process. A daemon that was up and is now down is treated
+//	                   as a deliberate human action.
+//	"always"         — start it whenever it is found down. The old behaviour.
+//	"never"          — never start it; only report.
+const (
+	autostartCold   = "cold"
+	autostartAlways = "always"
+	autostartNever  = "never"
+)
+
+// How long to wait between start attempts, and how many to make before giving
+// up, so a machine with a broken Docker install is not respawning it forever.
+const (
+	startCooldown = 2 * time.Minute
+	maxAttempts   = 3
+)
+
+func autostartPolicy() string {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("FLEET_DOCKER_AUTOSTART"))) {
+	case "never", "0", "false", "off":
+		return autostartNever
+	case "always", "1", "true", "on":
+		return autostartAlways
+	default:
+		return autostartCold
+	}
+}
+
+// EnsureRunning brings the container daemon up if policy allows it.
+//
+// The default is deliberately restrained. This used to fire from Ping on every
+// failed probe, which meant heartbeat (every interval) and reconcile (every
+// interval*2) each re-launched Docker within seconds of a user quitting it —
+// making Docker impossible to stop by hand on a paired machine. Helping someone
+// through a cold start is worth doing; overriding a decision they just made is
+// not, and a node whose Docker is down already reports that truthfully and has
+// its workloads rescheduled by the control plane.
+//
+// Returns whether a start was actually attempted.
+func (c *Client) EnsureRunning(ctx context.Context) bool {
+	policy := autostartPolicy()
+	if policy == autostartNever {
+		return false
+	}
+
+	c.startMu.Lock()
+	if policy == autostartCold && c.everHealthy {
+		// It was up, and now it is not. That is a person, not a fault.
+		c.startMu.Unlock()
+		return false
+	}
+	if c.attempts >= maxAttempts {
+		c.startMu.Unlock()
+		return false
+	}
+	if !c.lastAttempt.IsZero() && time.Since(c.lastAttempt) < startCooldown {
+		c.startMu.Unlock()
+		return false
+	}
+	c.lastAttempt = time.Now()
+	c.attempts++
+	c.startMu.Unlock()
+
+	c.startDaemon()
+	return true
+}
+
+func (c *Client) startDaemon() {
 	if runtime.GOOS == "linux" {
 		// If running under WSL, launch Docker Desktop on Windows host only if present
 		if os.Getenv("WSL_DISTRO_NAME") != "" || strings.Contains(os.Getenv("PATH"), "/mnt/c") {
@@ -286,19 +360,39 @@ func tryStartExecutable(paths ...string) {
 	}
 }
 
-// Ping reports whether the daemon is reachable. If down, it attempts self-healing
-// to start the Docker daemon automatically.
+// Ping reports whether the daemon is reachable.
+//
+// A pure probe with no side effects: it is called from the heartbeat and from
+// the diagnostics reporter, both of which only want to know the answer. Bringing
+// the daemon up is EnsureRunning's job, and the caller decides when that is
+// appropriate.
 func (c *Client) Ping(ctx context.Context) error {
 	ctxTimeout, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	err := c.do(ctxTimeout, http.MethodGet, "/"+c.api(ctxTimeout)+"/_ping", nil, nil)
-	if err != nil {
-		c.EnsureRunning(ctx)
-		secondCtx, secondCancel := context.WithTimeout(ctx, 2*time.Second)
-		defer secondCancel()
-		return c.do(secondCtx, http.MethodGet, "/"+c.api(secondCtx)+"/_ping", nil, nil)
+	if err == nil {
+		c.startMu.Lock()
+		c.everHealthy = true
+		// A daemon that came back resets the budget, so a genuine crash weeks
+		// later still gets helped.
+		c.attempts = 0
+		c.startMu.Unlock()
 	}
-	return nil
+	return err
+}
+
+// PingOrStart probes the daemon and, if it is down, asks EnsureRunning to bring
+// it up before probing once more. Used where the agent actually needs Docker in
+// order to make progress, not merely to report on it.
+func (c *Client) PingOrStart(ctx context.Context) error {
+	err := c.Ping(ctx)
+	if err == nil {
+		return err
+	}
+	if !c.EnsureRunning(ctx) {
+		return err
+	}
+	return c.Ping(ctx)
 }
 
 type ContainerSummary struct {

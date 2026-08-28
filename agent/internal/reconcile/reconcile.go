@@ -33,7 +33,11 @@ type Action struct {
 // Reconcile makes one pass: start what should run, replace what is running the
 // wrong deployment, and stop what is no longer wanted.
 func (e *Engine) Reconcile(ctx context.Context, desired *client.DesiredState) ([]Action, error) {
-	if err := e.Docker.Ping(ctx); err != nil {
+	// Reconciliation is the one path that cannot proceed without Docker, so
+	// this is where an auto-start is worth attempting. Policy inside
+	// PingOrStart decides whether it actually happens — by default it will not
+	// restart a daemon the operator has deliberately stopped.
+	if err := e.Docker.PingOrStart(ctx); err != nil {
 		// A node with no container runtime is still a live node. Say so
 		// clearly instead of failing the whole agent.
 		return nil, fmt.Errorf("container runtime unavailable: %w", err)

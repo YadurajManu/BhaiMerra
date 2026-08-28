@@ -106,7 +106,10 @@ func run() error {
 	// A node whose Docker is down is still a live node: it reports health and
 	// stays in the fleet, it just cannot run workloads. Say so once at startup
 	// rather than failing every reconcile in silence.
-	if err := dockerClient.Ping(ctx); err != nil {
+	//
+	// Startup is the cold-start case, so this is the one place an auto-start is
+	// unambiguously helpful — nobody has stopped Docker on purpose yet.
+	if err := dockerClient.PingOrStart(ctx); err != nil {
 		log.Warn("container runtime unavailable — this node will report health but cannot run services", "err", err)
 	} else {
 		log.Info("container runtime ready")
