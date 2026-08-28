@@ -3,6 +3,7 @@ import { api, type Deployment, type Service } from '../lib/api'
 import { useAuth, usePoll } from '../lib/auth'
 import { mb, since } from '../lib/format'
 import { Button, Copyable, ErrorNote, Panel, StatusPill } from '../components/ui'
+import LogTerminal from '../components/LogTerminal'
 import { useState } from 'react'
 
 type Preview = {
@@ -214,11 +215,15 @@ export default function ServiceDetail() {
         </div>
       </Panel>
 
-      <Panel title={logs.data ? `live log tail · ${logs.data.node.name}` : 'live log tail'}>
-        <pre className="max-h-[360px] overflow-auto p-5 font-mono text-[10.5px] leading-5 text-[var(--color-fg-muted)]">
-          {logs.data?.lines.join('\n') || logs.data?.diagnostic || 'waiting for agent telemetry…'}
-        </pre>
-      </Panel>
+      <LogTerminal
+        serviceName={service.name}
+        nodeName={logs.data?.node?.name}
+        lines={logs.data?.lines ?? []}
+        diagnostic={logs.data?.diagnostic ?? null}
+        loading={logs.loading}
+        isLive={true}
+        height="420px"
+      />
     </div>
   )
 }

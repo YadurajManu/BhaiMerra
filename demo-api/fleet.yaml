@@ -6,4 +6,5 @@ services:
     placement: flexible
     resources: { ram: 128Mi, cpu: 0.2 }
     health: { path: / }
+    port: 80
     container_port: 80

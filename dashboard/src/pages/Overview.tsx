@@ -3,6 +3,7 @@ import { api, type Node, type PlacementMapNode, type TimelineEvent } from '../li
 import { useAuth, usePoll } from '../lib/auth'
 import { mb, pct, since, toneOf } from '../lib/format'
 import { Dot, Empty, ErrorNote, GridFiller, Meter, Panel, StatusPill, Button } from '../components/ui'
+import ClusterMeshVisualizer from '../components/ClusterMeshVisualizer'
 
 export default function Overview() {
   const { fleet } = useAuth()
@@ -79,6 +80,20 @@ export default function Overview() {
           </div>
         ))}
       </div>
+
+      {/* Interactive cluster mesh topology */}
+      <Panel title="cluster mesh" right={
+        <span className="inline-flex items-center gap-1.5 font-mono text-[10px] normal-case">
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--color-signal)]" />
+          live
+        </span>
+      }>
+        <ClusterMeshVisualizer
+          mapNodes={mapNodes}
+          nodes={all}
+          fleetName={fleet.name}
+        />
+      </Panel>
 
       <div className="grid gap-6 lg:grid-cols-[1fr_360px]">
         {/* placement map — the picture of where everything is */}
