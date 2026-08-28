@@ -81,6 +81,7 @@ export default function Services() {
   const [busy, setBusy] = useState<string | null>(null)
   const [actionError, setActionError] = useState<unknown>(null)
   const [actionSuccess, setActionSuccess] = useState<string | null>(null)
+  const [copiedId, setCopiedId] = useState<string | null>(null)
 
   const services = useMemo(() => data?.services ?? [], [data])
 
@@ -493,7 +494,17 @@ export default function Services() {
                         >
                           {url} ↗
                         </a>
-                        <Copyable text={url} className="shrink-0" />
+                        <button
+                          onClick={() => {
+                            void navigator.clipboard?.writeText(url)
+                            setCopiedId(s.id)
+                            setTimeout(() => setCopiedId(null), 2000)
+                          }}
+                          title="Copy URL"
+                          className="shrink-0 rounded-[2px] border border-[var(--color-line-2)] px-1.5 py-0.5 font-mono text-[9.5px] text-[var(--color-fg-dim)] transition-colors hover:border-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
+                        >
+                          {copiedId === s.id ? '✓ Copied' : 'Copy'}
+                        </button>
                       </div>
                     ) : (
                       <span className="font-mono text-[11px] text-[var(--color-fg-dim)]">No public domain attached</span>
@@ -566,12 +577,12 @@ export default function Services() {
                       </button>
 
                       <Button
-                        variant="primary"
+                        variant={isRunning ? 'ghost' : 'primary'}
                         onClick={() => void deploy(s)}
                         disabled={busy !== null}
                         className="h-[30px] px-3.5 text-[11px]"
                       >
-                        {isDeploying ? 'Deploying…' : '🚀 Deploy'}
+                        {isDeploying ? 'Deploying…' : isRunning ? '🚀 Redeploy' : '🚀 Deploy'}
                       </Button>
                     </div>
                   )}
