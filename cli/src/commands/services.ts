@@ -104,7 +104,14 @@ export const applyCommand = {
 }
 
 export const servicesCommand = {
-  async run(_args: string[], flags: Flags) {
+  async run(args: string[], flags: Flags) {
+    // `fleet services rm <name>` is the same action as `fleet rm <name>`;
+    // both spellings exist because one reads as a subcommand of the noun and
+    // the other as the short form an operator reaches for under pressure.
+    if (args[0] === 'rm' || args[0] === 'remove' || args[0] === 'delete') {
+      return removeServiceCommand.run(args.slice(1), flags)
+    }
+
     const fleetId = await requireFleet(typeof flags.fleet === 'string' ? flags.fleet : undefined)
     const { body } = await request<{ services: Service[] }>('GET', `/fleets/${fleetId}/services`)
 
@@ -464,3 +471,63 @@ export const initCommand = {
     console.log(c.dim(`\n  …or just run: fleet up`))
   },
 }
+
+/**
+ * fleet rm <service> / fleet services rm <service> — permanently undeploy.
+ *
+ * Distinct from `fleet down`, which stops the workload but keeps the service
+ * definition so it can be redeployed. This removes the definition too, which
+ * is not recoverable from the control plane, so the confirmation is required
+ * rather than best-effort: a non-interactive caller must pass --yes explicitly
+ * instead of having silence taken as consent.
+ */
+export const removeServiceCommand = {
+  async run(args: string[], flags: Flags) {
+    // Before requireFleet, which reaches the control plane when no fleet is
+    // saved: a missing argument is a usage error and should not depend on the
+    // network being up to say so.
+    const [name] = args
+    if (!name) throw new CliError('usage: fleet rm <service> [--yes]', EXIT.usage)
+
+    const fleetId = await requireFleet(typeof flags.fleet === 'string' ? flags.fleet : undefined)
+    const service = await findService(fleetId, name)
+    const confirmed = flags.yes === true || flags.y === true
+
+    if (!confirmed) {
+      if (!process.stdin.isTTY) {
+        throw new CliError(
+          `Deleting "${service.name}" is permanent. Re-run with --yes to confirm.`,
+          EXIT.usage
+        )
+      }
+      const { createInterface } = await import('node:readline/promises')
+      const rl = createInterface({ input: process.stdin, output: process.stdout })
+      try {
+        console.log(
+          `\n  This permanently deletes ${c.bold(service.name)} from the fleet:` +
+            `\n    ${c.dim('·')} its containers are removed from the node it runs on` +
+            `\n    ${c.dim('·')} its deployment history and URL are released` +
+            `\n  ${c.dim('To stop it without deleting it, use `fleet down` instead.')}\n`
+        )
+        const ans = await rl.question(`  Type the service name to confirm [${c.dim(service.name)}]: `)
+        if (ans.trim() !== service.name) {
+          console.log(c.dim('Delete cancelled.'))
+          return
+        }
+      } finally {
+        rl.close()
+      }
+    }
+
+    const { body } = await request<{ deleted: boolean; service: string; stopped: number; note?: string }>(
+      'DELETE',
+      `/services/${service.id}`
+    )
+
+    if (flags.json) return console.log(JSON.stringify(body, null, 2))
+
+    console.log(`${glyph.ok} ${c.red('deleted')}  ${c.bold(body.service)}`)
+    if (body.note) console.log(c.dim(`  ${body.note}`))
+  },
+}
+

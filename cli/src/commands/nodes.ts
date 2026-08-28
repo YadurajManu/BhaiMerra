@@ -85,8 +85,30 @@ export const nodesCommand = {
           EXIT.usage
         )
       }
-      await request('DELETE', `/fleets/${fleetId}/nodes/${node.id}`)
+      const { body } = await request<{
+        removed: { id: string; name: string }
+        evicted: Array<{ service: string; action: string; toNodeName?: string; reason?: string }>
+        tunnelClosed: boolean
+      }>('DELETE', `/fleets/${fleetId}/nodes/${node.id}`)
+
+      if (flags.json) return console.log(JSON.stringify(body, null, 2))
+
       console.log(`${node.name} removed and its agent credentials revoked`)
+      for (const e of body.evicted ?? []) {
+        if (e.action === 'moved') {
+          console.log(c.dim(`  ${e.service} → ${e.toNodeName ?? 'another node'}`))
+        } else {
+          // Pinned and stranded services need saying out loud: the node is
+          // gone and these did not find a new home.
+          console.log(c.yellow(`  ${e.service} could not move — ${e.reason ?? e.action}`))
+        }
+      }
+      console.log(
+        c.dim(
+          `  To clean up that machine itself, run ` +
+            `${c.cyan('fleet unpair')}${c.dim(' on it.')}`
+        )
+      )
       return
     }
 

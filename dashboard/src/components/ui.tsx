@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { useEffect, useState } from 'react'
 import { TONE_TEXT, toneOf } from '../lib/format'
 
 /* The mark from the marketing site: six peers, one live, wired into a mesh. */
@@ -73,6 +74,113 @@ export function Button({
     >
       {children}
     </button>
+  )
+}
+
+/**
+ * A confirmation dialog for destructive actions.
+ *
+ * Replaces window.confirm/window.prompt for these: a native dialog cannot say
+ * what is about to happen in more than one line, is styled by the browser, and
+ * on `prompt` cannot show the value it wants typed next to the field. Deleting a
+ * service or removing a node are the two actions in this app with consequences
+ * that cannot be undone from the dashboard, so they are worth spelling out.
+ *
+ * Pass `confirmPhrase` to require the exact name to be typed — reserved for
+ * actions that destroy state, not for ones that merely stop something.
+ */
+export function ConfirmDialog({
+  open,
+  title,
+  body,
+  consequences,
+  confirmLabel,
+  confirmPhrase,
+  busy = false,
+  onConfirm,
+  onCancel,
+}: {
+  open: boolean
+  title: string
+  body?: ReactNode
+  consequences?: string[]
+  confirmLabel: string
+  confirmPhrase?: string
+  busy?: boolean
+  onConfirm: () => void
+  onCancel: () => void
+}) {
+  const [typed, setTyped] = useState('')
+
+  // Reset between openings, or a second dialog inherits the first one's input
+  // and its confirm button starts out already enabled.
+  useEffect(() => {
+    if (open) setTyped('')
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !busy) onCancel()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open, busy, onCancel])
+
+  if (!open) return null
+
+  const ready = !confirmPhrase || typed.trim() === confirmPhrase
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+      onClick={() => { if (!busy) onCancel() }}
+    >
+      <div
+        className="w-full max-w-[440px] rounded-[4px] border border-[var(--color-line-2)] bg-[var(--color-ink-900)] p-5 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 className="font-mono text-[14px] text-[var(--color-fg)]">{title}</h2>
+        {body && <div className="mt-2.5 text-[13px] leading-relaxed text-[var(--color-fg-muted)]">{body}</div>}
+
+        {consequences && consequences.length > 0 && (
+          <ul className="mt-3.5 space-y-1.5 border-l border-[var(--color-line-2)] pl-3">
+            {consequences.map((line) => (
+              <li key={line} className="font-mono text-[11px] leading-relaxed text-[var(--color-fg-dim)]">
+                {line}
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {confirmPhrase && (
+          <div className="mt-4">
+            <Field
+              label={`Type "${confirmPhrase}" to confirm`}
+              autoFocus
+              value={typed}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder={confirmPhrase}
+              onChange={(e) => setTyped(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && ready && !busy) onConfirm() }}
+            />
+          </div>
+        )}
+
+        <div className="mt-5 flex justify-end gap-2">
+          <Button onClick={onCancel} disabled={busy}>
+            Cancel
+          </Button>
+          <Button variant="danger" onClick={onConfirm} disabled={busy || !ready}>
+            {busy ? 'working…' : confirmLabel}
+          </Button>
+        </div>
+      </div>
+    </div>
   )
 }
 

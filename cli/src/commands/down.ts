@@ -15,12 +15,31 @@ type Service = {
   current: { status: string; nodeName: string | null } | null
 }
 
-async function confirmTeardown(name: string): Promise<boolean> {
+/**
+ * Say what teardown actually does before doing it.
+ *
+ * The distinction people get wrong is `down` versus `rm`, so the prompt names it:
+ * the container goes, the service definition stays and can be redeployed. Where
+ * it is running is included because that is the machine whose Docker is about to
+ * change, and it is usually not the one this command is typed on.
+ *
+ * Non-interactive callers are taken as consenting. That is deliberate and is not
+ * how `rm` behaves — stopping a service is undone by deploying it again, so a
+ * scripted `fleet down` in a CI teardown step should not need --yes.
+ */
+async function confirmTeardown(service: Service): Promise<boolean> {
   if (!process.stdin.isTTY) return true
+  const where = service.current?.nodeName
+  console.log(
+    `\n  This stops ${c.bold(service.name)}${where ? ` on ${c.bold(where)}` : ''}:` +
+      `\n    ${c.dim('·')} its container is removed from that machine` +
+      `\n    ${c.dim('·')} the service definition is kept, so ${c.cyan('fleet deploy')}${c.dim(' brings it back')}` +
+      `\n  ${c.dim('To delete it outright, use `fleet rm` instead.')}\n`
+  )
   const { createInterface } = await import('node:readline/promises')
   const rl = createInterface({ input: process.stdin, output: process.stdout })
   try {
-    const ans = await rl.question(`  Stop and tear down ${c.bold(name)}? [y/N] `)
+    const ans = await rl.question(`  Stop and tear down ${c.bold(service.name)}? [y/N] `)
     return ans.trim().toLowerCase() === 'y'
   } finally {
     rl.close()
@@ -29,9 +48,12 @@ async function confirmTeardown(name: string): Promise<boolean> {
 
 export const downCommand = {
   async run(args: string[], flags: Flags) {
-    const fleetId = await requireFleet(typeof flags.fleet === 'string' ? flags.fleet : undefined)
+    // Before requireFleet, which reaches the control plane when no fleet is
+    // saved: a missing argument should not need the network to be reported.
     const [name] = args
     if (!name) throw new CliError('usage: fleet down <service> [--yes]', EXIT.usage)
+
+    const fleetId = await requireFleet(typeof flags.fleet === 'string' ? flags.fleet : undefined)
 
     const { body: listBody } = await request<{ services: Service[] }>('GET', `/fleets/${fleetId}/services`)
     const service = listBody.services.find((s) => s.name === name || s.id === name)
@@ -42,7 +64,7 @@ export const downCommand = {
       )
     }
 
-    if (!flags.yes && !flags.y && !(await confirmTeardown(service.name))) {
+    if (!flags.yes && !flags.y && !(await confirmTeardown(service))) {
       console.log(c.dim('Teardown cancelled.'))
       return
     }

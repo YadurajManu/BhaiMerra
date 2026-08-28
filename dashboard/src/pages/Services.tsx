@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { api, type Service } from '../lib/api'
 import { useAuth, usePoll } from '../lib/auth'
 import { mb, toneOf } from '../lib/format'
-import { Button, Copyable, Dot, Empty, ErrorNote, Panel, StatusPill } from '../components/ui'
+import { Button, ConfirmDialog, Copyable, Dot, Empty, ErrorNote, Panel, StatusPill } from '../components/ui'
 
 const TEMPLATES: Record<string, string> = {
   nginx: `fleet: homelab
@@ -82,6 +82,7 @@ export default function Services() {
   const [actionError, setActionError] = useState<unknown>(null)
   const [actionSuccess, setActionSuccess] = useState<string | null>(null)
   const [copiedId, setCopiedId] = useState<string | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState<Service | null>(null)
 
   const services = useMemo(() => data?.services ?? [], [data])
 
@@ -186,6 +187,41 @@ export default function Services() {
     try {
       await api(`/services/${service.id}/restart`, { method: 'POST', body: {} })
       setActionSuccess(`Restart signal sent to ${service.name}`)
+      setTimeout(() => setActionSuccess(null), 4000)
+    } catch (err) {
+      setActionError(err)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function stop(service: Service) {
+    setBusy(`stop-${service.id}`)
+    setActionError(null)
+    setActionSuccess(null)
+    try {
+      await api(`/services/${service.id}/stop`, { method: 'POST', body: {} })
+      setActionSuccess(`Stop signal sent. Containers for "${service.name}" will be removed.`)
+      setTimeout(() => setActionSuccess(null), 4000)
+    } catch (err) {
+      setActionError(err)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function deleteService(service: Service) {
+    setBusy(`delete-${service.id}`)
+    setActionError(null)
+    setActionSuccess(null)
+    try {
+      const res = await api<{ stopped: number }>(`/services/${service.id}`, { method: 'DELETE' })
+      setConfirmDelete(null)
+      setActionSuccess(
+        res.stopped
+          ? `"${service.name}" deleted. Its container is being removed from the node.`
+          : `"${service.name}" deleted.`
+      )
       setTimeout(() => setActionSuccess(null), 4000)
     } catch (err) {
       setActionError(err)
@@ -567,6 +603,17 @@ export default function Services() {
 
                   {canDeploy && (
                     <div className="flex items-center gap-2">
+                      {isRunning && (
+                        <button
+                          onClick={() => void stop(s)}
+                          disabled={busy !== null}
+                          title="Stop and tear down running containers"
+                          className="inline-flex items-center gap-1.5 rounded-[3px] border border-[var(--color-line-2)] bg-[var(--color-ink-900)] px-3 py-1 font-mono text-[11px] text-[var(--color-down)] transition-colors hover:border-[var(--color-down)] disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          {busy === `stop-${s.id}` ? 'Stopping…' : '⏹ Stop'}
+                        </button>
+                      )}
+
                       <button
                         onClick={() => void restart(s)}
                         disabled={busy !== null || !isRunning}
@@ -584,6 +631,17 @@ export default function Services() {
                       >
                         {isDeploying ? 'Deploying…' : isRunning ? '🚀 Redeploy' : '🚀 Deploy'}
                       </Button>
+
+                      {canEdit && (
+                        <button
+                          onClick={() => setConfirmDelete(s)}
+                          disabled={busy !== null}
+                          title="Permanently remove service from fleet"
+                          className="inline-flex items-center justify-center rounded-[3px] border border-[var(--color-line-2)] p-1 px-2 font-mono text-[11px] text-[var(--color-fg-dim)] transition-colors hover:border-[var(--color-down)] hover:text-[var(--color-down)] disabled:opacity-40"
+                        >
+                          {busy === `delete-${s.id}` ? '…' : '🗑️'}
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>
@@ -592,6 +650,22 @@ export default function Services() {
           })}
         </div>
       )}
+
+      <ConfirmDialog
+        open={confirmDelete !== null}
+        title={`Delete ${confirmDelete?.name ?? 'service'}`}
+        body="This removes the service from the fleet. It cannot be undone from the dashboard."
+        consequences={[
+          'Its container is removed from the node it runs on',
+          'Its deployment history and URL are released',
+          'To stop it without deleting it, use Stop instead',
+        ]}
+        confirmPhrase={confirmDelete?.name}
+        confirmLabel="Delete service"
+        busy={busy === `delete-${confirmDelete?.id}`}
+        onConfirm={() => { if (confirmDelete) void deleteService(confirmDelete) }}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </div>
   )
 }

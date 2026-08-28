@@ -46,6 +46,7 @@ const GROUPS: Array<[string, Array<[string, string]>]> = [
     'operating',
     [
       ['down <service>', 'Stop and tear down a service deployment'],
+      ['rm <service>', 'Permanently delete a service from the fleet'],
       ['validate [file]', 'Check a fleet.yaml without applying it'],
       ['reschedule <service>', 'Force a service to move'],
       ['restart <service>', 'Replace the current release on its node'],
@@ -53,6 +54,7 @@ const GROUPS: Array<[string, Array<[string, string]>]> = [
       ['nodes cordon <name>', 'Stop scheduling new work onto a node'],
       ['nodes uncordon <name>', 'Allow scheduling again'],
       ['nodes rm <name>', 'Revoke and remove a node'],
+      ['unpair', 'Remove this machine from its fleet, run on the machine'],
       ['alerts', 'List, add, and test alert rules'],
       ['auth login|logout|whoami', 'Sign in to a control plane'],
     ],

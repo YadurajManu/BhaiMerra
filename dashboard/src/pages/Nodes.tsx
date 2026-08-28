@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { api, type Node } from '../lib/api'
 import { useAuth, usePoll } from '../lib/auth'
 import { mb, since, pct, toneOf } from '../lib/format'
-import { Button, Dot, Empty, ErrorNote, Meter, Panel, StatusPill } from '../components/ui'
+import { Button, ConfirmDialog, Dot, Empty, ErrorNote, Meter, Panel, StatusPill } from '../components/ui'
 
 type FilterOption = 'ALL' | 'ONLINE' | 'OFFLINE' | 'CORDONED' | 'DARWIN' | 'LINUX' | 'WINDOWS'
 type PlatformTab = 'unix' | 'windows' | 'cli'
@@ -36,6 +36,7 @@ export default function Nodes() {
   const [actionSuccess, setActionSuccess] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [filter, setFilter] = useState<FilterOption>('ALL')
+  const [confirmRemove, setConfirmRemove] = useState<Node | null>(null)
 
   const nodes = useMemo(() => data?.nodes ?? [], [data])
   const liveNodes = useMemo(() => nodes.filter((n) => n.live || n.status === 'online'), [nodes])
@@ -104,17 +105,36 @@ export default function Nodes() {
     }
   }
 
+  /**
+   * Remove a node. The API evicts its workloads first and reports what happened
+   * to each one, so the success line says where things went rather than only
+   * that the node is gone — a service that could not move is the one thing the
+   * operator needs to hear about, and it is easy to miss on the Services page.
+   */
   async function remove(node: Node) {
-    const typed = window.prompt(
-      `Removing "${node.name}" revokes its agent credentials and takes it out of the fleet.\n` +
-        `Anything pinned to it will have nowhere to run.\n\nType the node name "${node.name}" to confirm:`
-    )
-    if (typed !== node.name) return
     setBusy(`remove-${node.id}`)
+    setActionError(null)
+    setActionSuccess(null)
     try {
-      await api(`/fleets/${id}/nodes/${node.id}`, { method: 'DELETE' })
-      setActionSuccess(`Node ${node.name} removed from fleet`)
-      setTimeout(() => setActionSuccess(null), 3000)
+      const res = await api<{
+        evicted?: Array<{ service: string; action: string; toNodeName?: string; reason?: string }>
+      }>(`/fleets/${id}/nodes/${node.id}`, { method: 'DELETE' })
+      setConfirmRemove(null)
+
+      const evicted = res.evicted ?? []
+      const moved = evicted.filter((e) => e.action === 'moved')
+      const held = evicted.filter((e) => e.action !== 'moved')
+      const detail = [
+        moved.length ? `${moved.length} service${moved.length === 1 ? '' : 's'} rescheduled` : null,
+        held.length ? `${held.length} could not move: ${held.map((h) => h.service).join(', ')}` : null,
+      ].filter(Boolean)
+
+      setActionSuccess(
+        `${node.name} removed and its credentials revoked` + (detail.length ? ` — ${detail.join('; ')}` : '')
+      )
+      // Held services are a standing problem, not a transient toast. Give the
+      // operator time to read the names before it clears.
+      setTimeout(() => setActionSuccess(null), held.length ? 12000 : 4000)
     } catch (err) {
       setActionError(err)
     } finally {
@@ -580,7 +600,7 @@ export default function Nodes() {
                       {fleet?.role === 'owner' && (
                         <Button
                           variant="danger"
-                          onClick={() => void remove(n)}
+                          onClick={() => setConfirmRemove(n)}
                           disabled={busy !== null}
                           className="h-[28px] px-2.5 text-[10.5px]"
                           title="Revoke pairing credentials and remove from cluster"
@@ -596,6 +616,23 @@ export default function Nodes() {
           })}
         </div>
       )}
+
+      <ConfirmDialog
+        open={confirmRemove !== null}
+        title={`Remove ${confirmRemove?.name ?? 'node'}`}
+        body="This takes the machine out of the fleet. It can be paired again later, but with new credentials."
+        consequences={[
+          'Its agent credentials are revoked and its reverse tunnel is closed',
+          'Flexible and preferred services are moved to other nodes',
+          'Pinned services stay put and will have nowhere to run',
+          `To clean up the machine itself, run "fleet unpair" on it`,
+        ]}
+        confirmPhrase={confirmRemove?.name}
+        confirmLabel="Remove node"
+        busy={busy === `remove-${confirmRemove?.id}`}
+        onConfirm={() => { if (confirmRemove) void remove(confirmRemove) }}
+        onCancel={() => setConfirmRemove(null)}
+      />
     </div>
   )
 }

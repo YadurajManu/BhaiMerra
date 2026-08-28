@@ -8,12 +8,14 @@ import { doctorCommand } from './doctor.js'
 import { upCommand } from './up.js'
 import { openCommand } from './open.js'
 import { downCommand } from './down.js'
+import { unpairCommand, agentCommand } from './unpair.js'
 import {
   applyCommand,
   deployCommand,
   deploymentsCommand,
   initCommand,
   logsCommand,
+  removeServiceCommand,
   restartCommand,
   rollbackCommand,
   rescheduleCommand,
@@ -28,6 +30,7 @@ export const commands: Record<string, Command> = {
   up: upCommand,
   open: openCommand,
   down: downCommand,
+  rm: removeServiceCommand,
   auth: authCommand,
   config: configCommand,
   use: useCommand,
@@ -47,5 +50,7 @@ export const commands: Record<string, Command> = {
   rollback: rollbackCommand,
   events: eventsCommand,
   alerts: alertsCommand,
+  unpair: unpairCommand,
+  agent: agentCommand,
 }
 
