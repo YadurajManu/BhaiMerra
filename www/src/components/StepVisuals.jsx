@@ -35,10 +35,10 @@ function Register() {
     <Frame title="agent · first contact" right="node-02">
       <div className="min-w-0 font-mono text-[11px] leading-[1.9] sm:text-[11.5px]">
         <motion.div {...row(0)} className="break-all text-[var(--color-fg-muted)]">
-          <span className="text-[var(--color-signal)]">$</span> curl -fsSL fleet-os.dev/install | sh
+          <span className="text-[var(--color-signal)]">$</span> fleet nodes pair
         </motion.div>
         <motion.div {...row(1)} className="text-[var(--color-fg-dim)]">
-          → detecting capability…
+          → copy the one-time command into the machine you own…
         </motion.div>
         <div className="mt-3 grid grid-cols-1 gap-x-6 sm:grid-cols-2">
           {caps.map(([k, v], i) => (

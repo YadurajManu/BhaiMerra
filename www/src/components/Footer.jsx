@@ -134,14 +134,13 @@ export default function Footer() {
           </a>
 
           <p className="mt-6 max-w-[36ch] text-[13px] leading-[1.7] text-[var(--color-fg-muted)] text-pretty">
-            git-push deploys onto the Pi, the old laptop and the spare mini PC you
-            already own. Multi-arch builds, constraint-based placement, an encrypted
-            mesh, and failover that knows the difference between a web server and a
-            database.
+            Pair the machines you own, declare services in <code>fleet.yaml</code>, and
+            deploy the exact commit you push. Fleet OS builds, schedules, and routes
+            your services without pretending your hardware is someone else’s cloud.
           </p>
 
           <div className="mt-7 max-w-[400px]">
-            <CopyLine command="curl -fsSL fleet-os.dev/install | sh" />
+            <CopyLine command="fleet auth login && fleet nodes pair" />
           </div>
 
           <div className="mt-6 flex flex-wrap items-center gap-3">

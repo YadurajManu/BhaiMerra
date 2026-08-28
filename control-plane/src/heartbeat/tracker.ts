@@ -9,6 +9,16 @@ export type HeartbeatPayload = {
   containers: Array<{ name: string; state: string; health?: string }>
   meshConnected: boolean
   agentVersion?: string
+  runtime?: {
+    dockerAvailable: boolean
+    dockerVersion?: string
+    dockerApiVersion?: string
+    dockerError?: string
+    registryStatus?: 'ok' | 'failed' | 'not_tested'
+    registryError?: string
+    lastReconcileError?: string
+  }
+  logs?: Array<{ service: string; text: string }>
 }
 
 /**

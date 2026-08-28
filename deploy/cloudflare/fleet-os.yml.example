@@ -1,37 +1,64 @@
 # Cloudflare Tunnel config for Fleet OS.
 #
-# Kept as its own file so it never touches ~/.cloudflared/config.yml, which
-# already routes other projects. Run it with:
+# Its own file, never ~/.cloudflared/config.yml, which routes other projects
+# and would be clobbered.
 #
 #   cloudflared tunnel --config deploy/cloudflare/fleet-os.yml run
 #
-# Three hostnames, three jobs:
-#   fleet.<zone>    the dashboard (nginx, which also proxies /api)
-#   api.fleet.<zone> the control-plane API directly — for the CLI and agents
-#   *.fleet.<zone>  every deployed service, via the ingress edge
+# Rules match in order and the first wins, so every specific hostname must
+# come before the wildcard or the wildcard swallows them all.
 #
-# The wildcard is what makes a deployed service reachable at the hostname the
-# scheduler assigned it, and it is why INGRESS_ZONE must match this zone.
+# Every hostname here is ONE level below the apex. Cloudflare's free Universal
+# SSL covers the apex and one level; anything deeper has no certificate and
+# fails TLS in the browser with nothing useful in the error.
 
 tunnel: REPLACE_WITH_TUNNEL_ID
-credentials-file: /Users/REPLACE_ME/.cloudflared/REPLACE_WITH_TUNNEL_ID.json
+credentials-file: /etc/cloudflared/credentials.json
 
-# Cloudflare terminates TLS; these are plain HTTP on the loopback.
+# Origins are compose service names, not localhost: the tunnel runs as a
+# container beside them, so it reaches them on the compose network and the
+# public path needs no published host port at all.
+
+# Keep reconnecting. cloudflared gives up after a few attempts by default and
+# exits, which takes the site down silently — the container restart policy is
+# the backstop, this is the first line of defence.
+retries: 20
+grace-period: 30s
+
+# Edge transport, cloudflared -> Cloudflare. A different hop from
+# originRequest below, which is cloudflared -> your local server.
+#
+# QUIC is the default and faster where it works. It is also UDP/443, which
+# many home ISPs silently drop — the symptom is "failed to dial to edge with
+# quic: timeout" and a tunnel that never connects. context.txt §3 records
+# exactly this from this domain, so http2 is the default rather than
+# something to rediscover.
+protocol: http2
+
+originRequest:
+  http2Origin: true
+  connectTimeout: 30s
+
 ingress:
-  - hostname: fleet.plastikworld.xyz
-    service: http://localhost:8082
+  # The marketing site.
+  - hostname: fleet.REPLACE_ZONE
+    service: http://www:80
 
-  - hostname: api.fleet.plastikworld.xyz
-    service: http://localhost:8080
+  # The dashboard. Its nginx also proxies /api, so the browser stays
+  # same-origin and never meets CORS.
+  - hostname: fleetapp.REPLACE_ZONE
+    service: http://dashboard:80
 
-  # Every deployed service. The edge resolves the Host header to whichever
-  # node is running that service right now.
-  - hostname: "*.fleet.plastikworld.xyz"
-    service: http://localhost:8081
-    originRequest:
-      # QUIC is faster where it works and unreliable on networks that treat
-      # long-lived UDP as suspicious, which describes a lot of home ISPs.
-      # This is the lesson the tech doc records from plastikworld.xyz itself.
-      http2Origin: true
+  # The API directly, for the CLI and for agents.
+  - hostname: fleetapi.REPLACE_ZONE
+    service: http://control-plane:8080
+
+  # Every deployed service. Managed hostnames are a single label
+  # (web-homelab-7efe4c) precisely so this one wildcard covers them all.
+  #
+  # Explicit records on the zone still win over a wildcard, so anything else
+  # already on plastikworld.xyz keeps working.
+  - hostname: "*.REPLACE_ZONE"
+    service: http://control-plane:8081
 
   - service: http_status:404

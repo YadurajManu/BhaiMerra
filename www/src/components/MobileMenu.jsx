@@ -152,7 +152,7 @@ export default function MobileMenu({ open, onClose }) {
               transition={{ duration: 0.55, delay: 0.5, ease: EASE.expo }}
               className="mt-12 border-t border-[var(--color-line)] pt-8"
             >
-              <CopyLine command="curl -fsSL fleet-os.dev/install | sh" />
+              <CopyLine command="fleet auth login && fleet nodes pair" />
               <a
                 href="#pricing"
                 onClick={onClose}

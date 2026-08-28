@@ -80,6 +80,17 @@ services:
     assert.equal(byName['big']!.resources.ram, 4096)
   })
 
+  test('keeps a repository URL for push-triggered deploys', () => {
+    const { services } = parseManifest(`
+fleet: homelab
+services:
+  web:
+    repo: https://github.com/you/homelab.git
+    build: ./web
+`)
+    assert.equal(services[0]!.repo, 'https://github.com/you/homelab.git')
+  })
+
   test('fills in sane defaults for everything omitted', () => {
     const [svc] = parseManifest(`
 fleet: f

@@ -1,8 +1,12 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { and, eq } from 'drizzle-orm'
 import { z } from 'zod'
 import type { FastifyInstance } from 'fastify'
-import { fleets, services } from '../db/schema.js'
+import { fleets, githubRepositories, services } from '../db/schema.js'
+import { parseManifest } from '../manifest/parse.js'
+import { syncManifest } from '../manifest/sync.js'
 import { checkoutRepo } from '../git/checkout.js'
 import { authenticatedCloneUrl, installationForRepo } from '../github/app.js'
 import { deployFromPush } from './deploy.js'
@@ -117,11 +121,21 @@ export async function webhookRoutes(app: FastifyInstance) {
       .from(services)
       .where(and(eq(services.fleetId, fleetId)))
 
+    const connectedRepositories = await db
+      .select()
+      .from(githubRepositories)
+      .where(eq(githubRepositories.fleetId, fleetId))
+    const connected = connectedRepositories.find((repo) => candidates.includes(normaliseRepo(repo.cloneUrl)))
+
+    if (connected && push.ref !== `refs/heads/${connected.branch}`) {
+      return { ok: true, ignored: `watching ${connected.branch}, received ${push.ref}` }
+    }
+
     const matched = fleetServices.filter(
       (s) => s.repoUrl && candidates.includes(normaliseRepo(s.repoUrl))
     )
 
-    if (!matched.length) {
+    if (!matched.length && !connected) {
       // Not an error: a repo may legitimately have no services in this fleet.
       return {
         ok: true,
@@ -136,55 +150,81 @@ export async function webhookRoutes(app: FastifyInstance) {
       ref: push.ref,
       sha: gitSha.slice(0, 12),
       triggered: matched.map((s) => s.name),
+      manifest: connected?.manifestPath ?? 'fleet.yaml',
     })
 
     setImmediate(async () => {
-      for (const service of matched) {
-        try {
-          // Fetch the tree at the pushed commit, then deploy it. Failures are
-          // recorded and alerted on rather than thrown into a dead request.
-          // Private repos need an installation token. Public ones work
-          // without the App configured at all, so a missing App is not fatal.
-          let remote = service.repoUrl!
-          if (app.ctx.github) {
-            try {
-              const fullName = normaliseRepo(remote).split('/').slice(-2).join('/')
-              const installation = await installationForRepo(app.ctx.github, fullName)
-              if (installation) {
-                remote = await authenticatedCloneUrl(app.ctx.github, installation, remote)
-              }
-            } catch (err) {
-              req.log.warn({ err, service: service.name }, 'could not obtain a GitHub installation token')
-            }
-          }
-
-          const checkout = await checkoutRepo({
-            repoUrl: remote,
-            gitSha,
-            workdir: app.ctx.config.BUILD_WORKDIR,
-          })
+      // All matched services share one repository and commit. Fetch once so
+      // the exact fleet.yaml and all builds are guaranteed to come from the
+      // same tree rather than from whatever happens to be on the default
+      // branch when the webhook arrives.
+      const source = matched[0]
+      const sourceUrl = connected?.cloneUrl ?? source?.repoUrl
+      if (!sourceUrl) return
+      let checkout: Awaited<ReturnType<typeof checkoutRepo>> | undefined
+      try {
+        let remote = sourceUrl
+        if (app.ctx.github) {
           try {
-            await deployFromPush(app, service, gitSha, checkout.path)
-            req.log.info({ service: service.name, sha: gitSha.slice(0, 12) }, 'push deploy succeeded')
-          } finally {
-            // Even on failure: a broken build must not leave source on disk.
-            await checkout.dispose().catch(() => {})
+            const fullName = normaliseRepo(remote).split('/').slice(-2).join('/')
+            const installation = await installationForRepo(app.ctx.github, fullName)
+            if (installation) remote = await authenticatedCloneUrl(app.ctx.github, installation, remote)
+          } catch (err) {
+            req.log.warn({ err, repository: sourceUrl }, 'could not obtain a GitHub installation token')
           }
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err)
-          req.log.error({ err, service: service.name }, 'push deploy failed')
-          await dispatchEvent(
-            app.ctx,
-            {
-              type: 'deploy.failed',
-              fleetId,
-              at: new Date().toISOString(),
-              subject: service.name,
-              detail: { sha: gitSha.slice(0, 12), ref: push.ref, reason: message },
-            },
-            { log: req.log }
-          )
         }
+
+        checkout = await checkoutRepo({
+          repoUrl: remote,
+          gitSha,
+          workdir: app.ctx.config.BUILD_WORKDIR,
+        })
+
+        // The manifest travels with the code. Applying it before the build
+        // lets a single push change resources, routes, or services without a
+        // second manual dashboard step.
+        const parsedManifest = parseManifest(
+          await readFile(join(checkout.path, connected?.manifestPath ?? 'fleet.yaml'), 'utf8')
+        )
+        // A connected repository is enough to bootstrap: services in its
+        // manifest inherit its safe, App-authorised clone URL unless they
+        // explicitly point at another repository.
+        const manifest = connected
+          ? {
+              ...parsedManifest,
+              services: parsedManifest.services.map((service) => ({ ...service, repo: service.repo ?? connected.cloneUrl })),
+            }
+          : parsedManifest
+        const synced = await syncManifest(app.ctx, fleetId, fleet.orgId, manifest)
+        const refreshed = await db.select().from(services).where(eq(services.fleetId, fleetId))
+        const toDeploy = refreshed.filter(
+          (service) => service.repoUrl && candidates.includes(normaliseRepo(service.repoUrl))
+        )
+
+        for (const service of toDeploy) {
+          await deployFromPush(app, service, gitSha, checkout.path)
+          req.log.info({ service: service.name, sha: gitSha.slice(0, 12) }, 'push deploy succeeded')
+        }
+        req.log.info(
+          { repository: normaliseRepo(sourceUrl), sha: gitSha.slice(0, 12), ...synced },
+          'fleet.yaml applied from push'
+        )
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        req.log.error({ err, repository: sourceUrl }, 'push deploy failed')
+        await dispatchEvent(
+          app.ctx,
+          {
+            type: 'deploy.failed',
+            fleetId,
+            at: new Date().toISOString(),
+            subject: source?.name ?? connected?.fullName ?? 'repository',
+            detail: { sha: gitSha.slice(0, 12), ref: push.ref, reason: message },
+          },
+          { log: req.log }
+        )
+      } finally {
+        await checkout?.dispose().catch(() => {})
       }
     })
 

@@ -42,6 +42,16 @@ const heartbeat = z.object({
     )
     .max(200)
     .default([]),
+  runtime: z.object({
+    docker_available: z.boolean(),
+    docker_version: z.string().max(128).optional(),
+    docker_api_version: z.string().max(64).optional(),
+    docker_error: z.string().max(1000).optional(),
+    registry_status: z.enum(['ok', 'failed', 'not_tested']).optional(),
+    registry_error: z.string().max(1000).optional(),
+    last_reconcile_error: z.string().max(2000).optional(),
+  }).default({ docker_available: false, registry_status: 'not_tested' }),
+  logs: z.array(z.object({ service: z.string().max(128), text: z.string().max(32_000) })).max(50).default([]),
 })
 
 /** Slug a hostname into something usable and stable as a node name. */
@@ -181,6 +191,16 @@ export async function agentRoutes(app: FastifyInstance) {
       containers: hb.containers,
       meshConnected: hb.mesh_connected,
       agentVersion: hb.agent_version,
+      runtime: {
+        dockerAvailable: hb.runtime.docker_available,
+        dockerVersion: hb.runtime.docker_version,
+        dockerApiVersion: hb.runtime.docker_api_version,
+        dockerError: hb.runtime.docker_error,
+        registryStatus: hb.runtime.registry_status,
+        registryError: hb.runtime.registry_error,
+        lastReconcileError: hb.runtime.last_reconcile_error,
+      },
+      logs: hb.logs,
     })
 
     // Promote deployments the agent reports as actually running. The control
@@ -236,14 +256,15 @@ export async function agentRoutes(app: FastifyInstance) {
       }
     }
 
-    // A node that was marked down and is beating again comes back here rather
-    // than waiting for the sweeper, so recovery is as fast as failure.
-    const wasDown = await redis.getdel(`node:${nodeId}:down`)
-    if (wasDown) {
-      await db
-        .update(nodes)
-        .set({ status: 'online', lastHeartbeatAt: new Date() })
-        .where(and(eq(nodes.id, nodeId), eq(nodes.status, 'offline')))
+    // A node that was marked down and is beating again comes back here immediately.
+    const [recovered] = await db
+      .update(nodes)
+      .set({ status: 'online', lastHeartbeatAt: new Date() })
+      .where(and(eq(nodes.id, nodeId), eq(nodes.status, 'offline')))
+      .returning({ id: nodes.id, name: nodes.name })
+
+    if (recovered) {
+      await redis.del(`node:${nodeId}:down`)
       req.log.info({ nodeId }, 'node recovered')
 
       // FR-9: apply the reclaim policy now that it is back. Failures here
@@ -256,6 +277,11 @@ export async function agentRoutes(app: FastifyInstance) {
       } catch (err) {
         req.log.error({ err, nodeId }, 'reclaim failed after node returned')
       }
+    } else {
+      await db
+        .update(nodes)
+        .set({ lastHeartbeatAt: new Date() })
+        .where(eq(nodes.id, nodeId))
     }
 
     return { ok: true, interval_sec: app.ctx.config.HEARTBEAT_INTERVAL_SEC }

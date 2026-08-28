@@ -48,11 +48,15 @@ export const nodesCommand = {
     if (sub === 'pair') {
       const { body } = await request<{ token: string; expires_at: string; install_command: string }>(
         'POST',
-        `/fleets/${fleetId}/nodes/pair-token`
+        `/fleets/${fleetId}/nodes/pair-token`,
+        // Fastify requires a recognised media type for a POST. Supplying an
+        // explicit empty JSON object keeps this body-less operation portable
+        // through proxies and avoids Node fetch's implicit text/plain type.
+        { body: {} }
       )
-      if (flags.json) return console.log(JSON.stringify(body, null, 2))
       console.log(`Run this on the machine you want to add:\n`)
       console.log(`  ${c.cyan(body.install_command)}\n`)
+      console.log(c.dim(`  Or with npm:   npx @yadurajfleetos/cli nodes pair\n`))
       console.log(c.dim(`The token is single-use and expires ${relativeTime(body.expires_at)}.`))
       return
     }
@@ -81,8 +85,30 @@ export const nodesCommand = {
           EXIT.usage
         )
       }
-      await request('DELETE', `/fleets/${fleetId}/nodes/${node.id}`)
+      const { body } = await request<{
+        removed: { id: string; name: string }
+        evicted: Array<{ service: string; action: string; toNodeName?: string; reason?: string }>
+        tunnelClosed: boolean
+      }>('DELETE', `/fleets/${fleetId}/nodes/${node.id}`)
+
+      if (flags.json) return console.log(JSON.stringify(body, null, 2))
+
       console.log(`${node.name} removed and its agent credentials revoked`)
+      for (const e of body.evicted ?? []) {
+        if (e.action === 'moved') {
+          console.log(c.dim(`  ${e.service} → ${e.toNodeName ?? 'another node'}`))
+        } else {
+          // Pinned and stranded services need saying out loud: the node is
+          // gone and these did not find a new home.
+          console.log(c.yellow(`  ${e.service} could not move — ${e.reason ?? e.action}`))
+        }
+      }
+      console.log(
+        c.dim(
+          `  To clean up that machine itself, run ` +
+            `${c.cyan('fleet unpair')}${c.dim(' on it.')}`
+        )
+      )
       return
     }
 

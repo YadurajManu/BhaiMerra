@@ -120,18 +120,40 @@ export async function invalidateRoutesForService(ctx: AppContext, serviceId: str
     .limit(1)
   if (!row) return
 
-  const keys = [row.hostname, row.domain].filter(Boolean).map((h) => ROUTE_KEY(h as string))
+  await invalidateRouteHosts(ctx, [row.hostname, row.domain])
+}
+
+/**
+ * Invalidate by hostname rather than by service id.
+ *
+ * Deletion is the case the id-based lookup above cannot serve: once the row is
+ * gone there is nothing left to read the hostname from, so the cached route
+ * would keep answering for a service that no longer exists until its TTL
+ * expired. Callers that are about to delete a service capture the hostnames
+ * first and pass them here.
+ */
+export async function invalidateRouteHosts(
+  ctx: AppContext,
+  hosts: readonly (string | null | undefined)[]
+): Promise<void> {
+  const keys = hosts.filter((h): h is string => Boolean(h)).map(ROUTE_KEY)
   if (keys.length) await ctx.redis.del(...keys)
 }
 
 /**
- * The managed hostname for a service: <service>.<fleet>-<id>.<zone>.
+ * The managed hostname for a service: <service>-<fleet>-<id>.<zone>.
  *
- * The fleet id suffix is not decoration. Fleet names are unique per org, not
- * globally, and the default name for everyone's first fleet is "homelab" —
- * so <service>.<fleet>.<zone> collides between two unrelated users on their
- * very first deploy. The suffix is derived from the fleet id, so it stays
- * stable and the hostname can still be shown before anything is deployed.
+ * One DNS label, not three. A wildcard certificate covers exactly one level,
+ * so `web.homelab-7efe4c.fleet.example.com` under `*.fleet.example.com` gets
+ * no valid certificate and every deployed service fails TLS. Flattening to a
+ * single label is what makes one wildcard record and one certificate serve
+ * every service in the fleet.
+ *
+ * The fleet id suffix is not decoration either. Fleet names are unique per
+ * org, not globally, and everyone's first fleet is called "homelab" — so
+ * without it two unrelated users collide on their very first deploy. It is
+ * derived from the fleet id, so it is stable and can be shown before anything
+ * is deployed.
  */
 export function managedHostname(
   serviceName: string,
@@ -141,7 +163,7 @@ export function managedHostname(
 ): string {
   const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '')
   const suffix = createHash('sha256').update(fleetId).digest('hex').slice(0, 6)
-  return `${slug(serviceName)}.${slug(fleetName)}-${suffix}.${zone}`
+  return `${slug(serviceName)}-${slug(fleetName)}-${suffix}.${zone}`
 }
 
 /**

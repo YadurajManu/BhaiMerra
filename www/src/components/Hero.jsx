@@ -1,4 +1,5 @@
 import { useRef, useState, useEffect, lazy, Suspense } from 'react'
+import { APP_URL } from '../lib/data'
 import { motion, useScroll, useTransform, useReducedMotion } from 'framer-motion'
 import { EASE } from '../lib/motion'
 import { useCanRender3D } from '../lib/useCapability'
@@ -10,20 +11,11 @@ import NodeHUD from './NodeHUD'
 
 const MeshScene = lazy(() => import('./MeshScene'))
 
-/*
-  Headline candidates considered:
-   A. "Your hardware. Orchestrated like a platform."   <- shipped
-   B. "git push to the machines under your desk."
-   C. "Stop renting compute you already own."
-  A carries the tension the whole page is about; B is narrower, C is a
-  complaint rather than a proposition.
-*/
-
 const STATS = [
-  ['agent footprint', '< 50 MB'],
+  ['setup', 'pair one node'],
   ['architectures', 'arm64 · armv7 · amd64'],
-  ['reschedule after heartbeat loss', '~4 s'],
-  ['ports forwarded', '0'],
+  ['deploy source', 'git push + fleet.yaml'],
+  ['public routing', 'managed HTTPS'],
 ]
 
 export default function Hero() {
@@ -85,12 +77,12 @@ export default function Hero() {
             >
               <StatusDot size={6} />
               <span className="font-mono text-[10.5px] tracking-[0.1em] text-[var(--color-fg-muted)]">
-                6 NODES · 3 ARCHES · 1 MESH
+                SELF-HOSTED · YOUR NODES · YOUR CODE
               </span>
             </motion.div>
 
             <h1 className="mt-7 text-[clamp(2.5rem,5.4vw,4.15rem)] font-semibold leading-[0.95] tracking-[-0.045em]">
-              {['Your hardware.', 'Orchestrated'].map((line, i) => (
+              {['Deploy to hardware', 'you already own.'].map((line, i) => (
                 <motion.span
                   key={line}
                   className="block"
@@ -107,7 +99,7 @@ export default function Hero() {
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.9, ease: EASE.expo, delay: 0.38 }}
               >
-                like a platform.
+                Without a cloud bill.
               </motion.span>
             </h1>
 
@@ -117,9 +109,9 @@ export default function Hero() {
               transition={{ duration: 0.8, ease: EASE.expo, delay: 0.5 }}
               className="mt-6 max-w-[40ch] text-[15px] leading-[1.62] text-[var(--color-fg-muted)] text-pretty"
             >
-              git push to the Pi, the old laptop and the spare mini PC you already own.
-              Fleet OS builds for every architecture in the room, places each service on
-              the node that can actually run it, and moves it when that node goes dark.
+              Pair a machine from the dashboard, keep your deployment in <code>fleet.yaml</code>,
+              then push. Fleet OS builds the exact commit, picks an eligible node, and gives
+              every service a managed HTTPS address.
             </motion.p>
 
             <motion.div
@@ -128,8 +120,8 @@ export default function Hero() {
               transition={{ duration: 0.8, ease: EASE.expo, delay: 0.6 }}
               className="mt-8 flex flex-wrap items-center gap-3"
             >
-              <MagneticButton href="#pricing" variant="primary">
-                Get started
+              <MagneticButton href={APP_URL} variant="primary">
+                Open your dashboard
                 <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                   <path d="M3 8h9m0 0L8.5 4.5M12 8l-3.5 3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
@@ -151,9 +143,9 @@ export default function Hero() {
               transition={{ duration: 0.9, ease: EASE.expo, delay: 0.75 }}
               className="mt-5 max-w-[440px]"
             >
-              <CopyLine command="curl -fsSL fleet-os.dev/install | sh" />
+              <CopyLine command="fleet auth login && fleet nodes pair" />
               <p className="mt-2.5 font-mono text-[10px] tracking-[0.06em] text-[var(--color-fg-dim)]">
-                one line per machine · arm64 · armv7 · amd64
+                sign in → generate a one-time pairing command → install on your machine
               </p>
             </motion.div>
           </motion.div>

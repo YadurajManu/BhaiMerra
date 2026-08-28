@@ -84,6 +84,39 @@ async function handle(
   }
 
   const [upstreamHost, upstreamPort] = route.upstream.split(':')
+  const targetPort = Number(upstreamPort)
+
+  // If the node has an active reverse tunnel, proxy through the tunnel!
+  if (ctx.tunnels && ctx.tunnels.has(route.nodeId)) {
+    const chunks: Buffer[] = []
+    req.on('data', (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)))
+    req.on('end', async () => {
+      try {
+        const bodyBuf = Buffer.concat(chunks)
+        const tunnelRes = await ctx.tunnels.forwardHttpRequest(route.nodeId, targetPort, req, bodyBuf)
+
+        const outHeaders: Record<string, string> = { ...(tunnelRes.headers || {}) }
+        for (const key of Object.keys(outHeaders)) {
+          if (HOP_BY_HOP.has(key.toLowerCase())) delete outHeaders[key]
+        }
+        outHeaders['x-fleet-node'] = route.nodeName
+        outHeaders['x-fleet-tunnel'] = 'active'
+
+        const respBody = tunnelRes.body ? Buffer.from(tunnelRes.body, 'base64') : Buffer.alloc(0)
+        outHeaders['content-length'] = String(respBody.length)
+
+        res.writeHead(tunnelRes.status || 200, outHeaders)
+        res.end(respBody)
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err)
+        log?.warn({ err, host, nodeId: route.nodeId }, 'tunnel request failed')
+        if (!res.headersSent) {
+          fail(res, 502, 'tunnel_error', `Tunnel forwarding failed: ${message}`)
+        }
+      }
+    })
+    return
+  }
 
   const headers = { ...req.headers }
   for (const key of Object.keys(headers)) {
@@ -102,7 +135,7 @@ async function handle(
   const upstream = httpRequest(
     {
       host: upstreamHost,
-      port: Number(upstreamPort),
+      port: targetPort,
       method: req.method,
       path: req.url,
       headers,

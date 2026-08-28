@@ -1,12 +1,15 @@
+// Where the dashboard is deployed; baked in at build time.
+export const APP_URL = import.meta.env.VITE_APP_URL ?? 'http://localhost:8082'
+
 // Every string on this page comes from here so the copy stays auditable.
 
 export const STEPS = [
   {
     n: '01',
     kicker: 'register',
-    title: 'Point the agent at a machine you own',
-    body: 'One install line per device. A Pi, a laptop with the lid closed, a mini PC in a closet, a $5 VPS. The agent detects architecture, cores, RAM, disk and GPU, then reports in.',
-    code: 'curl -fsSL fleet-os.dev/install | sh -s -- --token fl_9c2a…',
+    title: 'Pair a machine you own',
+    body: 'Open the dashboard and create a one-time pairing command for a Pi, laptop, mini PC or VPS. The agent detects architecture, cores, RAM, disk and GPU, then reports in. Re-running the installer on that machine makes no changes.',
+    code: 'dashboard → Nodes → Add a node → copy one-time command',
   },
   {
     n: '02',
@@ -78,7 +81,7 @@ export const FEATURES = [
     tag: 'resilience',
     title: 'Failover and reclaim policy',
     body: 'Heartbeat TTL in Redis detects a dark node without polling. Rescheduling is automatic for flexible services; reclaim behaviour when the node returns is yours to declare.',
-    points: ['Configurable heartbeat window', 'Drift detection', 'reclaim: eager | idle | never'],
+    points: ['Configurable heartbeat window', 'Drift detection', 'reclaim: eager | idle | manual'],
     span: 'md',
   },
   {
@@ -204,6 +207,7 @@ export const FOOTER_LINKS = [
     heading: 'Product',
     links: [
       ['Overview', '#top'],
+      ['Dashboard', APP_URL],
       ['How it works', '#how'],
       ['Scheduler', '#/docs/scheduler'],
       ['Mesh networking', '#/docs/mesh'],

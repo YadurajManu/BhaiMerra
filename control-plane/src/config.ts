@@ -17,6 +17,8 @@ const schema = z.object({
     }),
   HEARTBEAT_INTERVAL_SEC: z.coerce.number().int().min(1).max(300).default(5),
   HEARTBEAT_MISS_THRESHOLD: z.coerce.number().int().min(1).max(20).default(3),
+  /** Publicly reported to agents and diagnostics; set during release builds. */
+  CONTROL_PLANE_VERSION: z.string().max(32).default('0.1.0'),
   REGISTRY_URL: z.string().optional(),
   REGISTRY_CREDENTIALS: z.string().optional(),
   BUILDX_BUILDER: z.string().optional(),
@@ -25,6 +27,15 @@ const schema = z.object({
   BUILD_TIMEOUT_MS: z.coerce.number().int().default(20 * 60_000),
   /** Differs between source (src/db/migrations) and the built image. */
   MIGRATIONS_DIR: z.string().default('src/db/migrations'),
+  /** Served at /install, with this control plane's address substituted in. */
+  INSTALL_SCRIPT_PATH: z.string().default('../scripts/install.sh'),
+  /**
+   * The public API origin agents use. Required when /install is also exposed
+   * through a dashboard reverse proxy whose API lives under /api.
+   */
+  PUBLIC_API_URL: z.string().url().optional(),
+  /** Cross-compiled agent binaries, served at /install/fleet-agent-<os>-<arch>. */
+  AGENT_BIN_DIR: z.string().default('../agent/dist'),
   PORT: z.coerce.number().int().default(8080),
   /** Public edge. Separate listener from the API, which is not internet-facing. */
   INGRESS_PORT: z.coerce.number().int().default(8081),

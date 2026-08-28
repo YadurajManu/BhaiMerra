@@ -11,6 +11,9 @@ import ServiceDetail from './pages/ServiceDetail'
 import Events from './pages/Events'
 import Alerts from './pages/Alerts'
 import Settings from './pages/Settings'
+import Doctor from './pages/Doctor'
+import Logs from './pages/Logs'
+import CliAuth from './pages/CliAuth'
 import { Logo } from './components/ui'
 import './index.css'
 
@@ -28,6 +31,7 @@ function Gate() {
 
   return (
     <Routes>
+      <Route path="cli-auth" element={<CliAuth />} />
       <Route element={<Shell />}>
         <Route index element={<Overview />} />
         <Route path="nodes" element={<Nodes />} />
@@ -35,6 +39,8 @@ function Gate() {
         <Route path="services/:serviceId" element={<ServiceDetail />} />
         <Route path="events" element={<Events />} />
         <Route path="alerts" element={<Alerts />} />
+        <Route path="doctor" element={<Doctor />} />
+        <Route path="logs" element={<Logs />} />
         <Route path="settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

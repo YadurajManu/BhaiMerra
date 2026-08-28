@@ -25,9 +25,15 @@ export async function loadProfile(): Promise<Profile> {
     return {
       ...stored,
       ...Object.fromEntries(Object.entries(fromEnv).filter(([, v]) => v)),
+      // Older builds could save an empty api field. Keep it empty so the
+      // caller can give a precise configuration error rather than constructing
+      // an invalid relative URL such as /auth/login.
+      api: fromEnv.api || stored.api || '',
     } as Profile
   } catch {
-    return { api: fromEnv.api || 'https://api.fleet-os.dev', ...fromEnv } as Profile
+    // The public control plane is the useful default for a first-time install.
+    // Self-hosters and CI can always override it with FLEET_API or --api.
+    return { api: fromEnv.api || 'https://fleetapi.plastikworld.xyz', ...fromEnv } as Profile
   }
 }
 

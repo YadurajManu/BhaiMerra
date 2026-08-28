@@ -55,24 +55,64 @@ LAN that is this machine's IP, never `localhost`:
 REGISTRY_URL=192.168.1.20:5001
 ```
 
+Fleet OS derives the direct agent API hostname as `https://fleetapi.<zone>`.
+Override it with `PUBLIC_API_URL` only if you use a different hostname. Agents
+call routes such as `/agent/register` at the API root; `fleetapp.<zone>` only
+proxies browser calls below `/api`.
+
+```bash
+PUBLIC_API_URL=https://fleetapi.example.com
+```
+
 Getting this wrong is the most common setup failure: the control plane pushes
 an image successfully, and then every agent fails to pull it.
 
-Set up the tunnel once:
+### Authorise the zone
+
+`cloudflared`'s certificate is scoped to **one** zone, chosen when you log in.
+If you already use cloudflared for another domain, log in to a separate file
+so the existing certificate survives:
 
 ```bash
-./deploy/cloudflare/setup.sh
+TUNNEL_ORIGIN_CERT=~/.cloudflared/fleet-cert.pem cloudflared tunnel login
 ```
 
-It is idempotent — re-running reuses a tunnel of the same name instead of
-creating duplicates.
+This matters more than it looks. Using a certificate for the wrong zone does
+not fail — cloudflared treats the hostname as *relative* and appends its own
+zone, so `fleet.example.com` silently becomes
+`fleet.example.com.otherzone.com`. `setup.sh` detects that and refuses.
+
+`--origincert` is a flag on `tunnel`, not on `login` and not global, so its
+position on the command line is easy to get wrong. `TUNNEL_ORIGIN_CERT` is the
+same setting without the ambiguity.
+
+```bash
+ORIGINCERT=~/.cloudflared/fleet-cert.pem ./deploy/cloudflare/setup.sh
+```
+
+Idempotent — re-running reuses a tunnel of the same name instead of creating
+duplicates.
+
+### Certificates and subdomain depth
+
+Cloudflare's free Universal SSL covers the apex and **one** level of
+subdomain. `app.fleet.example.com` is two levels deep and has no certificate,
+so it fails TLS in the browser with nothing useful in the error.
+
+Either keep everything one level deep — `fleet.example.com`,
+`fleetapp.example.com`, `fleetapi.example.com` — or buy Advanced Certificate
+Manager ($10/month per zone).
+
+This is also why managed service hostnames are a single label
+(`web-homelab-7efe4c.fleet.example.com`, not `web.homelab-7efe4c.fleet...`):
+one wildcard certificate covers exactly one level.
 
 ## Hostnames
 
 | | |
 | --- | --- |
 | `fleet.<zone>` | dashboard (nginx, which also proxies `/api`) |
-| `api.fleet.<zone>` | control-plane API, for the CLI and agents |
+| `fleetapi.<zone>` | control-plane API, for the CLI and agents |
 | `*.fleet.<zone>` | every deployed service |
 
 The wildcard is what lets a deploy hand back a working URL without writing
@@ -90,10 +130,112 @@ fleet nodes pair
 Run the printed line on the machine you want to add. The token is single-use
 and expires in ten minutes.
 
-Agents reach the control plane at `api.fleet.<zone>`, so they work from
+The control plane serves its own installer and agent binaries — a self-hosted
+install has no CDN behind it, so the command it prints points at *your* server,
+not at a download host that only exists for the hosted product:
+
+```
+curl -fsSL https://fleetapi.example.com/install | sh -s -- --token flp_...
+```
+
+Build the binaries it serves with:
+
+```bash
+make -C agent dist
+```
+
+`GET /install/manifest` lists what your control plane can currently hand out.
+
+Agents reach the control plane at `fleetapi.<zone>`, so they work from
 anywhere. **Ingress reaches agents by their address**, which today means the
 control plane and the nodes need to be on the same network. A node in another
 building needs the reverse tunnel in [ADR 0001](adr/0001-mesh-and-ingress.md).
+
+### macOS + Docker Desktop
+
+When both the control plane and agent run on the same Mac, Docker Desktop
+places the control plane in a VM. The Mac's LAN address is not always
+reachable from that VM, even though the agent and Docker containers are
+healthy. Pair the agent with Docker Desktop's host gateway instead:
+
+```bash
+curl -fsSL https://fleetapi.example.com/install | sh -s -- \
+  --token flp_... --advertise-addr host.docker.internal --reset
+```
+
+If the agent is already paired, preserve that node identity and update only
+the route configuration instead (no new token, no new node):
+
+```bash
+curl -fsSL https://fleetapi.example.com/install | sh -s -- \
+  --configure --advertise-addr host.docker.internal
+```
+
+`--advertise-addr` is only the address Fleet ingress uses to reach the node;
+it does not change how the agent contacts the API. Use it only when the
+automatic LAN address is wrong. The reverse-tunnel ingress work will remove
+this requirement for nodes behind NAT.
+
+## GitHub push deploys
+
+Fleet can deploy a repository at the exact commit GitHub reports. Add a
+`repo:` URL to every service built from that repository, apply the manifest
+once in the dashboard, then add the fleet's webhook URL shown in **Settings →
+GitHub deploys** to that GitHub repository. Select **Just the push event** and
+use JSON payloads.
+
+For private repositories, create a GitHub App with **Contents: Read-only** and
+**Webhooks: Read & write**, install it on the repositories Fleet may read, and
+set these in `deploy/.env` before restarting the control plane:
+
+```dotenv
+WEBHOOK_SECRET=a-long-random-shared-secret
+GITHUB_APP_ID=123456
+GITHUB_APP_PRIVATE_KEY=/absolute/path/to/github-app.pem
+```
+
+The dashboard reports whether Fleet can reach the App and exposes the exact
+webhook endpoint. A push then fetches that commit, applies its root
+`fleet.yaml`, builds the configured services, and deploys them. Never commit
+the private key or webhook secret.
+
+Once configured, **Settings → GitHub workspace** provides the day-to-day
+connection flow: select one of the App's installed GitHub accounts, filter the
+repositories it can access, then explicitly connect a repository to a fleet.
+For each connection you choose a watched branch and the manifest path. The
+first push can create services from that manifest; later pushes apply the
+exact pushed configuration before building and deploying. Disconnecting a
+repository stops future webhook deployments but never deletes a live service.
+
+## Diagnose, inspect logs, and recover
+
+Fleet agents report runtime facts on their normal outbound heartbeat. No
+inbound Docker or SSH port is opened. Start incident response with:
+
+```sh
+fleet doctor
+fleet logs <service> --follow
+fleet deployments <service>
+```
+
+`fleet doctor` shows the daemon/version seen by every agent, the result of the
+last real image pull (including registry authentication failures), disk use,
+and the latest reconciliation error. `fleet logs` is a live, bounded container
+tail; it refreshes every two seconds and is not a retained logging system.
+
+Recovery operations are immutable: they create a new deployment record instead
+of overwriting the old one, so the dashboard timeline remains trustworthy.
+
+```sh
+fleet restart <service>              # recreate the current image on its node
+fleet rollback <service>             # use the most recent earlier release
+fleet rollback <service> <release>   # choose a deployment ID explicitly
+```
+
+Use the Dashboard **Doctor** page for the same node facts, copyable repair
+commands, and the Dashboard **Logs** page to choose a service and view its
+current node tail. The service detail page includes restart/rollback controls
+and a rollback confirmation dialog.
 
 ## Ports
 
@@ -152,6 +294,14 @@ plane, and that `advertiseAddr` on the node is right — override it with
 **`/healthz` says `postgres: false`.** The control plane is up but cannot
 reach the database. Check `POSTGRES_PASSWORD` matches between the two, and
 `docker compose logs control-plane` for the migration line.
+
+**The tunnel will not connect: `failed to dial to edge with quic`.** The
+network is dropping UDP/443. Add `protocol: http2` to the tunnel config — it
+is the default in the shipped one for this reason.
+
+**DNS records appear with two domains stuck together.** The certificate is for
+a different zone. Log in again with `--origincert` for the right one, and
+delete the junk records from the Cloudflare dashboard.
 
 **The tunnel connects but hostnames 404.** `INGRESS_ZONE` and the tunnel
 config disagree. They must be the same zone.

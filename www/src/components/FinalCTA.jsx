@@ -1,3 +1,4 @@
+import { APP_URL } from '../lib/data'
 import Reveal from './ui/Reveal'
 import MagneticButton from './ui/MagneticButton'
 import CopyLine from './ui/CopyLine'
@@ -19,17 +20,17 @@ export default function FinalCTA() {
             </Reveal>
             <Reveal i={2}>
               <p className="mt-6 max-w-[46ch] text-[15px] leading-[1.7] text-[var(--color-fg-muted)] text-pretty">
-                Install the agent on one machine, push a repo, get a URL. Add the laptop
+                Open the dashboard, pair one machine, push a repo, get a URL. Add the laptop
                 and the VPS when you want the thing to survive one of them disappearing.
               </p>
             </Reveal>
 
             <Reveal i={3} className="mt-9 max-w-[520px]">
-              <CopyLine command="curl -fsSL fleet-os.dev/install | sh" />
+              <CopyLine command="fleet nodes pair" />
             </Reveal>
 
             <Reveal i={4} className="mt-6 flex flex-wrap items-center gap-3">
-              <MagneticButton href="#pricing" variant="primary">
+              <MagneticButton href={APP_URL} variant="primary">
                 Start free with one node
               </MagneticButton>
               <MagneticButton href="#cli" variant="ghost" strength={0.16}>

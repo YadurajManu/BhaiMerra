@@ -103,7 +103,7 @@ Three hostnames, three jobs:
 | | |
 | --- | --- |
 | `fleet.<zone>` | the dashboard (nginx, which also proxies `/api`) |
-| `api.fleet.<zone>` | the control-plane API, for the CLI and agents |
+| `fleetapi.<zone>` | the control-plane API, for the CLI and agents |
 | `*.fleet.<zone>` | every deployed service, via the ingress edge |
 
 The wildcard is what makes a deployed service reachable at the hostname the
@@ -230,13 +230,23 @@ is not access control, and the Settings page says so.
 ## The CLI
 
 ```bash
-cd cli && npm install && npm run build
-node dist/src/index.js --help
+# Global install via npm
+npm install -g @yadurajfleetos/cli
+
+# Run directly on the fly
+npx @yadurajfleetos/cli up
 ```
 
 ```
-$ fleet where web
-would place on homeserver
+$ fleet up
+✔ detecting project framework  Next.js
+✔ created Dockerfile (Next.js, port 3000)
+✔ created fleet.yaml (Next.js)
+✔ applied 1 service(s)
+✔ built and scheduled onto homeserver  score 0.790
+✔ waiting for web to come up — web is running
+✔ live  https://web-homelab-44a1fc.plastikworld.xyz
+```
 
 NODE        SCORE   HEADROOM  RELIABILITY  LOAD  FREE
 homeserver  0.7904  0.969     0.50         0.78  16.0GB
@@ -247,6 +257,15 @@ vpsfra      0.6810  0.750     0.50         0.78  2.0GB
 `fleet status` leads with what is wrong rather than burying it: a pinned
 service that is down prints CRITICAL above the table, because that is the one
 case a human has to act on.
+
+`fleet doctor` is the read-only first response when something looks wrong. It
+checks the signed-in account, fleet access, live nodes, Docker daemon/version,
+real registry-pull results, disk pressure, reconciliation failures, deployment
+failures, public HTTPS reachability, and GitHub App status. Every warning says
+what Fleet cannot yet observe rather than claiming a check passed.
+`fleet deploy <service>` shows its candidate node, placement reason, and
+service URL before asking for confirmation; use `--plan` for a no-change
+preview or `--yes` in automation.
 
 Exit codes are a contract — `0` ok, `1` failure, `2` usage, `3` no eligible
 node, `4` health check failed — so a CI step can branch on them.
@@ -343,8 +362,6 @@ verified before an incident rather than during one.
 
 ## Known gaps
 
-- The Docker module is stubbed. `sampler.New(version, nil)` reports no
-  containers; the interface is in place, the implementation is Phase 2.
 - `connectivity` is reported as `unknown` rather than guessed — a wrong value
   would make the control plane pick the wrong ingress path.
 - No git webhook yet: deploys are triggered through the API, and the build
@@ -354,8 +371,9 @@ verified before an incident rather than during one.
   at a public URL — that is Phase 4 (mesh, tunnels, TLS).
 - Email alerts are an interface with no provider wired in; webhook, Discord
   and Slack deliver for real.
-- `fleet logs` is not built yet. The agent can already read container logs;
-  shipping and aggregating them centrally is the remaining half.
+- `fleet logs <service> --follow` exposes a bounded, live agent-reported tail.
+  It is intentionally not durable log storage; use an external log sink for
+  retention, search, or compliance.
 - Concurrent control planes (PRD 7.5 HA) are safe for *detection* — marking a
   node down is a single conditional UPDATE ... RETURNING, so only one instance
   gets the row — but two instances rescheduling different downed nodes at the

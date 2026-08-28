@@ -44,21 +44,40 @@ export async function sweepOnce(ctx: AppContext, opts: SweepOptions = {}): Promi
         .from(fleets)
 
       for (const fleet of allFleets) {
-        const stale = await ctx.heartbeats.staleNodes(fleet.id, {
+        const redisStale = await ctx.heartbeats.staleNodes(fleet.id, {
           intervalSec: fleet.intervalSec,
           threshold: fleet.threshold,
         })
-        if (!stale.length) continue
+
+        const cutoff = new Date(Date.now() - ctx.heartbeats.downAfterMs(fleet.intervalSec, fleet.threshold))
 
         // Cordoned nodes are excluded deliberately: the operator has already
         // said they know about that node, and re-alerting is noise.
+        const dbOnlineNodes = await ctx.db
+          .select({ id: nodes.id, lastHeartbeatAt: nodes.lastHeartbeatAt })
+          .from(nodes)
+          .where(
+            and(
+              eq(nodes.fleetId, fleet.id),
+              ne(nodes.status, 'offline'),
+              ne(nodes.status, 'cordoned')
+            )
+          )
+
+        const dbStale = dbOnlineNodes
+          .filter((n) => !n.lastHeartbeatAt || n.lastHeartbeatAt < cutoff)
+          .map((n) => n.id)
+
+        const allStale = [...new Set([...redisStale, ...dbStale])]
+        if (!allStale.length) continue
+
         const transitioned = await ctx.db
           .update(nodes)
           .set({ status: 'offline' })
           .where(
             and(
               eq(nodes.fleetId, fleet.id),
-              inArray(nodes.id, stale),
+              inArray(nodes.id, allStale),
               ne(nodes.status, 'offline'),
               ne(nodes.status, 'cordoned')
             )

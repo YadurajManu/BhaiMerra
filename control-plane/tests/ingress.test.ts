@@ -26,7 +26,7 @@ describe('managed hostnames', () => {
       managedHostname('web', 'homelab', FLEET_A, 'fleetos.app'),
       managedHostname('web', 'homelab', FLEET_A, 'fleetos.app')
     )
-    assert.match(managedHostname('web', 'homelab', FLEET_A, 'fleetos.app'), /^web\.homelab-[0-9a-f]{6}\.fleetos\.app$/)
+    assert.match(managedHostname('web', 'homelab', FLEET_A, 'fleetos.app'), /^web-homelab-[0-9a-f]{6}\.fleetos\.app$/)
   })
 
   test('two fleets both called "homelab" do not collide', () => {
@@ -38,10 +38,18 @@ describe('managed hostnames', () => {
     )
   })
 
+  test('is a single DNS label, because a wildcard cert covers one level', () => {
+    // `web.homelab-x.fleet.example.com` under `*.fleet.example.com` has no
+    // valid certificate — every deployed service would fail TLS.
+    const host = managedHostname('web', 'homelab', FLEET_A, 'fleet.example.com')
+    const zoneless = host.replace('.fleet.example.com', '')
+    assert.ok(!zoneless.includes('.'), `"${zoneless}" must be one label, not ${zoneless.split('.').length}`)
+  })
+
   test('slug anything that is not DNS-safe', () => {
     assert.match(
       managedHostname('Img Proxy', "Yad's Lab", FLEET_A, 'fleetos.app'),
-      /^img-proxy\.yad-s-lab-[0-9a-f]{6}\.fleetos\.app$/
+      /^img-proxy-yad-s-lab-[0-9a-f]{6}\.fleetos\.app$/
     )
   })
 })

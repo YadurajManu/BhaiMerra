@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 import { parseArgs } from '../src/args.js'
-import { table, relativeTime, mb, visibleLength, c } from '../src/render.js'
+import { table, relativeTime, mb, visibleLength, truncate, c } from '../src/render.js'
 
 describe('argument parsing', () => {
   test('separates positionals from flags', () => {
@@ -62,5 +62,20 @@ describe('rendering', () => {
   test('memory is shown in the unit a human would use', () => {
     assert.equal(mb(512), '512MB')
     assert.equal(mb(16384), '16.0GB')
+  })
+
+  test('truncation respects terminal cells and keeps ANSI sequences balanced', () => {
+    // Write the sequence explicitly: tests intentionally run without a TTY,
+    // where the colour helpers correctly return plain text.
+    const coloured = '\x1b[38;2;63;224;139mdeploying 🚀 東京\x1b[0m'
+    const cut = truncate(coloured, 10)
+    assert.ok(visibleLength(cut) <= 10)
+    assert.match(cut, /…/)
+    assert.match(cut, /\x1b\[0m$/)
+
+    // Combining marks are one visible character, and plain text must not
+    // acquire a control sequence just because it was shortened.
+    assert.equal(visibleLength('e\u0301'), 1)
+    assert.equal(truncate('abcdefgh', 4), 'abc…')
   })
 })

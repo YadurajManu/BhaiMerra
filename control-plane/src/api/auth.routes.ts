@@ -125,4 +125,52 @@ export async function authRoutes(app: FastifyInstance) {
 
     return { user: rows[0], orgs: memberships }
   })
+
+  /** Start a CLI web login session. Mints a single-use code stored in Redis. */
+  app.post('/auth/cli-session', async (req) => {
+    const body = z.object({ port: z.number().int().optional() }).parse(req.body ?? {})
+    const { randomBytes } = await import('node:crypto')
+    const code = `clisec_${randomBytes(16).toString('hex')}`
+    const sessionData = JSON.stringify({ code, port: body.port ?? null, status: 'pending' })
+    await redis.set(`cli_session:${code}`, sessionData, 'EX', 600)
+    return { code, expiresAt: new Date(Date.now() + 600_000).toISOString() }
+  })
+
+  /** Called by the web dashboard to approve a CLI session code for the current user. */
+  app.post('/auth/cli-session/approve', { preHandler: requireUser }, async (req) => {
+    const body = z.object({ code: z.string().min(1) }).parse(req.body)
+    const key = `cli_session:${body.code}`
+    const raw = await redis.get(key)
+    if (!raw) throw ApiError.notFound('CLI login session has expired or is invalid')
+
+    const tokens = await issueTokens(app, redis, req.userId!)
+    const [user] = await db.select({ email: users.email }).from(users).where(eq(users.id, req.userId!)).limit(1)
+
+    const payload = {
+      status: 'approved',
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      user: { id: req.userId!, email: user?.email ?? '' },
+    }
+
+    // Keep approved tokens in Redis for 5 minutes so CLI polling or callback can fetch them
+    await redis.set(key, JSON.stringify(payload), 'EX', 300)
+    return payload
+  })
+
+  /** Polling fallback endpoint for CLI in remote/SSH/no-callback environments. */
+  app.get('/auth/cli-session/:code/poll', async (req) => {
+    const { code } = req.params as { code: string }
+    const key = `cli_session:${code}`
+    const raw = await redis.get(key)
+    if (!raw) throw ApiError.notFound('CLI login session expired')
+
+    const session = JSON.parse(raw)
+    if (session.status === 'approved') {
+      // Consume session so tokens are fetched once
+      await redis.del(key)
+      return session
+    }
+    return { status: 'pending' }
+  })
 }

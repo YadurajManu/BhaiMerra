@@ -70,6 +70,8 @@ const healthCheck = z
  */
 const serviceFields = z
   .object({
+    /** Source repository used for push-triggered deploys. */
+    repo: z.string().min(1, 'repo must be a repository URL').optional(),
     build: z.string().optional(),
     image: z.string().optional(),
     placement: z.enum(['pinned', 'preferred', 'flexible']).default('flexible'),
@@ -82,6 +84,7 @@ const serviceFields = z
     domain: z.string().optional(),
     /** The port the container listens on. Ingress publishes it for you. */
     port: z.number().int().min(1).max(65535).default(8080),
+    container_port: z.number().int().min(1).max(65535).optional(),
     health: healthCheck,
     env: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).default({}),
     secrets: z.array(z.string()).default([]),
@@ -93,6 +96,10 @@ const serviceFields = z
   })
 
 const serviceSchema = serviceFields
+  .transform((val) => ({
+    ...val,
+    port: val.container_port ?? val.port,
+  }))
   .superRefine((svc, ctx) => {
     if (!svc.build && !svc.image) {
       ctx.addIssue({ code: 'custom', message: 'a service needs either "build" (a path) or "image" (a reference)' })

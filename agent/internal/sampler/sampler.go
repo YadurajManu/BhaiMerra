@@ -4,7 +4,6 @@ package sampler
 import (
 	"context"
 	"runtime"
-	"syscall"
 	"time"
 
 	"github.com/fleet-os/fleet-os/agent/internal/capability"
@@ -18,17 +17,24 @@ type ContainerLister interface {
 	List(ctx context.Context) ([]client.Container, error)
 }
 
-type Host struct {
-	Version    string
-	Containers ContainerLister
-	totalRAMMb int
+type Diagnostics interface {
+	Snapshot(context.Context) client.Runtime
+	Logs() []client.LogTail
 }
 
-func New(version string, containers ContainerLister) *Host {
+type Host struct {
+	Version     string
+	Containers  ContainerLister
+	Diagnostics Diagnostics
+	totalRAMMb  int
+}
+
+func New(version string, containers ContainerLister, diagnostics Diagnostics) *Host {
 	return &Host{
-		Version:    version,
-		Containers: containers,
-		totalRAMMb: capability.Detect(version).RAMMb,
+		Version:     version,
+		Containers:  containers,
+		Diagnostics: diagnostics,
+		totalRAMMb:  capability.Detect(version).RAMMb,
 	}
 }
 
@@ -40,6 +46,9 @@ func (h *Host) Sample(ctx context.Context) (client.Heartbeat, error) {
 		AgentVersion:  h.Version,
 		AdvertiseAddr: capability.AdvertiseAddr(),
 		Containers:    []client.Container{},
+	}
+	if h.Diagnostics != nil {
+		hb.Runtime, hb.Logs = h.Diagnostics.Snapshot(ctx), h.Diagnostics.Logs()
 	}
 
 	if h.Containers != nil {
@@ -85,18 +94,4 @@ func (h *Host) usedRAMMb() int {
 		return 0
 	}
 	return used
-}
-
-func usedDiskMb(path string) int {
-	var fs syscall.Statfs_t
-	if err := syscall.Statfs(path, &fs); err != nil {
-		return 0
-	}
-	blockSize := uint64(fs.Bsize)
-	total := uint64(fs.Blocks) * blockSize
-	avail := uint64(fs.Bavail) * blockSize
-	if avail > total {
-		return 0
-	}
-	return int((total - avail) / (1024 * 1024))
 }

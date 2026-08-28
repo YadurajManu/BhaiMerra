@@ -125,6 +125,7 @@ export type Node = {
   lastHeartbeatAt: string | null
   advertiseAddr: string | null
   agentVersion: string | null
+  createdAt: string
   telemetry: {
     cpuPct: number
     ramUsedMb: number
@@ -132,12 +133,14 @@ export type Node = {
     meshConnected: boolean
     ageMs: number
     containers: Array<{ name: string; state: string; health?: string }>
+    runtime: { dockerAvailable: boolean; dockerVersion?: string; dockerApiVersion?: string; dockerError?: string; registryStatus?: 'ok' | 'failed' | 'not_tested'; registryError?: string; lastReconcileError?: string }
   } | null
 }
 
 export type Service = {
   id: string
   name: string
+  repoUrl: string | null
   placementPolicy: 'pinned' | 'preferred' | 'flexible'
   pinnedNodeId: string | null
   requestRamMb: number

@@ -64,6 +64,7 @@ export async function syncManifest(
       const values = {
         fleetId,
         name: svc.name,
+        repoUrl: svc.repo ?? null,
         buildContext: svc.build ?? null,
         image: svc.image ?? null,
         placementPolicy: svc.placement,

@@ -9,9 +9,9 @@ package capability
 import (
 	"net"
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
-	"syscall"
 )
 
 // Report is the payload sent to POST /agent/register. Field names are the
@@ -48,14 +48,51 @@ func NormalizeArch(goarch string) string {
 	}
 }
 
-// Detect gathers everything the scheduler filters on.
-func Detect(version string) Report {
+// detectHostname returns a human-readable machine name. On macOS,
+// os.Hostname() often returns a Bonjour name derived from the MAC address
+// (e.g. "Unknown_1e:94:3e:f0:cb:7d") which is useless. We prefer the
+// user-set ComputerName or LocalHostName from scutil.
+func detectHostname() string {
+	if runtime.GOOS == "darwin" {
+		// Try scutil --get LocalHostName first (no spaces, DNS-safe).
+		if out, err := exec.Command("scutil", "--get", "LocalHostName").Output(); err == nil {
+			if name := strings.TrimSpace(string(out)); name != "" {
+				return strings.ToLower(name)
+			}
+		}
+		// Fall back to ComputerName, sanitised for use as a node name.
+		if out, err := exec.Command("scutil", "--get", "ComputerName").Output(); err == nil {
+			if name := strings.TrimSpace(string(out)); name != "" {
+				// "Yaduraj's MacBook Pro" → "yaduraj-s-macbook-pro"
+				safe := strings.Map(func(r rune) rune {
+					if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+						return r
+					}
+					if r >= 'A' && r <= 'Z' {
+						return r + 32 // toLower
+					}
+					return '-'
+				}, name)
+				// Collapse runs of dashes and trim edges.
+				for strings.Contains(safe, "--") {
+					safe = strings.ReplaceAll(safe, "--", "-")
+				}
+				return strings.Trim(safe, "-")
+			}
+		}
+	}
+
 	host, err := os.Hostname()
 	if err != nil {
-		host = ""
+		return ""
 	}
 	// Strip the mDNS suffix so "pi-5.local" registers as "pi-5".
-	host = strings.TrimSuffix(host, ".local")
+	return strings.TrimSuffix(host, ".local")
+}
+
+// Detect gathers everything the scheduler filters on.
+func Detect(version string) Report {
+	host := detectHostname()
 
 	return Report{
 		Arch:          NormalizeArch(runtime.GOARCH),
@@ -96,16 +133,6 @@ func outboundIP() string {
 		return addr.IP.String()
 	}
 	return ""
-}
-
-// freeDiskMb reports space available to an unprivileged process, not raw
-// capacity — the scheduler cares about what a container can actually use.
-func freeDiskMb(path string) int {
-	var fs syscall.Statfs_t
-	if err := syscall.Statfs(path, &fs); err != nil {
-		return 0
-	}
-	return int((uint64(fs.Bavail) * uint64(fs.Bsize)) / (1024 * 1024))
 }
 
 // detectConnectivity is a placeholder until the mesh module lands in Phase 4.

@@ -1,8 +1,9 @@
-import { useParams, Link } from 'react-router-dom'
+import { useParams, Link, useNavigate } from 'react-router-dom'
 import { api, type Deployment, type Service } from '../lib/api'
 import { useAuth, usePoll } from '../lib/auth'
 import { mb, since } from '../lib/format'
-import { Button, Copyable, ErrorNote, Panel, StatusPill } from '../components/ui'
+import { Button, ConfirmDialog, Copyable, ErrorNote, Panel, StatusPill } from '../components/ui'
+import LogTerminal from '../components/LogTerminal'
 import { useState } from 'react'
 
 type Preview = {
@@ -18,10 +19,15 @@ type Preview = {
 
 export default function ServiceDetail() {
   const { serviceId } = useParams()
+  const navigate = useNavigate()
   const { fleet } = useAuth()
   const canDeploy = fleet?.role !== 'viewer'
+  // Deletion is gated on admin to match the API's `service.update` requirement.
+  // The button being hidden is a courtesy; the route guard is the control.
+  const canEdit = fleet?.role === 'owner' || fleet?.role === 'admin'
   const [busy, setBusy] = useState<string | null>(null)
   const [actionError, setActionError] = useState<unknown>(null)
+  const [confirmDelete, setConfirmDelete] = useState(false)
 
   const services = usePoll(() => api<{ services: Service[] }>(`/fleets/${fleet?.id}/services`), [fleet?.id])
   const deployments = usePoll(
@@ -30,10 +36,12 @@ export default function ServiceDetail() {
     8000
   )
   const preview = usePoll(() => api<Preview>(`/services/${serviceId}/placement-preview`), [serviceId], 10000)
+  const logs = usePoll(() => api<{ node: { name: string }; lines: string[]; diagnostic: string | null }>(`/services/${serviceId}/logs`), [serviceId], 2000)
 
   const service = services.data?.services.find((s) => s.id === serviceId)
 
   async function act(path: string, key: string) {
+    if (key === 'rollback' && !window.confirm('Roll back to the previous release? The current release will be preserved in deployment history.')) return
     setBusy(key)
     setActionError(null)
     try {
@@ -41,6 +49,24 @@ export default function ServiceDetail() {
     } catch (err) {
       setActionError(err)
     } finally {
+      setBusy(null)
+    }
+  }
+
+  /**
+   * Delete the service and leave the page. Staying would poll a service that no
+   * longer exists and fall through to the "loading…" branch forever, which reads
+   * as a hang rather than as success.
+   */
+  async function deleteService() {
+    setBusy('delete')
+    setActionError(null)
+    try {
+      await api(`/services/${serviceId}`, { method: 'DELETE' })
+      setConfirmDelete(false)
+      void navigate('/services')
+    } catch (err) {
+      setActionError(err)
       setBusy(null)
     }
   }
@@ -59,16 +85,29 @@ export default function ServiceDetail() {
             <h1 className="font-mono text-[22px] tracking-[-0.02em]">{service.name}</h1>
             <div className="mt-2">
               {service.domain || service.hostname ? (
-                <Copyable text={`http://${service.domain ?? service.hostname}`} />
+                <div className="flex items-center gap-3">
+                  <a
+                    href={`https://${service.domain ?? service.hostname}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="font-mono text-[11.5px] text-[var(--color-fg-muted)] transition-colors hover:text-[var(--color-signal)]"
+                  >
+                    https://{service.domain ?? service.hostname}
+                  </a>
+                  <Copyable text={`https://${service.domain ?? service.hostname}`} />
+                </div>
               ) : (
                 <span className="font-mono text-[11px] text-[var(--color-fg-dim)]">no hostname assigned</span>
               )}
             </div>
           </div>
           {canDeploy && (
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <Button onClick={() => void act(`/services/${serviceId}/deploy`, 'deploy')} disabled={busy !== null}>
                 {busy === 'deploy' ? 'deploying…' : 'Deploy'}
+              </Button>
+              <Button onClick={() => void act(`/services/${serviceId}/stop`, 'stop')} disabled={busy !== null} title="Stop running containers">
+                {busy === 'stop' ? 'stopping…' : 'Stop'}
               </Button>
               <Button
                 onClick={() => void act(`/services/${serviceId}/reschedule`, 'move')}
@@ -81,6 +120,22 @@ export default function ServiceDetail() {
               >
                 {busy === 'move' ? 'moving…' : 'Reschedule'}
               </Button>
+              <Button onClick={() => void act(`/services/${serviceId}/restart`, 'restart')} disabled={busy !== null}>
+                {busy === 'restart' ? 'restarting…' : 'Restart'}
+              </Button>
+              <Button variant="danger" onClick={() => void act(`/services/${serviceId}/rollback`, 'rollback')} disabled={busy !== null}>
+                {busy === 'rollback' ? 'rolling back…' : 'Rollback'}
+              </Button>
+              {canEdit && (
+                <Button
+                  variant="danger"
+                  onClick={() => setConfirmDelete(true)}
+                  disabled={busy !== null}
+                  title="Permanently remove this service from the fleet"
+                >
+                  {busy === 'delete' ? 'deleting…' : 'Delete Service'}
+                </Button>
+              )}
             </div>
           )}
         </div>
@@ -93,6 +148,7 @@ export default function ServiceDetail() {
           <dl className="divide-y divide-[var(--color-line)]">
             {[
               ['placement', service.placementPolicy],
+              ['repository', service.repoUrl ?? 'manual / image-only'],
               ['ram request', mb(service.requestRamMb)],
               ['architectures', service.compatibleArches.length ? service.compatibleArches.join(', ') : 'any'],
               ['min reliability', service.minReliabilityTier],
@@ -194,6 +250,32 @@ export default function ServiceDetail() {
           )}
         </div>
       </Panel>
+
+      <LogTerminal
+        serviceName={service.name}
+        nodeName={logs.data?.node?.name}
+        lines={logs.data?.lines ?? []}
+        diagnostic={logs.data?.diagnostic ?? null}
+        loading={logs.loading}
+        isLive={true}
+        height="420px"
+      />
+
+      <ConfirmDialog
+        open={confirmDelete}
+        title={`Delete ${service.name}`}
+        body="This removes the service from the fleet. It cannot be undone from the dashboard."
+        consequences={[
+          'Its container is removed from the node it runs on',
+          'Its deployment history and URL are released',
+          'To stop it without deleting it, use Stop instead',
+        ]}
+        confirmPhrase={service.name}
+        confirmLabel="Delete service"
+        busy={busy === 'delete'}
+        onConfirm={() => void deleteService()}
+        onCancel={() => setConfirmDelete(false)}
+      />
     </div>
   )
 }
