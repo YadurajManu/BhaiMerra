@@ -7,6 +7,7 @@ import { recordAudit } from '../lib/audit.js'
 import { ApiError } from './errors.js'
 import { requireUser, requireFleetPermission, invalidateAgentAuth } from './guards.js'
 import { dispatchEvent } from '../alerting/dispatch.js'
+import { rescheduleFromNode } from '../scheduler/reschedule.js'
 import { publicApiOrigin } from './install.routes.js'
 import { FLEET_EVENTS } from '../lib/events.js'
 
@@ -183,11 +184,38 @@ export async function fleetRoutes(app: FastifyInstance) {
     }
   )
 
+  /**
+   * Remove a node from the fleet.
+   *
+   * Order matters here. Workloads are evicted *before* the row is deleted,
+   * because deployments.nodeId is ON DELETE SET NULL: delete first and the
+   * eviction query finds nothing, leaving deployments marked 'running' with no
+   * node to run on — services that look healthy in the dashboard and are
+   * reachable from nowhere.
+   */
   app.delete(
     '/fleets/:fleetId/nodes/:nodeId',
     { preHandler: requireFleetPermission('node.remove') },
     async (req) => {
       const { fleetId, nodeId } = req.params as { fleetId: string; nodeId: string }
+
+      const [existing] = await db
+        .select()
+        .from(nodes)
+        .where(and(eq(nodes.id, nodeId), eq(nodes.fleetId, fleetId)))
+        .limit(1)
+      if (!existing) throw ApiError.notFound('Node')
+
+      // Take it out of the schedulable set first, or the reschedule below can
+      // choose the very node being removed — it is still 'online' at this point.
+      await db.update(nodes).set({ status: 'draining' }).where(eq(nodes.id, nodeId))
+
+      // Same failover path a down node takes: flexible and preferred services
+      // move, pinned services are held and raise their own alert rather than
+      // being separated from their volume.
+      const evicted = await rescheduleFromNode(app.ctx, fleetId, nodeId, {
+        onEvent: async (e) => { await dispatchEvent(app.ctx, e, { log: req.log }) },
+      })
 
       const removed = await db.transaction(async (tx) => {
         const [node] = await tx
@@ -204,7 +232,7 @@ export async function fleetRoutes(app: FastifyInstance) {
           action: 'node.removed',
           targetType: 'node',
           targetId: nodeId,
-          metadata: { name: node.name },
+          metadata: { name: node.name, evicted: evicted.length },
         })
         return node
       })
@@ -214,7 +242,18 @@ export async function fleetRoutes(app: FastifyInstance) {
       await invalidateAgentAuth(redis, removed.agentTokenHash)
       await heartbeats.forget(fleetId, nodeId)
 
-      return { removed: { id: nodeId, name: removed.name } }
+      // Credentials alone are not enough: an already-open reverse tunnel was
+      // authenticated at upgrade time and is never re-checked, so ingress could
+      // still reach this node. ADR 0001 calls this out as a consequence of
+      // choosing the tunnel — revoking a node must also close it.
+      const tunnelClosed = app.ctx.tunnels?.close(nodeId) ?? false
+      if (tunnelClosed) req.log.info({ nodeId }, 'reverse tunnel closed on node removal')
+
+      return {
+        removed: { id: nodeId, name: removed.name },
+        evicted,
+        tunnelClosed,
+      }
     }
   )
 

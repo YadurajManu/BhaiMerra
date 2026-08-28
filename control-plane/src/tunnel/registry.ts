@@ -27,6 +27,8 @@ export interface TunnelResponse {
 }
 
 type PendingRequest = {
+  /** Which node this request is waiting on, so a closing tunnel can fail only its own. */
+  nodeId: string
   resolve: (res: TunnelResponse) => void
   reject: (err: Error) => void
   timer: NodeJS.Timeout
@@ -41,6 +43,41 @@ export class TunnelRegistry {
   public has(nodeId: string): boolean {
     const ws = this.sockets.get(nodeId)
     return Boolean(ws && ws.readyState === WebSocket.OPEN)
+  }
+
+  /**
+   * Drop a node's tunnel.
+   *
+   * Revoking a node's credentials does not close a socket that is already
+   * open (ADR 0001) — the tunnel was authenticated once at upgrade time and
+   * never re-checked, so ingress could keep reaching a removed node until it
+   * happened to disconnect. Called when a node is removed from a fleet.
+   *
+   * 1000 (normal closure) rather than an error code so the agent's reconnect
+   * loop can tell "you are no longer part of this fleet" from a transient
+   * network fault; its next connect attempt fails auth and stops for good.
+   */
+  public close(nodeId: string): boolean {
+    const ws = this.sockets.get(nodeId)
+    this.sockets.delete(nodeId)
+    if (!ws) return false
+
+    // Anything still waiting on this node will never be answered. Fail those
+    // now rather than leaving the caller to the 30s timeout — but only this
+    // node's, since the pending map is shared across every tunnel.
+    for (const [id, handler] of this.pending) {
+      if (handler.nodeId !== nodeId) continue
+      clearTimeout(handler.timer)
+      this.pending.delete(id)
+      handler.reject(new Error(`Node ${nodeId} was removed from the fleet`))
+    }
+
+    try {
+      ws.close(1000, 'node removed from fleet')
+    } catch {
+      ws.terminate()
+    }
+    return true
   }
 
   public register(nodeId: string, ws: WebSocket) {
@@ -113,7 +150,7 @@ export class TunnelRegistry {
         reject(new Error(`Upstream request to node ${nodeId} timed out`))
       }, 30_000)
 
-      this.pending.set(id, { resolve, reject, timer })
+      this.pending.set(id, { nodeId, resolve, reject, timer })
       ws.send(JSON.stringify(payload), (err) => {
         if (err) {
           clearTimeout(timer)

@@ -7,7 +7,7 @@ import { syncManifest } from '../manifest/sync.js'
 import { place } from '../scheduler/placement.js'
 import { fleetSnapshot, toServiceSpec } from '../scheduler/snapshot.js'
 import { platformsFor, BuildUnavailableError } from '../build/runner.js'
-import { managedHostname, allocateHostPort, invalidateRoutesForService } from '../ingress/routes.js'
+import { managedHostname, allocateHostPort, invalidateRoutesForService, invalidateRouteHosts } from '../ingress/routes.js'
 import { recordAudit } from '../lib/audit.js'
 import { ApiError } from './errors.js'
 import { requireFleetPermission } from './guards.js'
@@ -190,6 +190,61 @@ export async function serviceRoutes(app: FastifyInstance) {
         stopped: active.length,
         service: service.name,
         note: 'Service stopped. The agent will remove the container on its next reconciliation.',
+      })
+    }
+  )
+
+  /**
+   * Permanently remove a service from the fleet.
+   *
+   * Deleting the service row cascades its deployments away, which is what
+   * actually stops the workload: /agent/desired-state joins deployments to
+   * services, so the container simply stops being listed and the agent removes
+   * it on its next reconciliation. There is no push channel to a node, and
+   * that is deliberate — agents are outbound-only.
+   *
+   * Requires admin rather than deployer. Deleting a service is strictly more
+   * destructive than deploying one, and it matches `service.create` /
+   * `service.update`: whoever can bring a service into existence is who can
+   * take it out of existence.
+   */
+  app.delete(
+    '/services/:serviceId',
+    { preHandler: requireServicePermission('service.update') },
+    async (req, reply) => {
+      const { service, orgId } = await loadService(app, req.params as { serviceId: string })
+
+      // Read the hostnames while the row still exists — after the delete there
+      // is nothing to resolve them from, and a stale cached route would keep
+      // answering for a service that is gone.
+      const hosts = [service.hostname, service.domain]
+
+      const active = await db
+        .select({ id: deployments.id })
+        .from(deployments)
+        .where(and(eq(deployments.serviceId, service.id), inArray(deployments.status, ['deploying', 'running'])))
+
+      await db.transaction(async (tx) => {
+        // deployments.serviceId cascades, so the placements go with the service.
+        await tx.delete(services).where(eq(services.id, service.id))
+        await recordAudit(tx, {
+          orgId,
+          actorUserId: req.userId,
+          action: 'service.deleted',
+          targetType: 'service',
+          targetId: service.id,
+          metadata: { name: service.name, stoppedDeployments: active.length },
+        })
+      })
+
+      await invalidateRouteHosts(app.ctx, hosts)
+      return reply.code(200).send({
+        deleted: true,
+        service: service.name,
+        stopped: active.length,
+        note: active.length
+          ? 'Service deleted. The agent will remove its container on the next reconciliation.'
+          : 'Service deleted. It was not running.',
       })
     }
   )

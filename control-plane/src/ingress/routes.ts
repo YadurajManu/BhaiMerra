@@ -120,7 +120,23 @@ export async function invalidateRoutesForService(ctx: AppContext, serviceId: str
     .limit(1)
   if (!row) return
 
-  const keys = [row.hostname, row.domain].filter(Boolean).map((h) => ROUTE_KEY(h as string))
+  await invalidateRouteHosts(ctx, [row.hostname, row.domain])
+}
+
+/**
+ * Invalidate by hostname rather than by service id.
+ *
+ * Deletion is the case the id-based lookup above cannot serve: once the row is
+ * gone there is nothing left to read the hostname from, so the cached route
+ * would keep answering for a service that no longer exists until its TTL
+ * expired. Callers that are about to delete a service capture the hostnames
+ * first and pass them here.
+ */
+export async function invalidateRouteHosts(
+  ctx: AppContext,
+  hosts: readonly (string | null | undefined)[]
+): Promise<void> {
+  const keys = hosts.filter((h): h is string => Boolean(h)).map(ROUTE_KEY)
   if (keys.length) await ctx.redis.del(...keys)
 }
 
