@@ -12,6 +12,63 @@ export const colourDepth: 0 | 1 | 2 = !useColour
     ? 2
     : 1
 
+/**
+ * Whether the terminal can be trusted with braille, box-drawing and block
+ * glyphs. This is a separate question from colour: a terminal that renders
+ * `⠋` as a replacement box makes the CLI look broken, whereas plain ASCII only
+ * looks plain. So the guess errs toward ASCII and takes overrides in both
+ * directions — `FLEET_ASCII=1` forces the fallback, `FLEET_UNICODE=1` forces the
+ * glyphs on for the many Linux shells that simply never set a locale.
+ */
+export const unicode: boolean = process.env.FLEET_ASCII
+  ? false
+  : process.env.FLEET_UNICODE
+    ? true
+    : process.env.TERM === 'dumb'
+      ? false
+      : /utf-?8/i.test(
+            `${process.env.LC_ALL ?? ''} ${process.env.LC_CTYPE ?? ''} ${process.env.LANG ?? ''}`
+          ) ||
+        Boolean(process.env.WT_SESSION) ||
+        Boolean(process.env.TERM_PROGRAM)
+
+/**
+ * One vocabulary, chosen once, so no caller ever branches on `unicode`. Every
+ * entry is a single terminal cell wide in both sets — the progress UI redraws in
+ * place and a two-cell glyph would shift everything after it.
+ */
+export const glyphs = unicode
+  ? {
+      frames: ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'],
+      ok: '✔',
+      fail: '✖',
+      warn: '▲',
+      info: '›',
+      pending: '·',
+      stepActive: '◆',
+      stepTodo: '○',
+      pointer: '❯',
+      barFill: '█',
+      barEmpty: '░',
+      branch: '└',
+      rule: '─',
+    }
+  : {
+      frames: ['-', '\\', '|', '/'],
+      ok: 'v',
+      fail: 'x',
+      warn: '!',
+      info: '>',
+      pending: '.',
+      stepActive: '>',
+      stepTodo: '.',
+      pointer: '>',
+      barFill: '#',
+      barEmpty: '.',
+      branch: '\\',
+      rule: '-',
+    }
+
 const ESC = '\x1b['
 const wrap = (code: string) => (s: string) => (useColour ? `${ESC}${code}m${s}${ESC}0m` : s)
 
@@ -40,6 +97,10 @@ export const cursor = {
   hide: () => `${ESC}?25l`,
   show: () => `${ESC}?25h`,
   up: (n: number) => `${ESC}${n}A`,
+  // Moving down with a control sequence rather than a newline matters at the
+  // bottom of the screen: `\n` there scrolls the region out from under the
+  // cursor arithmetic, `ESC[nB` cannot.
+  down: (n: number) => `${ESC}${n}B`,
   clearLine: () => `\r${ESC}2K`,
   clearBelow: () => `${ESC}0J`,
 }

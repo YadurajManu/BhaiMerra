@@ -6,34 +6,63 @@
  * fallback, so output captured by CI or a log file reads as a transcript rather
  * than as a smear of cursor escapes.
  */
-import { c, cursor, truncate, visibleLength } from './render.js'
+import { c, cursor, glyphs, truncate, visibleLength } from './render.js'
 import { MARK_HEIGHT, markFrame, PEER_COUNT } from './mark.js'
 
 const err = process.stderr
 
 /** `columns` reads 0 on some pseudo-terminals, so `??` is not enough. */
-const width = () => Math.max(1, (err.columns || process.stdout.columns || 80) - 1)
+export const width = (): number => Math.max(1, (err.columns || process.stdout.columns || 80) - 1)
 
-/** Animate only where it can be erased again. */
-export const animated = (): boolean =>
-  Boolean(err.isTTY) && !process.env.CI && !process.env.FLEET_NO_ANIMATION
+/**
+ * `--quiet` drops progress entirely: no frames, no settled lines. Errors still
+ * print, because a command that failed silently is worse than a noisy one.
+ */
+let quiet = false
+export const setQuiet = (value: boolean): void => {
+  quiet = value
+}
+export const isQuiet = (): boolean => quiet
 
-const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+/**
+ * Animate only where it can be erased again. `FLEET_ANIMATION` overrides the
+ * detection in both directions for recordings and for terminals the heuristics
+ * read wrongly; `FLEET_NO_ANIMATION` keeps working as it always has.
+ */
+export const animated = (): boolean => {
+  if (quiet) return false
+  if (process.env.FLEET_ANIMATION === '0') return false
+  if (process.env.FLEET_ANIMATION === '1') return true
+  return Boolean(err.isTTY) && !process.env.CI && !process.env.FLEET_NO_ANIMATION
+}
+
+const FRAMES = glyphs.frames
 const TICK = 80
 
+/**
+ * Redrawing in place is slower to watch over a long link than locally, and a
+ * tall region costs proportionally more per frame. Neither is worth 12 frames a
+ * second.
+ */
+export const tickFor = (height: number): number =>
+  process.env.SSH_CONNECTION || process.env.SSH_TTY || height > 10 ? 200 : TICK
+
 export const glyph = {
-  ok: c.signal('✔'),
-  fail: c.red('✖'),
-  warn: c.yellow('▲'),
-  info: c.cyan('›'),
-  pending: c.dim('·'),
+  ok: c.signal(glyphs.ok),
+  fail: c.red(glyphs.fail),
+  warn: c.yellow(glyphs.warn),
+  info: c.cyan(glyphs.info),
+  pending: c.dim(glyphs.pending),
 }
 
-/** Elapsed time, shown only once it is long enough to be worth knowing. */
-const elapsed = (startedAt: number): string => {
-  const seconds = (Date.now() - startedAt) / 1000
+/** A duration, shown only once it is long enough to be worth knowing. */
+export const duration = (ms: number): string => {
+  const seconds = ms / 1000
   return seconds < 2 ? '' : c.dim(` ${seconds.toFixed(seconds < 10 ? 1 : 0)}s`)
 }
+
+/** Time since a start point. Ticks up while a step is in flight. */
+export const elapsed = (startedAt: number): string => duration(Date.now() - startedAt)
 
 export type Spinner = {
   /** Replace the headline. */
@@ -51,8 +80,36 @@ export type Spinner = {
   stop(): void
 }
 
+/**
+ * Exactly one thing may own an in-place redraw region at a time. Two writers
+ * moving the cursor relative to their own idea of where it is do not produce
+ * half-correct output, they produce shredded output — so the second writer stays
+ * quiet rather than fighting for the rows.
+ */
+let regionOwner: object | null = null
+export const claimRegion = (owner: object): boolean => {
+  if (regionOwner) return false
+  regionOwner = owner
+  return true
+}
+export const releaseRegion = (owner: object): void => {
+  if (regionOwner === owner) regionOwner = null
+}
+export const regionActive = (): boolean => regionOwner !== null
+
+/**
+ * Run while a ^C is being handled, before the process leaves. This is how the
+ * live region gets erased and how a command says what it left running — killing
+ * the CLI does not kill a build that is already underway on the control plane,
+ * and pretending otherwise is the misleading part.
+ */
+let onInterrupt: (() => void) | null = null
+export const setInterruptHandler = (fn: (() => void) | null): void => {
+  onInterrupt = fn
+}
+
 let restoreCursorHooked = false
-function hookCursorRestore() {
+export function hookCursorRestore(): void {
   if (restoreCursorHooked) return
   restoreCursorHooked = true
   // A spinner interrupted by ^C must not leave the cursor hidden in the shell.
@@ -60,9 +117,31 @@ function hookCursorRestore() {
   process.on('exit', restore)
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.on(signal, () => {
+      try {
+        onInterrupt?.()
+      } catch {
+        // A failing teardown must not stop the cursor being restored.
+      }
       restore()
       process.exit(signal === 'SIGINT' ? 130 : 143)
     })
+  }
+}
+
+/** A spinner that reports nothing: `--quiet`, or a region already owned. */
+const silentSpinner = (label: string): Spinner => {
+  let text = label
+  return {
+    update: (next) => {
+      text = next
+    },
+    hints: () => {},
+    note: () => {},
+    succeed: () => {},
+    fail: () => {},
+    stop: () => {
+      void text
+    },
   }
 }
 
@@ -73,6 +152,9 @@ export function spinner(label: string): Spinner {
   let frame = 0
   let timer: NodeJS.Timeout | undefined
   let done = false
+
+  // A ladder already owns the cursor; a second writer would shred both.
+  if (quiet || regionActive()) return silentSpinner(label)
 
   if (!animated()) {
     err.write(`${label}…\n`)
@@ -91,10 +173,10 @@ export function spinner(label: string): Spinner {
     }
   }
 
+  const owner = {}
+  claimRegion(owner)
   hookCursorRestore()
   err.write(cursor.hide())
-
-  const clear = () => err.write(cursor.clearLine())
 
   const draw = () => {
     // A hint every third of a spinner cycle: long enough to read, short enough
@@ -102,13 +184,15 @@ export function spinner(label: string): Spinner {
     const hint = hintLines.length
       ? hintLines[Math.floor((Date.now() - startedAt) / 3200) % hintLines.length]
       : undefined
-    clear()
+    // One write per frame. Clearing and drawing separately doubles the syscalls
+    // and can be seen as a flicker on a slow link.
     err.write(
-      truncate(
-        `${c.signal(FRAMES[frame % FRAMES.length]!)} ${text}${elapsed(startedAt)}` +
-          (hint ? c.dim(`  ${hint}`) : ''),
-        width()
-      )
+      cursor.clearLine() +
+        truncate(
+          `${c.signal(FRAMES[frame % FRAMES.length]!)} ${text}${elapsed(startedAt)}` +
+            (hint ? c.dim(`  ${hint}`) : ''),
+          width()
+        )
     )
     frame++
   }
@@ -121,8 +205,8 @@ export function spinner(label: string): Spinner {
     if (done) return
     done = true
     clearInterval(timer)
-    clear()
-    err.write(`${mark} ${final ?? text}${elapsed(startedAt)}\n${cursor.show()}`)
+    releaseRegion(owner)
+    err.write(cursor.clearLine() + `${mark} ${final ?? text}${elapsed(startedAt)}\n` + cursor.show())
   }
 
   return {
@@ -134,8 +218,7 @@ export function spinner(label: string): Spinner {
       hintLines = lines
     },
     note: (line) => {
-      clear()
-      err.write(`${line}\n`)
+      err.write(cursor.clearLine() + `${line}\n`)
       draw()
     },
     succeed: (final) => settle(glyph.ok, final),
@@ -144,8 +227,8 @@ export function spinner(label: string): Spinner {
       if (done) return
       done = true
       clearInterval(timer)
-      clear()
-      err.write(cursor.show())
+      releaseRegion(owner)
+      err.write(cursor.clearLine() + cursor.show())
     },
   }
 }
@@ -243,14 +326,15 @@ export async function splash<T>(
 /** A titled rule, for separating sections of a long report. */
 export function rule(label?: string): string {
   const width = Math.min(process.stdout.columns ?? 80, 72)
-  if (!label) return c.dim('─'.repeat(width))
-  const line = '─'.repeat(Math.max(0, width - visibleLength(label) - 3))
-  return `${c.dim('──')} ${c.bold(label)} ${c.dim(line)}`
+  if (!label) return c.dim(glyphs.rule.repeat(width))
+  const line = glyphs.rule.repeat(Math.max(0, width - visibleLength(label) - 3))
+  return `${c.dim(glyphs.rule.repeat(2))} ${c.bold(label)} ${c.dim(line)}`
 }
 
 /** A horizontal meter. Used for headroom, where the shape matters more than the number. */
 export function bar(fraction: number, width = 12): string {
-  const filled = Math.round(Math.max(0, Math.min(1, fraction)) * width)
-  const colour = fraction > 0.85 ? c.red : fraction > 0.65 ? c.yellow : c.signal
-  return colour('█'.repeat(filled)) + c.dim('░'.repeat(width - filled))
+  const clamped = Math.max(0, Math.min(1, fraction))
+  const filled = Math.round(clamped * width)
+  const colour = clamped > 0.85 ? c.red : clamped > 0.65 ? c.yellow : c.signal
+  return colour(glyphs.barFill.repeat(filled)) + c.dim(glyphs.barEmpty.repeat(width - filled))
 }

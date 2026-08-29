@@ -6,15 +6,29 @@
  * The mark is a fixed character grid rather than a string per state, because
  * the loading animation lights individual spokes and needs to address cells.
  */
-import { c, colourDepth, rgb } from './render.js'
+import { c, colourDepth, rgb, unicode } from './render.js'
 
-const GRID = [
-  '  ○     ○     ○  ',
-  '   ╲    │    ╱   ',
-  '○───────◉───────○',
-  '   ╱    │    ╲   ',
-  '  ○     ○     ○  ',
-]
+/**
+ * Both grids are deliberately the same 17×5 shape. Every cell coordinate below,
+ * and the cursor arithmetic in the progress UI above, is written against those
+ * dimensions — an ASCII fallback of a different size would silently break the
+ * redraw rather than merely look plainer.
+ */
+const GRID = unicode
+  ? [
+      '  ○     ○     ○  ',
+      '   ╲    │    ╱   ',
+      '○───────◉───────○',
+      '   ╱    │    ╲   ',
+      '  ○     ○     ○  ',
+    ]
+  : [
+      '  o     o     o  ',
+      '   \\    |    /   ',
+      'o-------@-------o',
+      '   /    |    \\   ',
+      '  o     o     o  ',
+    ]
 
 export const MARK_WIDTH = 17
 export const MARK_HEIGHT = GRID.length
@@ -97,6 +111,9 @@ export const mark = (): string[] => markFrame(-1)
 
 const WORDMARK = ['█▀▀ █   █▀▀ █▀▀ ▀█▀', '█▀  █   █▀  █▀   █ ', '▀   ▀▀▀ ▀▀▀ ▀▀▀  ▀ ']
 
+/** The hub, read back out of the grid so the two glyph sets cannot drift. */
+const hubGlyph = GRID[HUB[0]]![HUB[1]]!
+
 /**
  * Mark and wordmark side by side, with the tagline tucked under the wordmark so
  * the block stays rectangular. Falls back to a single line when the terminal is
@@ -105,12 +122,17 @@ const WORDMARK = ['█▀▀ █   █▀▀ █▀▀ ▀█▀', '█▀  █ 
 export function banner(subtitle?: string): string {
   // `columns` is 0, not undefined, on some pseudo-terminals — `??` would miss it.
   const columns = process.stdout.columns || 80
-  if (columns < 46) return `${c.signal('◉')} ${c.bold('fleet')}${subtitle ? c.dim(`  ${subtitle}`) : ''}`
+  if (columns < 46)
+    return `${c.signal(hubGlyph)} ${c.bold('fleet')}${subtitle ? c.dim(`  ${subtitle}`) : ''}`
 
   // The wordmark sits against the middle three rows of the mark; the tagline
   // takes the last. Every mark row is exactly MARK_WIDTH visible columns, so a
   // fixed gutter aligns them without measuring around the colour codes.
-  const right = ['', ...WORDMARK.map(c.bold), subtitle ? c.dim(subtitle) : '']
+  // Without block glyphs the drawn wordmark is unreadable, so ASCII terminals
+  // get the name set once against the hub row instead of a row of mojibake.
+  const right = unicode
+    ? ['', ...WORDMARK.map(c.bold), subtitle ? c.dim(subtitle) : '']
+    : ['', '', c.bold('F L E E T'), subtitle ? c.dim(subtitle) : '', '']
 
   return mark()
     .map((line, i) => `  ${line}${right[i] ? `    ${right[i]}` : ''}`.trimEnd())

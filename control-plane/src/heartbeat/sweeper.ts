@@ -1,5 +1,5 @@
-import { and, eq, inArray, ne } from 'drizzle-orm'
-import { fleets, nodes } from '../db/schema.js'
+import { and, eq, inArray, lt, ne } from 'drizzle-orm'
+import { deployments, fleets, nodes } from '../db/schema.js'
 import type { RescheduleOutcome } from '../scheduler/reschedule.js'
 import { rescheduleFromNode } from '../scheduler/reschedule.js'
 import type { AppContext } from '../api/context.js'
@@ -16,6 +16,47 @@ export type SweepResult = {
   markedDown: Array<{ id: string; name: string; fleetId: string }>
   /** What the scheduler did about it, per service (FR-6/FR-7). */
   rescheduled: Array<{ nodeId: string; outcomes: RescheduleOutcome[] }>
+  /** Builds whose control plane died underneath them (see failStaleBuilds). */
+  abandonedBuilds: string[]
+}
+
+/** Phases a deployment only passes through, never rests in. */
+const PRE_DEPLOY_PHASES = ['queued', 'building', 'pushing', 'scheduling'] as const
+
+/**
+ * A deploy in a pre-`deploying` phase is being actively worked on by whichever
+ * request opened it. If the control plane restarts mid-build, nothing is left to
+ * finish or fail it, and the row reads `building` forever — worse than the old
+ * behaviour of leaving no row at all, because it looks like progress.
+ *
+ * The cutoff is the build timeout plus slack, so a legitimately slow build is
+ * never cut short: by the time this fires, the process that owned the row has
+ * either given up or is gone.
+ */
+export async function failStaleBuilds(ctx: AppContext, opts: SweepOptions = {}): Promise<string[]> {
+  const cutoff = new Date(Date.now() - (ctx.config.BUILD_TIMEOUT_MS + 60_000))
+
+  const stale = await ctx.db
+    .update(deployments)
+    .set({
+      status: 'failed',
+      failureReason: 'the control plane restarted while this was building',
+      finishedAt: new Date(),
+    })
+    .where(
+      and(
+        inArray(deployments.status, [...PRE_DEPLOY_PHASES]),
+        lt(deployments.startedAt, cutoff)
+      )
+    )
+    .returning({ id: deployments.id })
+
+  for (const row of stale) {
+    // The volatile progress line has nothing left to describe.
+    await ctx.redis.del(`deploy:progress:${row.id}`).catch(() => {})
+    opts.log?.info({ deploymentId: row.id }, 'failed abandoned build')
+  }
+  return stale.map((row) => row.id)
 }
 
 /**
@@ -33,6 +74,15 @@ export type SweepResult = {
 export async function sweepOnce(ctx: AppContext, opts: SweepOptions = {}): Promise<SweepResult> {
   const markedDown: SweepResult['markedDown'] = []
   const rescheduled: SweepResult['rescheduled'] = []
+
+  // Independent of node health, and cheap: one indexed update. Runs first so a
+  // reschedule triggered below never has to reason about a phantom build.
+  let abandonedBuilds: string[] = []
+  try {
+    abandonedBuilds = await failStaleBuilds(ctx, opts)
+  } catch (err) {
+    opts.log?.error({ err }, 'stale build sweep failed')
+  }
   {
     {
       const allFleets = await ctx.db
@@ -65,7 +115,13 @@ export async function sweepOnce(ctx: AppContext, opts: SweepOptions = {}): Promi
           )
 
         const dbStale = dbOnlineNodes
-          .filter((n) => !n.lastHeartbeatAt || n.lastHeartbeatAt < cutoff)
+          // Redis is the live liveness source. A null persisted timestamp is
+          // normal for a node that has only just registered or for test/legacy
+          // rows; `markRegistered` puts those nodes in the Redis sorted set so
+          // `redisStale` can make the decision without racing a fresh beat.
+          // Only use Postgres as a restart-safe fallback once it has a real
+          // heartbeat timestamp to compare.
+          .filter((n) => Boolean(n.lastHeartbeatAt && n.lastHeartbeatAt < cutoff))
           .map((n) => n.id)
 
         const allStale = [...new Set([...redisStale, ...dbStale])]
@@ -123,7 +179,7 @@ export async function sweepOnce(ctx: AppContext, opts: SweepOptions = {}): Promi
       }
     }
   }
-  return { markedDown, rescheduled }
+  return { markedDown, rescheduled, abandonedBuilds }
 }
 
 export function startSweeper(

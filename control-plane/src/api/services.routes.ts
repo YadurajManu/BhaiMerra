@@ -10,6 +10,7 @@ import { platformsFor, BuildUnavailableError } from '../build/runner.js'
 import { managedHostname, allocateHostPort, invalidateRoutesForService, invalidateRouteHosts } from '../ingress/routes.js'
 import { recordAudit } from '../lib/audit.js'
 import { ApiError } from './errors.js'
+import { openDeployment, phaseWriter, readProgress } from './deploy-progress.js'
 import { requireFleetPermission } from './guards.js'
 
 export async function serviceRoutes(app: FastifyInstance) {
@@ -314,9 +315,13 @@ export async function serviceRoutes(app: FastifyInstance) {
 
       let image = body.image ?? service.image
 
-      // Build from source when the service has no prebuilt image (FR-3).
-      // Every architecture present among *eligible* nodes is built, not just
-      // the winner's: a later failover must not be blocked by a missing arch.
+      // Decide what will be built, if anything, *before* a row exists. A service
+      // with neither an image nor a build context is a configuration error, and
+      // recording it as a failed deployment would only bury the real problem.
+      //
+      // Every architecture present among *eligible* nodes is built, not just the
+      // winner's: a later failover must not be blocked by a missing arch.
+      let buildPlan: { buildContext: string; platforms: string[] } | null = null
       if (!image) {
         if (!service.buildContext) {
           throw ApiError.unprocessable(
@@ -340,91 +345,145 @@ export async function serviceRoutes(app: FastifyInstance) {
             `No online node in this fleet has an architecture "${service.name}" can be built for.`
           )
         }
-
-        const gitSha = body.gitSha ?? 'latest'
-        try {
-          const built = await app.ctx.builds.build({
-            serviceName: service.name,
-            buildContext: service.buildContext,
-            gitSha,
-            platforms,
-            registry: app.ctx.config.REGISTRY_URL ?? '',
-          })
-          image = built.imageTags[0]!
-          req.log.info(
-            { service: service.name, platforms, image, durationMs: built.durationMs },
-            'multi-arch build complete'
-          )
-        } catch (err) {
-          if (err instanceof BuildUnavailableError) {
-            // The build is where most deploys fail, so the message is the
-            // product: it names the platforms and the reason, verbatim.
-            throw new ApiError(422, 'build_failed', err.message, { platforms })
-          }
-          throw err
-        }
+        buildPlan = { buildContext: service.buildContext, platforms }
       }
 
-      // Allocated per node, so the ingress proxy has somewhere to send traffic.
-      const hostPort = await allocateHostPort(app.ctx, decision.nodeId)
+      // From here the deploy is really being attempted, so it gets a row. The
+      // row walks queued → building → pushing → scheduling → deploying, which is
+      // what the CLI polls to draw a deploy that takes minutes, and what leaves a
+      // failed build somewhere `fleet deployments` can find it.
+      const deploymentId = await openDeployment(app.ctx, {
+        serviceId: service.id,
+        nodeId: decision.nodeId,
+        gitSha: body.gitSha ?? null,
+      })
+      const phases = phaseWriter(app.ctx, deploymentId)
 
-      const deployment = await app.ctx.db.transaction(async (tx) => {
-        // Supersede whatever was live, so a service never has two live rows.
-        await tx
-          .update(deployments)
-          .set({ status: 'superseded', finishedAt: new Date() })
-          .where(
-            and(
-              eq(deployments.serviceId, service.id),
-              inArray(deployments.status, ['deploying', 'running'])
-            )
-          )
-
-        const [row] = await tx
-          .insert(deployments)
-          .values({
-            serviceId: service.id,
-            gitSha: body.gitSha ?? null,
-            nodeId: decision.nodeId,
-            status: 'deploying',
-            imageTags: [image],
-            hostPort,
+      try {
+        let finalImage: string
+        if (buildPlan) {
+          await phases.set('building')
+          const gitSha = body.gitSha ?? 'latest'
+          const built = await app.ctx.builds.build({
+            serviceName: service.name,
+            buildContext: buildPlan.buildContext,
+            gitSha,
+            platforms: buildPlan.platforms,
+            registry: app.ctx.config.REGISTRY_URL ?? '',
+            onProgress: phases.onBuildProgress,
           })
-          .returning()
+          finalImage = built.imageTags[0]!
+          req.log.info(
+            {
+              service: service.name,
+              platforms: buildPlan.platforms,
+              image: finalImage,
+              durationMs: built.durationMs,
+            },
+            'multi-arch build complete'
+          )
+        } else {
+          // Only reachable with an image: a service without one always produced
+          // a build plan above.
+          finalImage = image!
+        }
 
-        await tx.insert(placementEvents).values({
-          serviceId: service.id,
-          fromNodeId: null,
-          toNodeId: decision.nodeId,
-          reason: 'manual',
-          detail: {
-            score: decision.candidates[0]?.score,
-            breakdown: decision.candidates[0]?.breakdown,
-            consideredNodes: decision.candidates.length,
-          },
+        await phases.set('scheduling')
+        // Allocated per node, so the ingress proxy has somewhere to send traffic.
+        const hostPort = await allocateHostPort(app.ctx, decision.nodeId)
+
+        const deployment = await app.ctx.db.transaction(async (tx) => {
+          // Supersede whatever was live, so a service never has two live rows.
+          // The row being deployed is still `scheduling` here, so it excludes
+          // itself without needing to be named.
+          await tx
+            .update(deployments)
+            .set({ status: 'superseded', finishedAt: new Date() })
+            .where(
+              and(
+                eq(deployments.serviceId, service.id),
+                inArray(deployments.status, ['deploying', 'running'])
+              )
+            )
+
+          // The row already exists; going live is its last phase, not a second
+          // insert. Two rows per deploy would double every history view.
+          const [row] = await tx
+            .update(deployments)
+            .set({ status: 'deploying', imageTags: [finalImage], hostPort })
+            .where(eq(deployments.id, deploymentId))
+            .returning()
+
+          await tx.insert(placementEvents).values({
+            serviceId: service.id,
+            fromNodeId: null,
+            toNodeId: decision.nodeId,
+            reason: 'manual',
+            detail: {
+              score: decision.candidates[0]?.score,
+              breakdown: decision.candidates[0]?.breakdown,
+              consideredNodes: decision.candidates.length,
+            },
+          })
+
+          await recordAudit(tx, {
+            orgId,
+            actorUserId: req.userId,
+            action: 'service.deployed',
+            targetType: 'service',
+            targetId: service.id,
+            metadata: { node: decision.nodeName, image: finalImage, gitSha: body.gitSha },
+          })
+
+          return row!
         })
 
-        await recordAudit(tx, {
-          orgId,
-          actorUserId: req.userId,
-          action: 'service.deployed',
-          targetType: 'service',
-          targetId: service.id,
-          metadata: { node: decision.nodeName, image, gitSha: body.gitSha },
+        // The build line has served its purpose; the phase on the row is the
+        // durable record from here on.
+        await phases.clear().catch(() => {})
+
+        return reply.code(201).send({
+          deployment: { id: deployment.id, status: deployment.status },
+          placedOn: { id: decision.nodeId, name: decision.nodeName },
+          // The point of the whole exercise: a URL, handed back on deploy.
+          url: service.domain ? `https://${service.domain}` : service.hostname ? `https://${service.hostname}` : null,
+          score: decision.candidates[0]?.score,
+          warnings: decision.warnings,
+          note: 'The agent will converge on its next desired-state poll.',
+        })
+      } catch (err) {
+        // The request still fails, but the reason is written to the row first:
+        // an operator who missed the terminal output can still find out why.
+        const reason = err instanceof Error ? err.message : 'deploy failed'
+        await phases.fail(reason).catch((writeErr) => {
+          req.log.error({ err: writeErr, deploymentId }, 'could not record deploy failure')
         })
 
-        return row!
-      })
+        if (err instanceof BuildUnavailableError) {
+          // The build is where most deploys fail, so the message is the
+          // product: it names the platforms and the reason, verbatim.
+          throw new ApiError(422, 'build_failed', err.message, {
+            platforms: buildPlan?.platforms ?? [],
+            deploymentId,
+          })
+        }
+        throw err
+      }
+    }
+  )
 
-      return reply.code(201).send({
-        deployment: { id: deployment.id, status: deployment.status },
-        placedOn: { id: decision.nodeId, name: decision.nodeName },
-        // The point of the whole exercise: a URL, handed back on deploy.
-        url: service.domain ? `https://${service.domain}` : service.hostname ? `https://${service.hostname}` : null,
-        score: decision.candidates[0]?.score,
-        warnings: decision.warnings,
-        note: 'The agent will converge on its next desired-state poll.',
-      })
+  /**
+   * Where a deploy has got to. Polled every second or so by the CLI while it
+   * draws the progress ladder, which is why it is one indexed row plus one Redis
+   * read and nothing else.
+   */
+  app.get(
+    '/services/:serviceId/progress',
+    { preHandler: requireServicePermission('service.read') },
+    async (req) => {
+      const { service } = await loadService(app, req.params as { serviceId: string })
+      const progress = await readProgress(app.ctx, service.id)
+      return { service: service.name, progress }
     }
   )
 

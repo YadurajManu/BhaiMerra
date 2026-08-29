@@ -11,7 +11,9 @@ import { readFile, writeFile, access } from 'node:fs/promises'
 import { join } from 'node:path'
 import { request, requireFleet, CliError, EXIT } from '../api.js'
 import { c } from '../render.js'
-import { task, splash, glyph } from '../ui.js'
+import { task, glyph } from '../ui.js'
+import { withLadder } from '../ladder.js'
+import { DEPLOY_STEPS, follow, phaseWalker } from '../progress.js'
 import type { Flags } from '../args.js'
 
 type Service = {
@@ -104,25 +106,32 @@ export const upCommand = {
     // ── Step 4: deploy ────────────────────────────────────────────────
     const gitSha = typeof flags.sha === 'string' ? flags.sha : undefined
 
-    const deployResult = await splash(
-      `deploying ${c.bold(service.name)}`,
-      async () =>
-        (
-          await request<{
-            placedOn: { name: string }
-            score: number
-            url: string | null
-            warnings: string[]
-          }>('POST', `/services/${service.id}/deploy`, { body: { gitSha } })
-        ).body,
+    const deployResult = await withLadder(
+      DEPLOY_STEPS,
+      async (ladder) => {
+        const walker = phaseWalker(ladder)
+        const progress = follow(service.id, (p) => walker.apply(p), {
+          onUnavailable: () => ladder.note(c.dim('live progress unavailable; continuing with the deploy request')),
+        })
+        try {
+          const result = (
+            await request<{
+              placedOn: { name: string }
+              score: number
+              url: string | null
+              warnings: string[]
+            }>('POST', `/services/${service.id}/deploy`, { body: { gitSha } })
+          ).body
+          walker.finish(`scheduled onto ${result.placedOn.name}`)
+          return result
+        } finally {
+          await progress.stop()
+        }
+      },
       {
-        hints: [
-          'scoring every online node on headroom, reliability and load',
-          'building for every architecture an eligible node runs',
-          'the first multi-arch build is the slow one; layers cache after it',
-          'pushing the image to the fleet registry',
-        ],
-        done: (b) => `built and scheduled onto ${c.bold(b.placedOn.name)} ${c.dim(`score ${b.score?.toFixed(3)}`)}`,
+        mark: true,
+        title: `deploying ${service.name}`,
+        onCancel: `deploy is still running on the control plane; inspect with fleet deployments ${service.name}`,
       }
     )
 
