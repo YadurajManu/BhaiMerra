@@ -41,7 +41,9 @@ const preferredAPI = "1.44"
 
 type Client struct {
 	http *http.Client
-	host string
+	// Where the daemon was looked for, for diagnostics.
+	host      string
+	endpoints []endpoint
 
 	mu         sync.Mutex
 	apiVersion string // "v1.44", once negotiated
@@ -91,27 +93,7 @@ const autostartFile = "docker-autostart.json"
 // holding agent.json, which the systemd unit already grants write access to.
 // Pass "" to keep the decision in memory only, which is what tests want.
 func New(stateDir string) *Client {
-	dockerHost := os.Getenv("DOCKER_HOST")
-	proto := "unix"
-	addr := "/var/run/docker.sock"
-
-	if dockerHost != "" {
-		if strings.HasPrefix(dockerHost, "unix://") {
-			proto = "unix"
-			addr = strings.TrimPrefix(dockerHost, "unix://")
-		} else if strings.HasPrefix(dockerHost, "tcp://") {
-			proto = "tcp"
-			addr = strings.TrimPrefix(dockerHost, "tcp://")
-		} else if strings.HasPrefix(dockerHost, "http://") {
-			proto = "tcp"
-			addr = strings.TrimPrefix(dockerHost, "http://")
-		}
-	} else if runtime.GOOS == "windows" {
-		if _, err := os.Stat("/var/run/docker.sock"); err != nil {
-			proto = "tcp"
-			addr = "127.0.0.1:2375"
-		}
-	}
+	endpoints := endpointsFor(os.Getenv("DOCKER_HOST"))
 
 	statePath := ""
 	if stateDir != "" {
@@ -119,19 +101,24 @@ func New(stateDir string) *Client {
 	}
 
 	c := &Client{
-		host:      addr,
+		host:      endpoints[0].String(),
+		endpoints: endpoints,
 		statePath: statePath,
 		http: &http.Client{
 			Transport: &http.Transport{
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					if proto == "tcp" {
-						conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+					// Try each transport in turn. On Windows that is the named
+					// pipe and then the optional TCP port; everywhere else there
+					// is only ever one.
+					var last error
+					for _, e := range endpoints {
+						conn, err := dialEndpoint(ctx, e)
 						if err == nil {
 							return conn, nil
 						}
-						return (&net.Dialer{}).DialContext(ctx, "unix", "/var/run/docker.sock")
+						last = err
 					}
-					return (&net.Dialer{}).DialContext(ctx, proto, addr)
+					return nil, unreachable(endpoints, last)
 				},
 			},
 			// Image pulls can be slow on a domestic connection; the caller
