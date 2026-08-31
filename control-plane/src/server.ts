@@ -9,6 +9,7 @@ import { webhookRoutes } from './api/webhooks.routes.js'
 import { githubRoutes } from './api/github.routes.js'
 import { installRoutes } from './api/install.routes.js'
 import { serviceRoutes } from './api/services.routes.js'
+import { secretRoutes } from './api/secrets.routes.js'
 import { setupTunnelServer } from './tunnel/registry.js'
 import type { AppContext } from './api/context.js'
 
@@ -18,7 +19,15 @@ export async function buildServer(ctx: AppContext): Promise<FastifyInstance> {
       level: ctx.config.LOG_LEVEL,
       redact: {
         // Tokens must never reach a log file, including on an error path.
-        paths: ['req.headers.authorization', 'body.password', 'body.refreshToken'],
+        // `body.value` is the secret store's only input shape — a validation
+        // error on PUT /secrets/:key would otherwise log the credential.
+        paths: [
+          'req.headers.authorization',
+          'body.password',
+          'body.refreshToken',
+          'body.value',
+          'body.manifest',
+        ],
         censor: '[redacted]',
       },
     },
@@ -71,6 +80,7 @@ export async function buildServer(ctx: AppContext): Promise<FastifyInstance> {
   await app.register(githubRoutes)
   await app.register(installRoutes)
   await app.register(serviceRoutes)
+  await app.register(secretRoutes)
 
   setupTunnelServer(app, ctx, ctx.tunnels)
 

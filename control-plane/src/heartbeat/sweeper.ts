@@ -60,6 +60,52 @@ export async function failStaleBuilds(ctx: AppContext, opts: SweepOptions = {}):
 }
 
 /**
+ * How long a deployment may sit in `deploying` before it is declared a failure.
+ *
+ * This is the window in which a container has to be pulled, started, and report
+ * healthy. Generous, because a first pull of a large image over a domestic
+ * connection is genuinely slow, and cutting a working rollout short is worse
+ * than waiting a few more minutes for one that was never going to finish.
+ */
+export const ROLLOUT_TIMEOUT_MS = 10 * 60_000
+
+/**
+ * A rollout that never became healthy.
+ *
+ * The previous release is deliberately left alone. That is the whole point of
+ * the change this belongs to: a deployment stays `deploying` until the node
+ * reports the container healthy, so a broken image simply never gets promoted,
+ * and the release that works keeps serving. All that is left to do is stop
+ * waiting and record why.
+ *
+ * Rows whose service has no other live deployment are failed too — there is
+ * nothing to fall back to, but a row stuck in `deploying` forever is a worse
+ * answer than a failed one that says what happened.
+ */
+export async function failStalledRollouts(
+  ctx: AppContext,
+  opts: SweepOptions = {}
+): Promise<string[]> {
+  const cutoff = new Date(Date.now() - ROLLOUT_TIMEOUT_MS)
+
+  const stalled = await ctx.db
+    .update(deployments)
+    .set({
+      status: 'failed',
+      failureReason:
+        'the container never reported healthy within the rollout window; the previous release was left running',
+      finishedAt: new Date(),
+    })
+    .where(and(eq(deployments.status, 'deploying'), lt(deployments.startedAt, cutoff)))
+    .returning({ id: deployments.id, serviceId: deployments.serviceId })
+
+  for (const row of stalled) {
+    opts.log?.info({ deploymentId: row.id }, 'failed a rollout that never became healthy')
+  }
+  return stalled.map((row) => row.id)
+}
+
+/**
  * Failure detection (FR-5). Runs on a tick and asks Redis which nodes in each
  * fleet have gone quiet — a pull, not a subscription to expiry events, so a
  * control plane that was restarting when a key expired still notices.
@@ -82,6 +128,11 @@ export async function sweepOnce(ctx: AppContext, opts: SweepOptions = {}): Promi
     abandonedBuilds = await failStaleBuilds(ctx, opts)
   } catch (err) {
     opts.log?.error({ err }, 'stale build sweep failed')
+  }
+  try {
+    abandonedBuilds = abandonedBuilds.concat(await failStalledRollouts(ctx, opts))
+  } catch (err) {
+    opts.log?.error({ err }, 'stalled rollout sweep failed')
   }
   {
     {

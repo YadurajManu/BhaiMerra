@@ -78,13 +78,26 @@ export async function syncManifest(
         antiAffinity: svc.anti_affinity,
         persistentVolume: Boolean(svc.volume),
         volumeName: svc.volume ?? null,
+        volumePath: svc.volumePath ?? null,
         replicas: svc.replicas,
         healthCheckPath: svc.health.path,
+        healthIntervalSec: svc.health.interval,
+        healthTimeoutSec: svc.health.timeout,
+        healthDisabled: svc.health.disabled,
+        // Both of these were parsed and then dropped on the floor, which is why
+        // a manifest could declare configuration that never reached anything.
+        // Values are coerced to strings because YAML happily produces numbers
+        // and booleans, and an environment variable is always a string.
+        env: Object.fromEntries(Object.entries(svc.env).map(([k, v]) => [k, String(v)])),
+        secretRefs: svc.secrets,
         domain: svc.domain ?? null,
         containerPort: svc.port,
-        // Every service gets a managed hostname whether or not it brings its
-        // own domain, so there is always a URL to hand back after a deploy.
-        hostname: managedHostname(svc.name, fleetName, fleetId, zone),
+        internal: svc.internal,
+        // Every public service gets a managed hostname whether or not it brings
+        // its own domain, so there is always a URL to hand back after a deploy.
+        // An internal service gets none: a name that resolves publicly is
+        // exactly what it is asking not to have.
+        hostname: svc.internal ? null : managedHostname(svc.name, fleetName, fleetId, zone),
         reclaimPolicy: svc.reclaim ?? null,
       }
 

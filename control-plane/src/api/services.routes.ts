@@ -1,4 +1,4 @@
-import { and, eq, desc, inArray } from 'drizzle-orm'
+import { and, eq, ne, desc, inArray } from 'drizzle-orm'
 import { z } from 'zod'
 import type { FastifyInstance } from 'fastify'
 import { services, deployments, nodes, fleets, placementEvents } from '../db/schema.js'
@@ -9,6 +9,7 @@ import { fleetSnapshot, toServiceSpec } from '../scheduler/snapshot.js'
 import { platformsFor, BuildUnavailableError } from '../build/runner.js'
 import { managedHostname, allocateHostPort, invalidateRoutesForService, invalidateRouteHosts } from '../ingress/routes.js'
 import { recordAudit } from '../lib/audit.js'
+import { resolveSecrets } from '../secrets/store.js'
 import { ApiError } from './errors.js'
 import { openDeployment, phaseWriter, readProgress } from './deploy-progress.js'
 import { requireFleetPermission } from './guards.js'
@@ -313,6 +314,19 @@ export async function serviceRoutes(app: FastifyInstance) {
         })
       }
 
+      // Checked before anything is built or written. A service whose secrets
+      // are not set will start, fail to connect, and exit — and the operator
+      // gets to read that as a crash loop instead of as the one-line
+      // configuration error it actually is.
+      const { missing } = await resolveSecrets(app.ctx, fleetId, service.id, service.secretRefs)
+      if (missing.length) {
+        throw ApiError.unprocessable(
+          'missing_secrets',
+          `"${service.name}" needs ${missing.length === 1 ? 'a secret that is' : 'secrets that are'} not set: ${missing.join(', ')}.`,
+          missing.map((key) => `fleet secrets set ${key}`)
+        )
+      }
+
       let image = body.image ?? service.image
 
       // Decide what will be built, if anything, *before* a row exists. A service
@@ -389,22 +403,48 @@ export async function serviceRoutes(app: FastifyInstance) {
         }
 
         await phases.set('scheduling')
-        // Allocated per node, so the ingress proxy has somewhere to send traffic.
-        const hostPort = await allocateHostPort(app.ctx, decision.nodeId)
+        // Allocated per node, so the ingress proxy has somewhere to send
+        // traffic. An internal service gets none on purpose: publishing a port
+        // binds it on the node's interface, which is how a database ends up
+        // reachable from the whole LAN. Its neighbours reach it by name on the
+        // fleet network instead.
+        const hostPort = service.internal ? null : await allocateHostPort(app.ctx, decision.nodeId)
 
         const deployment = await app.ctx.db.transaction(async (tx) => {
-          // Supersede whatever was live, so a service never has two live rows.
-          // The row being deployed is still `scheduling` here, so it excludes
-          // itself without needing to be named.
-          await tx
-            .update(deployments)
-            .set({ status: 'superseded', finishedAt: new Date() })
-            .where(
-              and(
-                eq(deployments.serviceId, service.id),
-                inArray(deployments.status, ['deploying', 'running'])
+          // A stateful service cannot overlap. Two Postgres processes writing
+          // one volume corrupt it, so for these the old release is superseded
+          // now and the node replaces the container in place. The downtime is
+          // real and is the correct trade: a moment offline is recoverable,
+          // and a corrupted volume is not.
+          if (service.persistentVolume) {
+            await tx
+              .update(deployments)
+              .set({ status: 'superseded', finishedAt: new Date() })
+              .where(
+                and(
+                  eq(deployments.serviceId, service.id),
+                  ne(deployments.id, deploymentId),
+                  inArray(deployments.status, ['deploying', 'running'])
+                )
               )
-            )
+          }
+
+          // For everything else the previous release is deliberately *not*
+          // superseded here.
+          //
+          // It used to be, which meant the moment a deploy was scheduled the old
+          // release stopped being the live one — before the new container had
+          // been pulled, let alone proved it could serve a request. That is the
+          // whole outage: the site was down from the instant the deploy started
+          // until the replacement happened to come up, and if the replacement
+          // never came up, it stayed down.
+          //
+          // Both rows are live for the length of the rollout. Ingress prefers
+          // the running one, so traffic keeps reaching the old release, and the
+          // heartbeat supersedes it at the moment the new one reports healthy.
+          //
+          // A stateful service is the exception and is handled on the node: two
+          // containers cannot share one volume without corrupting it.
 
           // The row already exists; going live is its last phase, not a second
           // insert. Two rows per deploy would double every history view.
@@ -446,7 +486,15 @@ export async function serviceRoutes(app: FastifyInstance) {
           deployment: { id: deployment.id, status: deployment.status },
           placedOn: { id: decision.nodeId, name: decision.nodeName },
           // The point of the whole exercise: a URL, handed back on deploy.
-          url: service.domain ? `https://${service.domain}` : service.hostname ? `https://${service.hostname}` : null,
+          // An internal service has none, and says how it is reached instead.
+          url: service.internal
+            ? null
+            : service.domain
+              ? `https://${service.domain}`
+              : service.hostname
+                ? `https://${service.hostname}`
+                : null,
+          reachableAs: service.internal ? `${service.name}:${service.containerPort}` : null,
           score: decision.candidates[0]?.score,
           warnings: decision.warnings,
           note: 'The agent will converge on its next desired-state poll.',

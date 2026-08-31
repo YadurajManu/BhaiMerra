@@ -42,9 +42,16 @@ type RegisterResponse struct {
 }
 
 type Container struct {
-	Name   string `json:"name"`
-	State  string `json:"state"`
+	Name  string `json:"name"`
+	State string `json:"state"`
+	// Docker's own health verdict: healthy, unhealthy, starting, or empty when
+	// the image declares no check. The control plane will not call a deployment
+	// running on the strength of "the process started".
 	Health string `json:"health,omitempty"`
+	// Which deployment this container belongs to. During a rollout two
+	// containers of the same service are up at once, and the service name alone
+	// cannot say which of them the control plane is waiting on.
+	DeploymentID string `json:"deployment_id,omitempty"`
 }
 
 type Heartbeat struct {
@@ -89,10 +96,21 @@ type DesiredService struct {
 	DeploymentID    string `json:"deployment_id"`
 	Image           string `json:"image"`
 	HealthCheckPath string `json:"health_check_path"`
+	HealthInterval  int    `json:"health_interval_sec"`
+	HealthTimeout   int    `json:"health_timeout_sec"`
+	HealthDisabled  bool   `json:"health_disabled"`
 	Volume          string `json:"volume"`
-	Replicas        int    `json:"replicas"`
-	HostPort        int    `json:"host_port"`
-	ContainerPort   int    `json:"container_port"`
+	// Where the volume is mounted. Empty falls back to /data, which is right
+	// for a service that did not say and wrong for every database.
+	VolumePath    string `json:"volume_path"`
+	MemoryMb      int    `json:"memory_mb"`
+	Replicas      int    `json:"replicas"`
+	HostPort      int    `json:"host_port"`
+	ContainerPort int    `json:"container_port"`
+	// Plain manifest values merged with resolved secrets. This is the only
+	// field on the wire that carries credentials, which is why the agent never
+	// logs a DesiredService whole — see the redaction in reconcile.
+	Env map[string]string `json:"env"`
 }
 
 type DesiredState struct {

@@ -10,7 +10,7 @@ import {
   uniqueIndex,
   pgEnum,
 } from 'drizzle-orm/pg-core'
-import { relations } from 'drizzle-orm'
+import { relations, sql } from 'drizzle-orm'
 
 /* ── enums ─────────────────────────────────────────────────────────
    Kept as real Postgres enums rather than text + a check constraint:
@@ -226,15 +226,46 @@ export const services = pgTable(
 
     persistentVolume: boolean('persistent_volume').notNull().default(false),
     volumeName: text('volume_name'),
+    /**
+     * Where the volume is mounted inside the container. The image decides this
+     * — Postgres wants /var/lib/postgresql/data — so a single hardcoded /data
+     * mounted the volume somewhere the process never writes.
+     */
+    volumePath: text('volume_path'),
     replicas: integer('replicas').notNull().default(1),
 
     healthCheckPath: text('health_check_path').default('/'),
+    healthIntervalSec: integer('health_interval_sec').notNull().default(15),
+    healthTimeoutSec: integer('health_timeout_sec').notNull().default(5),
+    /** For images with no shell to probe with. */
+    healthDisabled: boolean('health_disabled').notNull().default(false),
+    /**
+     * Plain configuration from the manifest's `env:` block. Not sensitive by
+     * definition — anything that is belongs in `secrets` and is referenced by
+     * name from `secretRefs`.
+     */
+    env: jsonb('env').$type<Record<string, string>>().notNull().default({}),
+    /**
+     * Secret names this service needs, from the manifest's `secrets:` list.
+     * Only the names live here; the values are resolved from the secret store
+     * at deploy time and never stored on the service row.
+     */
+    secretRefs: text('secret_refs').array().notNull().default([]),
     /** The port the container listens on inside itself. */
     containerPort: integer('container_port').notNull().default(8080),
     /** User-supplied hostname, e.g. web.yourdomain.dev. */
     domain: text('domain'),
-    /** Always-present managed hostname, e.g. web.homelab.fleetos.app. */
+    /**
+     * Managed hostname, e.g. web-homelab-7efe4c.fleetos.app. Null for internal
+     * services, which are deliberately not addressable from outside the node.
+     */
     hostname: text('hostname'),
+    /**
+     * Reachable only by other services, by name, on the node's fleet network.
+     * No published host port, no managed hostname, no ingress route — which is
+     * what a database wants and what every service used to get anyway.
+     */
+    internal: boolean('internal').notNull().default(false),
     reclaimPolicy: reclaimPolicy('reclaim_policy'),
 
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -325,19 +356,46 @@ export const auditLog = pgTable(
   (t) => [index('audit_log_org_idx').on(t.orgId, t.createdAt)]
 )
 
+/**
+ * The secret store (FR-13).
+ *
+ * Scoped to the fleet, not the service. A `web` + `postgres` stack needs the
+ * same POSTGRES_PASSWORD in two places — the database to set it, the app to
+ * connect with it — and per-service storage means entering it twice and
+ * keeping the copies in sync by hand, which is how they drift apart.
+ *
+ * A row with a `serviceId` is an override for that one service. Resolution is
+ * service first, then fleet, so a single service can be given a different
+ * value without disturbing the rest.
+ */
 export const secrets = pgTable(
   'secrets',
   {
     id: uuid('id').primaryKey().defaultRandom(),
-    serviceId: uuid('service_id')
+    fleetId: uuid('fleet_id')
       .notNull()
-      .references(() => services.id, { onDelete: 'cascade' }),
+      .references(() => fleets.id, { onDelete: 'cascade' }),
+    /** null means fleet-wide; set means an override for this service only. */
+    serviceId: uuid('service_id').references(() => services.id, { onDelete: 'cascade' }),
     key: text('key').notNull(),
-    // envelope encrypted: {v, iv, tag, ciphertext, wrappedDek}
+    // envelope encrypted: {v, iv, tag, ciphertext, dekIv, dekTag, wrappedDek}
     encryptedValue: jsonb('encrypted_value').$type<Record<string, string>>().notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [uniqueIndex('secrets_service_key_key').on(t.serviceId, t.key)]
+  (t) => [
+    // Partial uniques, because "one fleet-wide value per key" and "one override
+    // per service and key" are two different rules. A plain unique on
+    // (service_id, key) cannot express the first one, since every fleet-wide
+    // row has service_id null and nulls do not collide.
+    uniqueIndex('secrets_fleet_key_key')
+      .on(t.fleetId, t.key)
+      .where(sql`service_id is null`),
+    uniqueIndex('secrets_service_key_key')
+      .on(t.serviceId, t.key)
+      .where(sql`service_id is not null`),
+    index('secrets_fleet_idx').on(t.fleetId),
+  ]
 )
 
 export const backups = pgTable('backups', {

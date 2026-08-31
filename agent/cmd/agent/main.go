@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -94,7 +95,9 @@ func run() error {
 		interval = 5 * time.Second
 	}
 
-	dockerClient := docker.New()
+	// The auto-start decision is persisted alongside agent.json, so quitting
+	// Docker survives the restarts the supervisor performs on its own.
+	dockerClient := docker.New(filepath.Dir(*statePath))
 	reporter := diagnostics.New(dockerClient)
 	engine := &reconcile.Engine{
 		Docker: dockerClient,
@@ -107,9 +110,13 @@ func run() error {
 	// stays in the fleet, it just cannot run workloads. Say so once at startup
 	// rather than failing every reconcile in silence.
 	//
-	// Startup is the cold-start case, so this is the one place an auto-start is
-	// unambiguously helpful — nobody has stopped Docker on purpose yet.
-	if err := dockerClient.PingOrStart(ctx); err != nil {
+	// Report only — deliberately not PingOrStart. Startup looks like the
+	// cold-start case but is not: the supervisor restarts this process on its
+	// own, so a start here fires every time the agent is bounced, including in
+	// a crash loop, and relaunches the Docker the operator just quit. Starting
+	// the daemon belongs to reconciliation, which only runs once the agent is
+	// alive, authenticated, and actually has a workload to place.
+	if err := dockerClient.Ping(ctx); err != nil {
 		log.Warn("container runtime unavailable — this node will report health but cannot run services", "err", err)
 	} else {
 		log.Info("container runtime ready")
@@ -140,6 +147,22 @@ func run() error {
 	err = loop.Run(ctx)
 	if errors.Is(err, context.Canceled) {
 		log.Info("agent stopped")
+		return nil
+	}
+
+	// A rejected credential is terminal, and it must not become a restart loop.
+	//
+	// The supervisor brings the process straight back, the credential is still
+	// rejected, and the cycle repeats every few seconds — each pass previously
+	// relaunching Docker on the way through. Exiting 0 is how we tell both
+	// supervisors to leave us alone: the systemd unit uses Restart=on-failure
+	// and the launchd job KeepAlive/SuccessfulExit, so a clean exit stays exited.
+	var apiErr *client.APIError
+	if errors.As(err, &apiErr) && apiErr.Fatal() {
+		log.Error("this node's credential was rejected — stopping instead of retrying",
+			"status", apiErr.StatusCode,
+			"detail", apiErr.Message,
+			"fix", "the node was removed, or the control plane was reset; re-pair with the installer and --reset")
 		return nil
 	}
 	return err

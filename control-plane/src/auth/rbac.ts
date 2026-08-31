@@ -25,6 +25,9 @@ export const PERMISSIONS = {
   'service.rollback': 'deployer',
   'service.reschedule': 'deployer',
   'secret.write': 'deployer',
+  // Listing secrets returns names and timestamps, never values — but which
+  // credentials a fleet holds is itself worth not handing to a viewer.
+  'secret.read': 'deployer',
 
   'node.pair': 'admin',
   'node.cordon': 'admin',

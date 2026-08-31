@@ -43,46 +43,65 @@ func (e *Engine) Reconcile(ctx context.Context, desired *client.DesiredState) ([
 		return nil, fmt.Errorf("container runtime unavailable: %w", err)
 	}
 
+	// Before anything is started: without this network there is no DNS between
+	// containers, so a service can only be reached by an address that changes
+	// on every restart. Idempotent and cached, so this is one call on the first
+	// pass and free afterwards.
+	if err := e.Docker.EnsureNetwork(ctx); err != nil {
+		return nil, fmt.Errorf("create the %s network: %w", docker.NetworkName, err)
+	}
+
 	running, err := e.Docker.ListManaged(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list managed containers: %w", err)
 	}
 
-	// What is here now, keyed by service.
-	current := make(map[string]docker.ContainerSummary, len(running))
+	// Keyed by deployment, not by service.
+	//
+	// During a rollout a service has two live deployments: the release that is
+	// serving and the one being checked. Keying by service name collapses them
+	// into one entry and the second silently overwrites the first, which makes
+	// an overlapping rollout impossible to represent.
+	byDeployment := make(map[string]docker.ContainerSummary, len(running))
 	for _, c := range running {
-		if svc := c.Labels[docker.LabelService]; svc != "" {
-			current[svc] = c
+		if id := c.Labels[docker.LabelDeployment]; id != "" {
+			byDeployment[id] = c
 		}
 	}
 
-	actions := make([]Action, 0, len(desired.Services)+len(current))
+	actions := make([]Action, 0, len(desired.Services)+len(running))
 	wanted := make(map[string]struct{}, len(desired.Services))
+	removed := make(map[string]struct{}, len(running))
 
 	for _, svc := range desired.Services {
-		wanted[svc.Name] = struct{}{}
+		wanted[svc.DeploymentID] = struct{}{}
 
 		if svc.Image == "" {
 			actions = append(actions, Action{svc.Name, "failed", "no image in desired state"})
 			continue
 		}
 
-		existing, present := current[svc.Name]
-		if present && existing.Labels[docker.LabelDeployment] == svc.DeploymentID && isUp(existing.State) {
+		existing, present := byDeployment[svc.DeploymentID]
+		// A container from before the fleet network existed is running the
+		// right image under the right deployment, so every other check passes —
+		// and it cannot resolve a single one of its neighbours. Treat being off
+		// the network as a reason to replace, or those containers stay broken
+		// until something else happens to redeploy them.
+		if present && isUp(existing.State) && docker.OnFleetNetwork(existing) {
 			actions = append(actions, Action{svc.Name, "unchanged", existing.State})
 			continue
 		}
 
 		verb := "started"
 		if present {
-			// A different deployment id, or a stopped container: tear down
-			// before bringing up, so the name is free and no stale container
-			// lingers holding the port.
+			// Same deployment, but stopped or on the wrong network. Tear it
+			// down before bringing it back, so the name is free.
 			verb = "replaced"
 			if err := e.Docker.Remove(ctx, existing.ID); err != nil {
 				actions = append(actions, Action{svc.Name, "failed", "remove old: " + err.Error()})
 				continue
 			}
+			removed[existing.ID] = struct{}{}
 		}
 
 		if err := e.start(ctx, svc); err != nil {
@@ -92,11 +111,22 @@ func (e *Engine) Reconcile(ctx context.Context, desired *client.DesiredState) ([
 		actions = append(actions, Action{svc.Name, verb, svc.Image})
 	}
 
-	// Anything managed but no longer desired belongs to a service that moved
-	// away or was removed. Unmanaged containers are never touched.
-	for name, c := range current {
-		if _, keep := wanted[name]; keep {
+	// Anything managed whose deployment is no longer listed: a service that
+	// moved away, was removed, or — the common case now — the previous release
+	// of a rollout that has just been promoted. Unmanaged containers are never
+	// touched, and a container carrying no deployment label cannot be matched
+	// to anything, so it goes too.
+	for _, c := range running {
+		if _, gone := removed[c.ID]; gone {
 			continue
+		}
+		id := c.Labels[docker.LabelDeployment]
+		if _, keep := wanted[id]; keep && id != "" {
+			continue
+		}
+		name := c.Labels[docker.LabelService]
+		if name == "" {
+			name = strings.TrimPrefix(strings.Join(c.Names, ","), "/")
 		}
 		if err := e.Docker.Remove(ctx, c.ID); err != nil {
 			actions = append(actions, Action{name, "failed", "remove: " + err.Error()})
@@ -116,22 +146,43 @@ func (e *Engine) start(ctx context.Context, svc client.DesiredService) error {
 		return fmt.Errorf("pull: %w", err)
 	}
 
+	containerPort := svc.ContainerPort
+	if containerPort == 0 {
+		containerPort = 8080
+	}
+
 	spec := docker.RunSpec{
-		Service:      svc.Name,
-		DeploymentID: svc.DeploymentID,
-		NodeID:       e.NodeID,
-		Image:        svc.Image,
-		Volume:       svc.Volume,
-		HealthPath:   svc.HealthCheckPath,
+		Service:       svc.Name,
+		DeploymentID:  svc.DeploymentID,
+		NodeID:        e.NodeID,
+		Image:         svc.Image,
+		Volume:        svc.Volume,
+		VolumePath:    svc.VolumePath,
+		Env:           svc.Env,
+		ContainerPort: containerPort,
+	}
+
+	// The scheduler reserved this much; hold the container to it. Docker
+	// refuses a limit under 6MB, and a service declared that small is a
+	// mistake in the manifest rather than an instruction worth honouring.
+	const minMemoryMb = 6
+	if svc.MemoryMb >= minMemoryMb {
+		spec.Memory = int64(svc.MemoryMb) * 1024 * 1024
+	}
+
+	if !svc.HealthDisabled && svc.HealthCheckPath != "" {
+		spec.Health = &docker.HealthSpec{
+			Path:        svc.HealthCheckPath,
+			Port:        containerPort,
+			IntervalSec: svc.HealthInterval,
+			TimeoutSec:  svc.HealthTimeout,
+		}
 	}
 
 	// Publish the container port on the host port the control plane allocated,
-	// so its ingress has somewhere to send traffic.
+	// so its ingress has somewhere to send traffic. An internal service is sent
+	// no host port, and so is never bound on the node's interface.
 	if svc.HostPort > 0 {
-		containerPort := svc.ContainerPort
-		if containerPort == 0 {
-			containerPort = 8080
-		}
 		spec.Ports = map[string]string{
 			fmt.Sprintf("%d/tcp", containerPort): strconv.Itoa(svc.HostPort),
 		}
@@ -140,7 +191,7 @@ func (e *Engine) start(ctx context.Context, svc client.DesiredService) error {
 	if _, err := e.Docker.Create(ctx, spec); err != nil {
 		return fmt.Errorf("create: %w", err)
 	}
-	if err := e.Docker.Start(ctx, docker.ContainerName(svc.Name)); err != nil {
+	if err := e.Docker.Start(ctx, docker.ContainerName(svc.Name, svc.DeploymentID)); err != nil {
 		return fmt.Errorf("start: %w", err)
 	}
 	return nil
@@ -163,7 +214,11 @@ func (e *Engine) List(ctx context.Context) ([]client.Container, error) {
 		if name == "" {
 			name = strings.TrimPrefix(strings.Join(c.Names, ","), "/")
 		}
-		container := client.Container{Name: name, State: c.State}
+		container := client.Container{
+			Name:         name,
+			State:        c.State,
+			DeploymentID: c.Labels[docker.LabelDeployment],
+		}
 		// Docker reports health inside Status as "Up 2 minutes (healthy)".
 		if open := strings.Index(c.Status, "("); open >= 0 {
 			if close := strings.Index(c.Status[open:], ")"); close > 0 {

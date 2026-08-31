@@ -29,6 +29,9 @@ export function parseQuantityMb(input: string | number): number | null {
 
 const SERVICE_NAME = /^[a-z0-9]([a-z0-9-]{0,46}[a-z0-9])?$/
 
+/** POSIX environment variable name. Shared by `env:` keys and `secrets:` entries. */
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/
+
 const quantity = z.union([z.string(), z.number()]).transform((v, ctx) => {
   const mb = parseQuantityMb(v)
   if (mb === null || mb <= 0) {
@@ -55,11 +58,52 @@ const resources = z
   })
   .prefault({})
 
+const DURATION = /^(\d+(?:\.\d+)?)\s*(ms|s|m|h)?$/i
+
+/**
+ * Accepts "5s", "1m", "500ms", or a bare number meaning seconds.
+ *
+ * Rounded up rather than down: a 500ms timeout that became 0 would mean "no
+ * timeout" to Docker, which is the opposite of what was asked for.
+ */
+export function parseDurationSec(input: string | number): number | null {
+  if (typeof input === 'number') return Number.isFinite(input) ? Math.max(1, Math.ceil(input)) : null
+  const match = DURATION.exec(input.trim())
+  if (!match) return null
+  const value = Number(match[1])
+  const factor: Record<string, number> = { ms: 1 / 1000, s: 1, m: 60, h: 3600 }
+  const scale = factor[(match[2] ?? 's').toLowerCase()]
+  if (scale === undefined) return null
+  const seconds = value * scale
+  return seconds <= 0 ? null : Math.max(1, Math.ceil(seconds))
+}
+
+const duration = (fallback: string) =>
+  z
+    .union([z.string(), z.number()])
+    .default(fallback)
+    .transform((v, ctx) => {
+      const seconds = parseDurationSec(v)
+      if (seconds === null) {
+        ctx.addIssue({
+          code: 'custom',
+          message: `"${v}" is not a valid duration. Use 5s, 500ms, 1m, or a plain number of seconds.`,
+        })
+        return z.NEVER
+      }
+      return seconds
+    })
+
 const healthCheck = z
   .object({
     path: z.string().startsWith('/', 'health.path must start with "/"').default('/'),
-    timeout: z.string().default('5s'),
-    interval: z.string().default('15s'),
+    timeout: duration('5s'),
+    interval: duration('15s'),
+    /**
+     * For images with no shell to probe with. A distroless container cannot run
+     * a health check, and one it can never pass is worse than none at all.
+     */
+    disabled: z.boolean().default(false),
   })
   .prefault({})
 
@@ -80,8 +124,24 @@ const serviceFields = z
     arch: z.array(z.enum(['arm64', 'armv7', 'amd64'])).default([]),
     min_reliability: z.enum(['any', 'opportunistic', 'standard', 'high']).default('any'),
     gpu: z.boolean().default(false),
-    volume: z.string().optional(),
+    /**
+     * `volume: pgdata` mounts at /data. `volume: { name: pgdata, path: ... }`
+     * mounts where the image actually keeps its data, which is what a database
+     * needs — the string form is kept because it is what most services want and
+     * what every existing manifest says.
+     */
+    volume: z
+      .union([
+        z.string(),
+        z.object({
+          name: z.string().min(1),
+          path: z.string().startsWith('/', 'volume.path must be an absolute path').optional(),
+        }),
+      ])
+      .optional(),
     domain: z.string().optional(),
+    /** Reachable only by other services on the same node, by name. */
+    internal: z.boolean().default(false),
     /** The port the container listens on. Ingress publishes it for you. */
     port: z.number().int().min(1).max(65535).default(8080),
     container_port: z.number().int().min(1).max(65535).optional(),
@@ -99,6 +159,10 @@ const serviceSchema = serviceFields
   .transform((val) => ({
     ...val,
     port: val.container_port ?? val.port,
+    // Both spellings of `volume` collapse to a name and an optional path here,
+    // so nothing downstream has to know there were two.
+    volume: typeof val.volume === 'string' ? val.volume : val.volume?.name,
+    volumePath: typeof val.volume === 'string' ? undefined : val.volume?.path,
   }))
   .superRefine((svc, ctx) => {
     if (!svc.build && !svc.image) {
@@ -112,6 +176,39 @@ const serviceSchema = serviceFields
     }
     if (svc.placement === 'flexible' && svc.node) {
       ctx.addIssue({ code: 'custom', message: '"node" only applies to pinned or preferred placement' })
+    }
+    // Both of these become environment variables, so both have to be legal
+    // ones. Caught here rather than at deploy: a name a shell cannot read is a
+    // typo, and finding it three minutes into a build is no help to anybody.
+    for (const key of Object.keys(svc.env)) {
+      if (!ENV_NAME.test(key)) {
+        ctx.addIssue({
+          code: 'custom',
+          message: `env key "${key}" is not a usable environment variable name. Use A-Z, 0-9 and _, not starting with a digit.`,
+        })
+      }
+    }
+    for (const name of svc.secrets) {
+      if (!ENV_NAME.test(name)) {
+        ctx.addIssue({
+          code: 'custom',
+          message: `secret "${name}" is not a usable environment variable name. Use A-Z, 0-9 and _, not starting with a digit.`,
+        })
+      }
+    }
+    if (svc.internal && svc.domain) {
+      ctx.addIssue({
+        code: 'custom',
+        message:
+          '"internal" and "domain" contradict each other: one says nothing outside may reach this service, the other publishes it. Remove whichever you did not mean.',
+      })
+    }
+    const duplicated = svc.secrets.filter((name) => name in svc.env)
+    if (duplicated.length) {
+      ctx.addIssue({
+        code: 'custom',
+        message: `${duplicated.join(', ')} appears in both "env" and "secrets". The secret wins; remove it from "env" so the file says what happens.`,
+      })
     }
   })
 
@@ -231,6 +328,23 @@ export function parseManifest(source: string): ParsedManifest {
           `Unless the image handles concurrent writers, this will corrupt data.`
       )
     }
+    // Service discovery is per node: a container resolves its neighbours by
+    // name on the node's fleet network, and nothing resolves across machines
+    // until the mesh lands. So an env value naming another service in this
+    // manifest is a dependency, and without affinity the scheduler is free to
+    // place the two apart — at which point the name stops resolving at runtime,
+    // far away from the file that caused it.
+    for (const [key, value] of Object.entries(svc.env)) {
+      const target = String(value)
+      if (!names.has(target) || target === svc.name) continue
+      if (svc.affinity.includes(target)) continue
+      warnings.push(
+        `services.${svc.name}.env.${key}: points at "${target}", which the scheduler may place on ` +
+          `another node — and names only resolve between services on the same one. ` +
+          `Add affinity: [${target}] to keep them together.`
+      )
+    }
+
     if (svc.gpu && svc.placement === 'flexible' && !svc.arch.length) {
       warnings.push(
         `services.${svc.name}: requires a GPU but names no architecture. ` +

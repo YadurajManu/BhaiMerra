@@ -8,27 +8,67 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 )
 
 // RunSpec is everything needed to bring one service up on this node.
 type RunSpec struct {
-	Service      string
-	DeploymentID string
-	NodeID       string
-	Image        string
-	Env          map[string]string
-	Ports        map[string]string // container port "8080/tcp" -> host port
-	Volume       string            // named volume mounted at VolumePath
-	VolumePath   string
-	HealthPath   string
-	Memory       int64 // bytes; 0 means unlimited
+	Service       string
+	DeploymentID  string
+	NodeID        string
+	Image         string
+	Env           map[string]string
+	Ports         map[string]string // container port "8080/tcp" -> host port
+	Volume        string            // named volume mounted at VolumePath
+	VolumePath    string
+	ContainerPort int
+	Health        *HealthSpec // nil disables the check
+	Memory        int64       // bytes; 0 means unlimited
+}
+
+// HealthSpec is what the manifest's `health:` block becomes.
+type HealthSpec struct {
+	Path        string
+	Port        int
+	IntervalSec int
+	TimeoutSec  int
+}
+
+// testCommand builds the probe.
+//
+// wget first, then curl, because a minimal image usually has exactly one of
+// them: busybox-based images ship wget, Debian-based ones usually curl. An
+// image with neither cannot be probed this way at all, which is what
+// `health: { disabled: true }` is for — the alternative is a container that
+// reports unhealthy forever because the check itself could not run.
+func (h *HealthSpec) testCommand() []string {
+	url := fmt.Sprintf("http://127.0.0.1:%d%s", h.Port, h.Path)
+	return []string{
+		"CMD-SHELL",
+		fmt.Sprintf("wget -q -O /dev/null %q 2>/dev/null || curl -fsS -o /dev/null %q 2>/dev/null || exit 1", url, url),
+	}
 }
 
 // ContainerName is deterministic so reconciliation can find what it created
 // after an agent restart, without keeping its own index.
-func ContainerName(service string) string { return "fleet-" + service }
+//
+// The deployment suffix is what allows a rollout to overlap: the replacement is
+// built and health-checked while the release it replaces is still serving, and
+// two containers cannot share one name. Containers created before this suffix
+// existed are still found, because reconciliation keys on the deployment label
+// rather than on the name.
+func ContainerName(service, deploymentID string) string {
+	if deploymentID == "" {
+		return "fleet-" + service
+	}
+	short := deploymentID
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	return "fleet-" + service + "-" + short
+}
 
 type pullStatus struct {
 	Error string `json:"error"`
@@ -88,12 +128,26 @@ func splitTag(image string) (string, string) {
 }
 
 type createRequest struct {
-	Image        string              `json:"Image"`
-	Env          []string            `json:"Env,omitempty"`
-	Labels       map[string]string   `json:"Labels"`
-	ExposedPorts map[string]struct{} `json:"ExposedPorts,omitempty"`
-	HostConfig   hostConfig          `json:"HostConfig"`
-	Healthcheck  *healthcheck        `json:"Healthcheck,omitempty"`
+	Image            string              `json:"Image"`
+	Env              []string            `json:"Env,omitempty"`
+	Labels           map[string]string   `json:"Labels"`
+	ExposedPorts     map[string]struct{} `json:"ExposedPorts,omitempty"`
+	HostConfig       hostConfig          `json:"HostConfig"`
+	Healthcheck      *healthcheck        `json:"Healthcheck,omitempty"`
+	NetworkingConfig *networkingConfig   `json:"NetworkingConfig,omitempty"`
+}
+
+// networkingConfig attaches the container at creation time. Only one network
+// can be given here, which is all we need — the fleet network is the one that
+// carries name resolution between services.
+type networkingConfig struct {
+	EndpointsConfig map[string]endpointConfig `json:"EndpointsConfig"`
+}
+
+type endpointConfig struct {
+	// The service name, so a neighbour can connect to `postgres` rather than to
+	// `fleet-postgres` or to an IP that changes on every restart.
+	Aliases []string `json:"Aliases,omitempty"`
 }
 
 type healthcheck struct {
@@ -121,6 +175,7 @@ type hostConfig struct {
 	PortBindings map[string][]portBinding `json:"PortBindings,omitempty"`
 	Mounts       []mount                  `json:"Mounts,omitempty"`
 	Memory       int64                    `json:"Memory,omitempty"`
+	NetworkMode  string                   `json:"NetworkMode,omitempty"`
 }
 
 type createResponse struct {
@@ -139,13 +194,33 @@ func (c *Client) Create(ctx context.Context, spec RunSpec) (string, error) {
 			LabelNode:       spec.NodeID,
 		},
 		HostConfig: hostConfig{Memory: spec.Memory},
+		// Join the fleet network and answer to the service's own name. Both
+		// halves matter: the network provides DNS at all, and the alias is what
+		// makes the name the one a person would write in a connection string.
+		NetworkingConfig: &networkingConfig{
+			EndpointsConfig: map[string]endpointConfig{
+				NetworkName: {Aliases: []string{spec.Service}},
+			},
+		},
 	}
 	// The agent may be restarting, or the node rebooting; the workload should
 	// come back without waiting for the control plane to notice.
 	req.HostConfig.RestartPolicy.Name = "unless-stopped"
+	req.HostConfig.NetworkMode = NetworkName
 
-	for k, v := range spec.Env {
-		req.Env = append(req.Env, k+"="+v)
+	// Sorted, because Go randomises map iteration and an unordered Env makes
+	// two identical specs produce two different create requests — which is
+	// impossible to assert on in a test and confusing to read in a diff.
+	if len(spec.Env) > 0 {
+		keys := make([]string, 0, len(spec.Env))
+		for k := range spec.Env {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		req.Env = make([]string, 0, len(keys))
+		for _, k := range keys {
+			req.Env = append(req.Env, k+"="+spec.Env[k])
+		}
 	}
 
 	if len(spec.Ports) > 0 {
@@ -165,12 +240,44 @@ func (c *Client) Create(ctx context.Context, spec RunSpec) (string, error) {
 		req.HostConfig.Mounts = []mount{{Type: "volume", Source: spec.Volume, Target: target}}
 	}
 
+	if spec.Health != nil {
+		interval := spec.Health.IntervalSec
+		if interval <= 0 {
+			interval = 15
+		}
+		timeout := spec.Health.TimeoutSec
+		if timeout <= 0 {
+			timeout = 5
+		}
+		// Docker takes these in nanoseconds.
+		req.Healthcheck = &healthcheck{
+			Test:     spec.Health.testCommand(),
+			Interval: int64(interval) * int64(time.Second),
+			Timeout:  int64(timeout) * int64(time.Second),
+			Retries:  3,
+		}
+	}
+
 	var out createResponse
-	path := fmt.Sprintf("/%s/containers/create?name=%s", c.api(ctx), url.QueryEscape(ContainerName(spec.Service)))
+	path := fmt.Sprintf("/%s/containers/create?name=%s", c.api(ctx), url.QueryEscape(ContainerName(spec.Service, spec.DeploymentID)))
 	if err := c.do(ctx, http.MethodPost, path, req, &out); err != nil {
+		// The usual cause of a create failing on the network is somebody having
+		// removed it since we last checked. Drop the cached "it exists" so the
+		// next reconcile recreates it instead of failing the same way forever.
+		if mentionsNetwork(err) {
+			c.forgetNetwork()
+		}
 		return "", err
 	}
 	return out.ID, nil
+}
+
+func mentionsNetwork(err error) bool {
+	var de *Error
+	if !asError(err, &de) {
+		return false
+	}
+	return strings.Contains(strings.ToLower(de.Message), "network")
 }
 
 func (c *Client) Start(ctx context.Context, nameOrID string) error {

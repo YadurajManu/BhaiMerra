@@ -9,6 +9,8 @@ import { requireAgent } from './guards.js'
 import { reclaimToNode } from '../scheduler/reclaim.js'
 import { detectDrift } from '../heartbeat/drift.js'
 import { dispatchEvent } from '../alerting/dispatch.js'
+import { buildEnv } from '../secrets/store.js'
+import { invalidateRoutesForService } from '../ingress/routes.js'
 
 /** The capability report an agent sends at registration (tech doc §7). */
 const capability = z.object({
@@ -38,6 +40,8 @@ const heartbeat = z.object({
         name: z.string().max(128),
         state: z.string().max(32),
         health: z.string().max(32).optional(),
+        /** Absent from agents older than the health-gated rollout. */
+        deployment_id: z.string().max(64).optional(),
       })
     )
     .max(200)
@@ -203,26 +207,70 @@ export async function agentRoutes(app: FastifyInstance) {
       logs: hb.logs,
     })
 
-    // Promote deployments the agent reports as actually running. The control
-    // plane schedules; only the node can say whether the container came up,
-    // so this is the one place 'deploying' becomes 'running'.
-    const up = new Set(
-      hb.containers.filter((c) => c.state === 'running').map((c) => c.name)
-    )
-    if (up.size) {
+    // Promote deployments the agent reports as actually serving. The control
+    // plane schedules; only the node can say whether the container came up, so
+    // this is the one place 'deploying' becomes 'running'.
+    //
+    // "Serving", not "started". A container whose process is up and failing
+    // every request used to count as a successful deploy, which is how a broken
+    // release replaced a working one and reported success. Where the service
+    // has a health check, Docker's verdict is what decides.
+    if (hb.containers.length) {
       const pending = await db
-        .select({ id: deployments.id, name: services.name })
+        .select({
+          id: deployments.id,
+          serviceId: deployments.serviceId,
+          name: services.name,
+          healthDisabled: services.healthDisabled,
+        })
         .from(deployments)
         .innerJoin(services, eq(services.id, deployments.serviceId))
         .where(and(eq(deployments.nodeId, nodeId), eq(deployments.status, 'deploying')))
 
-      const nowRunning = pending.filter((p) => up.has(p.name))
-      if (nowRunning.length) {
-        await db
-          .update(deployments)
-          .set({ status: 'running', finishedAt: new Date() })
-          .where(inArray(deployments.id, nowRunning.map((p) => p.id)))
-        req.log.info({ nodeId, services: nowRunning.map((p) => p.name) }, 'deployments now running')
+      if (pending.length) {
+        // Prefer the deployment id. Agents older than this report only the
+        // service name, and matching on that is still better than nothing.
+        const byDeployment = new Map(
+          hb.containers.filter((c) => c.deployment_id).map((c) => [c.deployment_id!, c])
+        )
+        const byName = new Map(hb.containers.map((c) => [c.name, c]))
+
+        const promoted = pending.filter((p) => {
+          const container = byDeployment.get(p.id) ?? byName.get(p.name)
+          if (!container || container.state !== 'running') return false
+          // No check configured means the state is the only evidence there is.
+          if (p.healthDisabled || !container.health) return true
+          return container.health === 'healthy'
+        })
+
+        for (const row of promoted) {
+          // Promotion is the cutover. The previous release is superseded here
+          // rather than when the new one was scheduled, so it keeps serving
+          // for the whole time the replacement is starting and being checked.
+          await db.transaction(async (tx) => {
+            await tx
+              .update(deployments)
+              .set({ status: 'running', finishedAt: new Date() })
+              .where(eq(deployments.id, row.id))
+
+            await tx
+              .update(deployments)
+              .set({ status: 'superseded', finishedAt: new Date() })
+              .where(
+                and(
+                  eq(deployments.serviceId, row.serviceId),
+                  ne(deployments.id, row.id),
+                  inArray(deployments.status, ['deploying', 'running'])
+                )
+              )
+          })
+          // The route must follow the new deployment's port immediately.
+          await invalidateRoutesForService(app.ctx, row.serviceId)
+        }
+
+        if (promoted.length) {
+          req.log.info({ nodeId, services: promoted.map((p) => p.name) }, 'deployments now running')
+        }
       }
     }
 
@@ -293,9 +341,11 @@ export async function agentRoutes(app: FastifyInstance) {
    */
   app.get('/agent/desired-state', { preHandler: requireAgent }, async (req) => {
     const nodeId = req.agentNodeId!
+    const fleetId = req.agentFleetId!
 
     const rows = await db
       .select({
+        serviceId: services.id,
         service: services.name,
         image: services.image,
         imageTags: deployments.imageTags,
@@ -303,8 +353,15 @@ export async function agentRoutes(app: FastifyInstance) {
         hostPort: deployments.hostPort,
         containerPort: services.containerPort,
         healthCheckPath: services.healthCheckPath,
+        healthIntervalSec: services.healthIntervalSec,
+        healthTimeoutSec: services.healthTimeoutSec,
+        healthDisabled: services.healthDisabled,
         volumeName: services.volumeName,
+        volumePath: services.volumePath,
+        requestRamMb: services.requestRamMb,
         replicas: services.replicas,
+        env: services.env,
+        secretRefs: services.secretRefs,
       })
       .from(deployments)
       .innerJoin(services, eq(services.id, deployments.serviceId))
@@ -319,18 +376,53 @@ export async function agentRoutes(app: FastifyInstance) {
         )
       )
 
+    // This is the only place a secret is decrypted, and the only place one
+    // leaves the control plane. It is safe here for two reasons that must both
+    // stay true: the response is scoped to services already placed on the
+    // calling node, and the caller proved it is that node with an agent token.
+    // A secret that will not resolve is omitted rather than failing the whole
+    // response — a container that is already running should not be torn down
+    // because somebody deleted a key it was started with. The deploy path is
+    // where a missing secret is refused.
+    const withEnv = await Promise.all(
+      rows.map(async (r) => {
+        const { env, missing } = await buildEnv(app.ctx, fleetId, {
+          id: r.serviceId,
+          env: r.env,
+          secretRefs: r.secretRefs,
+        })
+        if (missing.length) {
+          req.log.warn(
+            { nodeId, service: r.service, missing },
+            'desired state omits secrets that are not set'
+          )
+        }
+        return { row: r, env }
+      })
+    )
+
     return {
       node_id: nodeId,
       generated_at: new Date().toISOString(),
-      services: rows.map((r) => ({
+      services: withEnv.map(({ row: r, env }) => ({
         name: r.service,
         deployment_id: r.deploymentId,
         image: r.image ?? r.imageTags[0] ?? null,
         health_check_path: r.healthCheckPath,
+        health_interval_sec: r.healthIntervalSec,
+        health_timeout_sec: r.healthTimeoutSec,
+        health_disabled: r.healthDisabled,
         host_port: r.hostPort,
         container_port: r.containerPort,
         volume: r.volumeName,
+        volume_path: r.volumePath,
+        // The RAM the scheduler reserved for this service, so the node can hold
+        // it to that. Placement already weights headroom heavily precisely
+        // because a node driven into swap takes its neighbours down with it —
+        // and then nothing enforced the number it planned around.
+        memory_mb: r.requestRamMb,
         replicas: r.replicas,
+        env,
       })),
     }
   })

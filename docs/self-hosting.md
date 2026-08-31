@@ -176,6 +176,49 @@ it does not change how the agent contacts the API. Use it only when the
 automatic LAN address is wrong. The reverse-tunnel ingress work will remove
 this requirement for nodes behind NAT.
 
+### Who starts Docker
+
+A node cannot run workloads without a container runtime, so the agent will help
+bring one up — but it will not argue with you about it. `--docker-autostart`
+sets the policy, and the installer writes it into the service definition so it
+survives restarts:
+
+| Value | Behaviour |
+| --- | --- |
+| `cold` (default) | Start the runtime only if this node has never had a working one. Once Docker has been seen healthy, quitting it is treated as a decision and left alone. |
+| `always` | Start it whenever it is found down. |
+| `never` | Only report. Docker is entirely yours to start and stop; the installer will not touch it either. |
+
+```bash
+curl -fsSL https://fleetapi.example.com/install | sh -s -- \
+  --token flp_... --docker-autostart never
+```
+
+The decision is recorded in `docker-autostart.json` next to `agent.json`, which
+is what makes `cold` hold across an agent restart.
+
+To change the policy on a node that is already paired, re-run the installer with
+`--configure`. It rewrites the whole service definition, so pass any
+`--advertise-addr` you set originally or it will be dropped:
+
+```bash
+curl -fsSL https://fleetapi.example.com/install | sh -s -- \
+  --configure --docker-autostart never --advertise-addr host.docker.internal
+```
+
+Or edit `FLEET_DOCKER_AUTOSTART` in the service definition directly:
+
+- Linux — `/etc/systemd/system/fleet-agent.service`, then
+  `systemctl daemon-reload && systemctl restart fleet-agent`
+- macOS — `~/Library/LaunchAgents/dev.fleet-os.agent.plist`, then
+  `launchctl unload` and `launchctl load` it
+
+If Docker keeps reopening after you quit it, the node is almost certainly
+running an agent installed before this policy shipped. Reinstall it, or check
+`journalctl -fu fleet-agent` / `~/Library/Application Support/fleet-os/agent.log`
+for a repeating credential-rejected error — an agent whose node was deleted from
+the fleet used to restart every few seconds and reopen Docker on each pass.
+
 ## GitHub push deploys
 
 Fleet can deploy a repository at the exact commit GitHub reports. Add a
