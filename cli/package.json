@@ -5,7 +5,7 @@
   "type": "module",
   "license": "MIT",
   "bin": {
-    "fleet": "./dist/index.js"
+    "fleet": "dist/index.js"
   },
   "files": [
     "dist",
