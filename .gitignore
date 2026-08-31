@@ -18,7 +18,12 @@ node_modules/
 
 # ── build output ───────────────────────────────────────────────────
 dist/
-build/
+# Anchored. Unanchored, `build/` matches a directory of that name at any
+# depth — which silently excluded control-plane/src/build, 500 lines of the
+# builder itself, from the repository. Nothing that cloned it could compile
+# the control plane, because four tracked files import from a directory that
+# was never pushed.
+/build/
 .vite/
 *.tsbuildinfo
 

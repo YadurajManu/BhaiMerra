@@ -433,10 +433,14 @@ export async function serviceRoutes(app: FastifyInstance) {
           const gitSha = body.gitSha ?? 'latest'
           const built = await app.ctx.builds.build({
             serviceName: service.name,
-            buildContext: buildPlan.buildContext,
-            // An uploaded directory is rooted where it was extracted; without
-            // one the build workspace is the root, which is what a webhook
-            // checkout lands inside.
+            // An upload *is* the context: the CLI resolved `build: ./api`
+            // against the manifest's directory before packing, so the archive
+            // root is already the directory to build. Joining the path on
+            // again looks for ./api inside ./api.
+            //
+            // A checkout is the other way round — it is the whole repository,
+            // and the manifest's path selects a directory within it.
+            buildContext: body.contextId ? '.' : buildPlan.buildContext,
             contextRoot: body.contextId
               ? contextPath(app.ctx.config.BUILD_WORKDIR, body.contextId)
               : undefined,
