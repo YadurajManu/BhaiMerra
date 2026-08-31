@@ -29,6 +29,9 @@ export function parseQuantityMb(input: string | number): number | null {
 
 const SERVICE_NAME = /^[a-z0-9]([a-z0-9-]{0,46}[a-z0-9])?$/
 
+/** POSIX environment variable name. Shared by `env:` keys and `secrets:` entries. */
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/
+
 const quantity = z.union([z.string(), z.number()]).transform((v, ctx) => {
   const mb = parseQuantityMb(v)
   if (mb === null || mb <= 0) {
@@ -112,6 +115,32 @@ const serviceSchema = serviceFields
     }
     if (svc.placement === 'flexible' && svc.node) {
       ctx.addIssue({ code: 'custom', message: '"node" only applies to pinned or preferred placement' })
+    }
+    // Both of these become environment variables, so both have to be legal
+    // ones. Caught here rather than at deploy: a name a shell cannot read is a
+    // typo, and finding it three minutes into a build is no help to anybody.
+    for (const key of Object.keys(svc.env)) {
+      if (!ENV_NAME.test(key)) {
+        ctx.addIssue({
+          code: 'custom',
+          message: `env key "${key}" is not a usable environment variable name. Use A-Z, 0-9 and _, not starting with a digit.`,
+        })
+      }
+    }
+    for (const name of svc.secrets) {
+      if (!ENV_NAME.test(name)) {
+        ctx.addIssue({
+          code: 'custom',
+          message: `secret "${name}" is not a usable environment variable name. Use A-Z, 0-9 and _, not starting with a digit.`,
+        })
+      }
+    }
+    const duplicated = svc.secrets.filter((name) => name in svc.env)
+    if (duplicated.length) {
+      ctx.addIssue({
+        code: 'custom',
+        message: `${duplicated.join(', ')} appears in both "env" and "secrets". The secret wins; remove it from "env" so the file says what happens.`,
+      })
     }
   })
 

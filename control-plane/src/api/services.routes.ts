@@ -9,6 +9,7 @@ import { fleetSnapshot, toServiceSpec } from '../scheduler/snapshot.js'
 import { platformsFor, BuildUnavailableError } from '../build/runner.js'
 import { managedHostname, allocateHostPort, invalidateRoutesForService, invalidateRouteHosts } from '../ingress/routes.js'
 import { recordAudit } from '../lib/audit.js'
+import { resolveSecrets } from '../secrets/store.js'
 import { ApiError } from './errors.js'
 import { openDeployment, phaseWriter, readProgress } from './deploy-progress.js'
 import { requireFleetPermission } from './guards.js'
@@ -311,6 +312,19 @@ export async function serviceRoutes(app: FastifyInstance) {
           rejected: decision.rejected,
           warnings: decision.warnings,
         })
+      }
+
+      // Checked before anything is built or written. A service whose secrets
+      // are not set will start, fail to connect, and exit — and the operator
+      // gets to read that as a crash loop instead of as the one-line
+      // configuration error it actually is.
+      const { missing } = await resolveSecrets(app.ctx, fleetId, service.id, service.secretRefs)
+      if (missing.length) {
+        throw ApiError.unprocessable(
+          'missing_secrets',
+          `"${service.name}" needs ${missing.length === 1 ? 'a secret that is' : 'secrets that are'} not set: ${missing.join(', ')}.`,
+          missing.map((key) => `fleet secrets set ${key}`)
+        )
       }
 
       let image = body.image ?? service.image

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 )
@@ -144,8 +145,19 @@ func (c *Client) Create(ctx context.Context, spec RunSpec) (string, error) {
 	// come back without waiting for the control plane to notice.
 	req.HostConfig.RestartPolicy.Name = "unless-stopped"
 
-	for k, v := range spec.Env {
-		req.Env = append(req.Env, k+"="+v)
+	// Sorted, because Go randomises map iteration and an unordered Env makes
+	// two identical specs produce two different create requests — which is
+	// impossible to assert on in a test and confusing to read in a diff.
+	if len(spec.Env) > 0 {
+		keys := make([]string, 0, len(spec.Env))
+		for k := range spec.Env {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		req.Env = make([]string, 0, len(keys))
+		for _, k := range keys {
+			req.Env = append(req.Env, k+"="+spec.Env[k])
+		}
 	}
 
 	if len(spec.Ports) > 0 {

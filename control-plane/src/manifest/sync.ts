@@ -80,6 +80,12 @@ export async function syncManifest(
         volumeName: svc.volume ?? null,
         replicas: svc.replicas,
         healthCheckPath: svc.health.path,
+        // Both of these were parsed and then dropped on the floor, which is why
+        // a manifest could declare configuration that never reached anything.
+        // Values are coerced to strings because YAML happily produces numbers
+        // and booleans, and an environment variable is always a string.
+        env: Object.fromEntries(Object.entries(svc.env).map(([k, v]) => [k, String(v)])),
+        secretRefs: svc.secrets,
         domain: svc.domain ?? null,
         containerPort: svc.port,
         // Every service gets a managed hostname whether or not it brings its

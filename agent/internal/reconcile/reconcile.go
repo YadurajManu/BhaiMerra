@@ -123,6 +123,7 @@ func (e *Engine) start(ctx context.Context, svc client.DesiredService) error {
 		Image:        svc.Image,
 		Volume:       svc.Volume,
 		HealthPath:   svc.HealthCheckPath,
+		Env:          svc.Env,
 	}
 
 	// Publish the container port on the host port the control plane allocated,

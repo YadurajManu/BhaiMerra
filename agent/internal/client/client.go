@@ -93,6 +93,10 @@ type DesiredService struct {
 	Replicas        int    `json:"replicas"`
 	HostPort        int    `json:"host_port"`
 	ContainerPort   int    `json:"container_port"`
+	// Plain manifest values merged with resolved secrets. This is the only
+	// field on the wire that carries credentials, which is why the agent never
+	// logs a DesiredService whole — see the redaction in reconcile.
+	Env map[string]string `json:"env"`
 }
 
 type DesiredState struct {

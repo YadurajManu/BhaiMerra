@@ -55,12 +55,42 @@ end with a hyphen.
 | `volume` | name | — | Named volume. Anchors the service to one node. |
 | `domain` | hostname | — | Public ingress. TLS is automatic. |
 | `health.path` | path | `/` | Must start with `/`. |
-| `env` | map | `{}` | Plain values. Use `secrets` for anything sensitive. |
-| `secrets` | list | `[]` | Names resolved from the fleet secret store. |
+| `env` | map | `{}` | Plain values, committed to git. Use `secrets` for anything sensitive. |
+| `secrets` | list | `[]` | Names resolved from the fleet secret store. Values never appear in this file. |
 | `replicas` | int | `1` | Spread across distinct nodes where possible. |
 | `affinity` | list | `[]` | Services to co-locate with. |
 | `anti_affinity` | list | `[]` | Services to keep apart. |
 | `reclaim` | enum | fleet default | `eager`, `idle`, `manual`. |
+
+## Configuration and secrets
+
+Both `env` and `secrets` become environment variables in the container, so both
+must be legal variable names — `A-Z`, `0-9` and `_`, not starting with a digit.
+A name in both is rejected rather than silently resolved, because the secret
+would win and the file would be saying something untrue.
+
+`env` holds values you are happy to commit. Anything else is a name in
+`secrets`, and its value lives in the fleet store:
+
+```bash
+fleet secrets set DATABASE_URL          # prompts, echo off
+pass show db/url | fleet secrets set DATABASE_URL   # or pipe it
+fleet secrets ls
+```
+
+The value is never accepted as a command argument — that would put it in your
+shell history and in `ps` output — and there is no command that prints one
+back. Values are sealed with per-secret keys wrapped by the control plane's
+master key, and the only place one is ever decrypted is the desired state sent
+to the agent that runs the container.
+
+Secrets are **fleet-scoped**, so one `POSTGRES_PASSWORD` serves both the
+database that sets it and the app that connects with it. `--service <name>`
+stores an override for a single service, which wins over the fleet value.
+
+Deploying a service whose secrets are not set fails before anything is built,
+naming what is missing. Changing a value takes effect on the next deploy;
+already-running containers keep the environment they started with.
 
 ### Quantities
 

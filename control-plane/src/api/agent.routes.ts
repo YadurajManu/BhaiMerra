@@ -9,6 +9,7 @@ import { requireAgent } from './guards.js'
 import { reclaimToNode } from '../scheduler/reclaim.js'
 import { detectDrift } from '../heartbeat/drift.js'
 import { dispatchEvent } from '../alerting/dispatch.js'
+import { buildEnv } from '../secrets/store.js'
 
 /** The capability report an agent sends at registration (tech doc §7). */
 const capability = z.object({
@@ -293,9 +294,11 @@ export async function agentRoutes(app: FastifyInstance) {
    */
   app.get('/agent/desired-state', { preHandler: requireAgent }, async (req) => {
     const nodeId = req.agentNodeId!
+    const fleetId = req.agentFleetId!
 
     const rows = await db
       .select({
+        serviceId: services.id,
         service: services.name,
         image: services.image,
         imageTags: deployments.imageTags,
@@ -305,6 +308,8 @@ export async function agentRoutes(app: FastifyInstance) {
         healthCheckPath: services.healthCheckPath,
         volumeName: services.volumeName,
         replicas: services.replicas,
+        env: services.env,
+        secretRefs: services.secretRefs,
       })
       .from(deployments)
       .innerJoin(services, eq(services.id, deployments.serviceId))
@@ -319,10 +324,35 @@ export async function agentRoutes(app: FastifyInstance) {
         )
       )
 
+    // This is the only place a secret is decrypted, and the only place one
+    // leaves the control plane. It is safe here for two reasons that must both
+    // stay true: the response is scoped to services already placed on the
+    // calling node, and the caller proved it is that node with an agent token.
+    // A secret that will not resolve is omitted rather than failing the whole
+    // response — a container that is already running should not be torn down
+    // because somebody deleted a key it was started with. The deploy path is
+    // where a missing secret is refused.
+    const withEnv = await Promise.all(
+      rows.map(async (r) => {
+        const { env, missing } = await buildEnv(app.ctx, fleetId, {
+          id: r.serviceId,
+          env: r.env,
+          secretRefs: r.secretRefs,
+        })
+        if (missing.length) {
+          req.log.warn(
+            { nodeId, service: r.service, missing },
+            'desired state omits secrets that are not set'
+          )
+        }
+        return { row: r, env }
+      })
+    )
+
     return {
       node_id: nodeId,
       generated_at: new Date().toISOString(),
-      services: rows.map((r) => ({
+      services: withEnv.map(({ row: r, env }) => ({
         name: r.service,
         deployment_id: r.deploymentId,
         image: r.image ?? r.imageTags[0] ?? null,
@@ -331,6 +361,7 @@ export async function agentRoutes(app: FastifyInstance) {
         container_port: r.containerPort,
         volume: r.volumeName,
         replicas: r.replicas,
+        env,
       })),
     }
   })
