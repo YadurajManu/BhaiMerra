@@ -125,8 +125,12 @@ export async function installRoutes(app: FastifyInstance) {
     const available: string[] = []
     for (const platform of PLATFORMS) {
       for (const arch of ARCHES) {
+        // Windows binaries carry the extension the installer asks for. Without
+        // it this reported no Windows agent while happily serving one, so the
+        // manifest disagreed with the download that worked.
+        const suffix = platform === 'windows' ? '.exe' : ''
         try {
-          await stat(join(binDir, `fleet-agent-${platform}-${arch}`))
+          await stat(join(binDir, `fleet-agent-${platform}-${arch}${suffix}`))
           available.push(`${platform}/${arch}`)
         } catch {
           /* not built */
