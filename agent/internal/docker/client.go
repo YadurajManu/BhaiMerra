@@ -46,14 +46,48 @@ type Client struct {
 	mu         sync.Mutex
 	apiVersion string // "v1.44", once negotiated
 
-	startMu     sync.Mutex
-	everHealthy bool      // the daemon has answered at least once in this process
-	lastAttempt time.Time // when auto-start was last tried, for the cooldown
-	attempts    int
+	startMu   sync.Mutex
+	statePath string // "" keeps the auto-start decision in memory only
+	loaded    bool
+	mem       autostartMemory
+	// How to actually launch the daemon. A field rather than a direct call so a
+	// unit test can assert on the decision without launching Docker on the
+	// machine running the test.
+	start func()
 }
 
+// autostartMemory is the part of the auto-start decision that has to outlive
+// the process.
+//
+// This used to be three plain struct fields, which made the "cold" policy a
+// promise the agent could not keep. Both supervisors shipped by the installer
+// restart the agent on their own — systemd with Restart=, launchd with
+// KeepAlive — and every fresh process started with everHealthy false. So the
+// first thing a restarted agent did was relaunch the daemon the operator had
+// just quit, which is precisely what the policy exists to prevent. Persisting
+// it is what makes "a daemon that was up and is now down is a person, not a
+// fault" true beyond one process lifetime.
+//
+// The attempt budget is persisted for the same reason: an agent caught in a
+// crash-restart loop would otherwise get a fresh three attempts every few
+// seconds, which is an unbounded number of them.
+type autostartMemory struct {
+	// The daemon has answered at least once on this node, ever.
+	EverHealthy bool `json:"ever_healthy"`
+	// How many starts have been attempted since it was last seen healthy.
+	Attempts int `json:"attempts"`
+	// When the last start was attempted, for the cooldown.
+	LastAttempt time.Time `json:"last_attempt"`
+}
+
+const autostartFile = "docker-autostart.json"
+
 // New connects over the unix socket or TCP socket, honouring DOCKER_HOST when set.
-func New() *Client {
+//
+// stateDir is where the auto-start decision is persisted; it is the directory
+// holding agent.json, which the systemd unit already grants write access to.
+// Pass "" to keep the decision in memory only, which is what tests want.
+func New(stateDir string) *Client {
 	dockerHost := os.Getenv("DOCKER_HOST")
 	proto := "unix"
 	addr := "/var/run/docker.sock"
@@ -76,8 +110,14 @@ func New() *Client {
 		}
 	}
 
-	return &Client{
-		host: addr,
+	statePath := ""
+	if stateDir != "" {
+		statePath = filepath.Join(stateDir, autostartFile)
+	}
+
+	c := &Client{
+		host:      addr,
+		statePath: statePath,
 		http: &http.Client{
 			Transport: &http.Transport{
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -96,6 +136,8 @@ func New() *Client {
 			Timeout: 0,
 		},
 	}
+	c.start = c.startDaemon
+	return c
 }
 
 type versionResponse struct {
@@ -277,6 +319,51 @@ func autostartPolicy() string {
 	}
 }
 
+// loadLocked reads the persisted decision once. Caller holds startMu.
+//
+// A missing or unreadable file is not an error worth surfacing: it means a
+// first run, or a state directory the agent cannot read, and in both cases the
+// in-memory zero value is the correct starting point.
+func (c *Client) loadLocked() {
+	if c.loaded {
+		return
+	}
+	c.loaded = true
+	if c.statePath == "" {
+		return
+	}
+	data, err := os.ReadFile(c.statePath)
+	if err != nil {
+		return
+	}
+	_ = json.Unmarshal(data, &c.mem)
+}
+
+// persist writes the decision back. Best effort on purpose: a read-only state
+// directory must degrade to the old in-memory behaviour, not stop the agent
+// from talking to Docker at all.
+func (c *Client) persist(mem autostartMemory) {
+	if c.statePath == "" {
+		return
+	}
+	data, err := json.Marshal(mem)
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(c.statePath), 0o700); err != nil {
+		return
+	}
+	// Write-then-rename, so a crash mid-write cannot leave a truncated file
+	// that would read back as "never healthy" and relaunch Docker.
+	tmp := c.statePath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return
+	}
+	if err := os.Rename(tmp, c.statePath); err != nil {
+		_ = os.Remove(tmp)
+	}
+}
+
 // EnsureRunning brings the container daemon up if policy allows it.
 //
 // The default is deliberately restrained. This used to fire from Ping on every
@@ -295,24 +382,32 @@ func (c *Client) EnsureRunning(ctx context.Context) bool {
 	}
 
 	c.startMu.Lock()
-	if policy == autostartCold && c.everHealthy {
-		// It was up, and now it is not. That is a person, not a fault.
+	c.loadLocked()
+	if policy == autostartCold && c.mem.EverHealthy {
+		// It was up, and now it is not. That is a person, not a fault — and
+		// because this is read from disk, it stays a person's decision across
+		// the restart the supervisor is about to perform.
 		c.startMu.Unlock()
 		return false
 	}
-	if c.attempts >= maxAttempts {
+	if c.mem.Attempts >= maxAttempts {
 		c.startMu.Unlock()
 		return false
 	}
-	if !c.lastAttempt.IsZero() && time.Since(c.lastAttempt) < startCooldown {
+	if !c.mem.LastAttempt.IsZero() && time.Since(c.mem.LastAttempt) < startCooldown {
 		c.startMu.Unlock()
 		return false
 	}
-	c.lastAttempt = time.Now()
-	c.attempts++
+	c.mem.LastAttempt = time.Now()
+	c.mem.Attempts++
+	snapshot := c.mem
 	c.startMu.Unlock()
 
-	c.startDaemon()
+	// Record the attempt before making it. A daemon that takes the whole
+	// cooldown to come up must not be asked again by the next restart.
+	c.persist(snapshot)
+
+	c.start()
 	return true
 }
 
@@ -372,11 +467,21 @@ func (c *Client) Ping(ctx context.Context) error {
 	err := c.do(ctxTimeout, http.MethodGet, "/"+c.api(ctxTimeout)+"/_ping", nil, nil)
 	if err == nil {
 		c.startMu.Lock()
-		c.everHealthy = true
+		c.loadLocked()
+		// Only a transition is worth a write. Ping runs on every heartbeat, and
+		// this is a flash-backed SD card on a Raspberry Pi as often as not.
+		changed := !c.mem.EverHealthy || c.mem.Attempts != 0
+		c.mem.EverHealthy = true
 		// A daemon that came back resets the budget, so a genuine crash weeks
 		// later still gets helped.
-		c.attempts = 0
+		c.mem.Attempts = 0
+		c.mem.LastAttempt = time.Time{}
+		snapshot := c.mem
 		c.startMu.Unlock()
+
+		if changed {
+			c.persist(snapshot)
+		}
 	}
 	return err
 }

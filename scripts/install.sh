@@ -16,6 +16,16 @@ STATE_DIR="${FLEET_STATE_DIR:-/var/lib/fleet-os}"
 RESET=0
 ADVERTISE_ADDR="${FLEET_ADVERTISE_ADDR:-}"
 CONFIGURE=0
+# Whether the agent may bring the container runtime up for you.
+#
+#   cold   (default) only if this node has never had a working runtime
+#   always whenever it is found down — restores the pre-0.1.9 behaviour
+#   never  only report; you start and stop Docker yourself
+#
+# This is written into the service definition, not just used here: an agent
+# installed without it had no way to be told, so "never" was unreachable on
+# exactly the machines where someone wanted it.
+DOCKER_AUTOSTART="${FLEET_DOCKER_AUTOSTART:-cold}"
 
 # ── colors ──────────────────────────────────────────────────────────
 ESC=$(printf '\033')
@@ -48,15 +58,26 @@ while [ $# -gt 0 ]; do
     --control-plane) CONTROL_PLANE="$2"; shift 2 ;;
     --version)       VERSION="$2"; shift 2 ;;
     --advertise-addr) ADVERTISE_ADDR="$2"; shift 2 ;;
+    --docker-autostart) DOCKER_AUTOSTART="$2"; shift 2 ;;
     --configure)     CONFIGURE=1; shift ;;
     --reset)         RESET=1; shift ;;
     --help|-h)
-      echo "usage: install.sh --token <pairing-token> [--control-plane URL] [--version V] [--advertise-addr HOST] [--reset]"
-      echo "       install.sh --configure --advertise-addr HOST"
+      echo "usage: install.sh --token <pairing-token> [--control-plane URL] [--version V] [--advertise-addr HOST]"
+      echo "                  [--docker-autostart cold|always|never] [--reset]"
+      echo "       install.sh --configure [--advertise-addr HOST] [--docker-autostart POLICY]"
+      echo
+      echo "  --docker-autostart  whether the agent may start the container runtime."
+      echo "                      cold (default) only when this node has never had one"
+      echo "                      working; never leaves Docker entirely under your control."
       exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
+
+case "$DOCKER_AUTOSTART" in
+  cold|always|never) ;;
+  *) echo "--docker-autostart must be cold, always or never (got: $DOCKER_AUTOSTART)" >&2; exit 2 ;;
+esac
 
 die() { fail "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -120,7 +141,11 @@ else die "neither curl nor wget is available"
 fi
 
 # ── preflight & runtime setup ───────────────────────────────────────
-if [ "$os" = linux ]; then
+if [ "$DOCKER_AUTOSTART" = never ]; then
+  step "runtime setup"
+  info "skipped — --docker-autostart never"
+  printf "     ${DIM}Docker is yours to start and stop; workloads wait until it is up.${RESET_C}\n"
+elif [ "$os" = linux ]; then
   # Check if running in WSL or Windows Git Bash
   if [ -n "${WSL_DISTRO_NAME:-}" ] || echo "$PATH" | grep -q "/mnt/c"; then
     if ! have docker || ! docker info >/dev/null 2>&1; then
@@ -316,8 +341,12 @@ Wants=network-online.target docker.service
 Type=simple
 ExecStart=${BIN_DIR}/$bin_name --control-plane ${CONTROL_PLANE}
 Environment=FLEET_STATE_DIR=${STATE_DIR}
+Environment=FLEET_DOCKER_AUTOSTART=${DOCKER_AUTOSTART}
 ${ADVERTISE_ADDR:+Environment=FLEET_ADVERTISE_ADDR=${ADVERTISE_ADDR}}
-Restart=always
+# on-failure, not always: the agent exits 0 when the control plane has rejected
+# its credential, and that is terminal. Restarting it produced a loop that came
+# back every RestartSec, failed the same way, and relaunched Docker each pass.
+Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
 ProtectSystem=strict
@@ -331,8 +360,14 @@ UNIT
 
   register_now "$SUDO"
   $SUDO systemctl daemon-reload
-  $SUDO systemctl enable --now docker 2>/dev/null || true
-  $SUDO systemctl enable --now fleet-agent
+  if [ "$DOCKER_AUTOSTART" != never ]; then
+    $SUDO systemctl enable --now docker 2>/dev/null || true
+  fi
+  $SUDO systemctl enable fleet-agent
+  # restart, not `enable --now`: on a re-run over an existing install the unit
+  # is already active, so --now is a no-op and the freshly downloaded binary
+  # never actually gets loaded.
+  $SUDO systemctl restart fleet-agent
 
   step "ready"
   info "agent installed and running"
@@ -340,6 +375,7 @@ UNIT
   kv "status" "systemctl status fleet-agent"
   kv "logs" "journalctl -fu fleet-agent"
   kv "stop" "systemctl stop fleet-agent"
+  kv "docker autostart" "$DOCKER_AUTOSTART"
   printf "\n"
 
 elif [ "$os" = darwin ]; then
@@ -362,10 +398,18 @@ elif [ "$os" = darwin ]; then
   <key>EnvironmentVariables</key>
   <dict>
     <key>FLEET_STATE_DIR</key><string>${STATE_DIR}</string>
+    <key>FLEET_DOCKER_AUTOSTART</key><string>${DOCKER_AUTOSTART}</string>
 $(if [ -n "$ADVERTISE_ADDR" ]; then printf '    <key>FLEET_ADVERTISE_ADDR</key><string>%s</string>\n' "$ADVERTISE_ADDR"; fi)
   </dict>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+  <!-- SuccessfulExit=false rather than a bare <true/>: the agent exits 0 when
+       its credential has been rejected, which is terminal. A plain KeepAlive
+       relaunched it every few seconds, and each launch reopened Docker Desktop
+       underneath whoever had just quit it. -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key><false/>
+  </dict>
   <key>StandardOutPath</key><string>${STATE_DIR}/agent.log</string>
   <key>StandardErrorPath</key><string>${STATE_DIR}/agent.log</string>
 </dict>
@@ -380,6 +424,7 @@ PLISTEOF
   printf "\n"
   kv "logs" "tail -f \"$STATE_DIR/agent.log\""
   kv "stop" "launchctl unload \"$PLIST\""
+  kv "docker autostart" "$DOCKER_AUTOSTART"
   kv "dashboard" "${CYAN}fleet status${RESET_C}"
   printf "\n"
 
@@ -401,6 +446,7 @@ elif [ "$os" = windows ]; then
   # three layers of shell escaping (sh → PowerShell → CreateProcess).
   if powershell.exe -NoProfile -NonInteractive -Command "
     \$env:FLEET_STATE_DIR = '$win_state_dir'
+    \$env:FLEET_DOCKER_AUTOSTART = '$DOCKER_AUTOSTART'
     Start-Process -FilePath '$win_bin' \`
       -ArgumentList '--control-plane','$CONTROL_PLANE' \`
       -WindowStyle Hidden \`
@@ -410,7 +456,8 @@ elif [ "$os" = windows ]; then
     info "agent launched via PowerShell"
   else
     # Fallback for environments where PowerShell is unavailable (rare).
-    FLEET_STATE_DIR="$STATE_DIR" nohup "$BIN_DIR/$bin_name" \
+    FLEET_STATE_DIR="$STATE_DIR" FLEET_DOCKER_AUTOSTART="$DOCKER_AUTOSTART" \
+      nohup "$BIN_DIR/$bin_name" \
       --control-plane "$CONTROL_PLANE" \
       > "$STATE_DIR/agent.log" 2>&1 &
     info "agent launched via nohup"
@@ -421,6 +468,7 @@ elif [ "$os" = windows ]; then
   printf "\n"
   kv "logs" "tail -f \"$STATE_DIR/agent.log\""
   kv "stop" "taskkill /IM $bin_name /F"
+  kv "docker autostart" "$DOCKER_AUTOSTART"
   kv "dashboard" "${CYAN}fleet status${RESET_C}"
   printf "\n"
 
@@ -429,5 +477,5 @@ else
 
   step "ready"
   warn "no service manager found — start the agent yourself:"
-  printf "\n     ${DIM}FLEET_STATE_DIR=$STATE_DIR${ADVERTISE_ADDR:+ FLEET_ADVERTISE_ADDR=$ADVERTISE_ADDR} $BIN_DIR/$bin_name --control-plane $CONTROL_PLANE${RESET_C}\n\n"
+  printf "\n     ${DIM}FLEET_STATE_DIR=$STATE_DIR FLEET_DOCKER_AUTOSTART=$DOCKER_AUTOSTART${ADVERTISE_ADDR:+ FLEET_ADVERTISE_ADDR=$ADVERTISE_ADDR} $BIN_DIR/$bin_name --control-plane $CONTROL_PLANE${RESET_C}\n\n"
 fi
