@@ -70,8 +70,11 @@ func (r *Reporter) ObserveReconcile(actions []reconcile.Action, reconcileErr err
 func (r *Reporter) CaptureLogs(ctx context.Context, desired *client.DesiredState) {
 	next := make(map[string]string, len(desired.Services))
 	for _, svc := range desired.Services {
-		text, err := r.docker.Logs(ctx, docker.ContainerName(svc.Name), 160)
+		text, err := r.docker.Logs(ctx, docker.ContainerName(svc.Name, svc.DeploymentID), 160)
 		if err == nil && text != "" {
+			// During a rollout both releases are listed. The newer one is later
+			// in the slice and wins, which is the tail an operator watching a
+			// deploy actually wants to read.
 			next[svc.Name] = text
 		}
 	}

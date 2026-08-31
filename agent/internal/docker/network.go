@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"strings"
-	"sync"
 )
 
 // NetworkName is the user-defined bridge every Fleet container joins.
@@ -28,21 +27,20 @@ type networkCreateRequest struct {
 	Labels map[string]string `json:"Labels,omitempty"`
 }
 
-var networkOnce struct {
-	mu    sync.Mutex
-	ready bool
-}
-
 // EnsureNetwork creates the fleet network if it is not already there.
 //
 // Idempotent in both directions: a 409 means somebody else created it first,
 // which is the desired state and not an error. The result is cached so the
 // common path is free, but a failure clears the cache so the next reconcile
 // retries rather than assuming a network that was never made.
+//
+// The cache lives on the client rather than in a package variable. A global one
+// means two clients — a second daemon, or a second test — inherit an answer
+// about a network they have never seen.
 func (c *Client) EnsureNetwork(ctx context.Context) error {
-	networkOnce.mu.Lock()
-	ready := networkOnce.ready
-	networkOnce.mu.Unlock()
+	c.netMu.Lock()
+	ready := c.networkReady
+	c.netMu.Unlock()
 	if ready {
 		return nil
 	}
@@ -58,19 +56,19 @@ func (c *Client) EnsureNetwork(ctx context.Context) error {
 		return err
 	}
 
-	networkOnce.mu.Lock()
-	networkOnce.ready = true
-	networkOnce.mu.Unlock()
+	c.netMu.Lock()
+	c.networkReady = true
+	c.netMu.Unlock()
 	return nil
 }
 
 // forgetNetwork drops the cached "it exists" answer, so the next reconcile
 // tries again. Called when attaching a container to it fails, which is the
 // symptom of somebody having removed it underneath us.
-func forgetNetwork() {
-	networkOnce.mu.Lock()
-	networkOnce.ready = false
-	networkOnce.mu.Unlock()
+func (c *Client) forgetNetwork() {
+	c.netMu.Lock()
+	c.networkReady = false
+	c.netMu.Unlock()
 }
 
 // isAlreadyExists reports whether the daemon is telling us the network is

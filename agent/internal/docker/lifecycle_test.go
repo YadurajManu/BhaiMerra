@@ -1,6 +1,9 @@
 package docker
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSplitTag(t *testing.T) {
 	cases := []struct {
@@ -26,11 +29,37 @@ func TestSplitTag(t *testing.T) {
 func TestContainerNameIsDeterministic(t *testing.T) {
 	// Reconciliation finds what it created by name after a restart, without
 	// keeping its own index — so this must not drift.
-	if got := ContainerName("img-proxy"); got != "fleet-img-proxy" {
-		t.Errorf("ContainerName = %q, want fleet-img-proxy", got)
+	const dep = "4d09781f-8780-4b2a-9c31-000000000000"
+	if got := ContainerName("img-proxy", dep); got != "fleet-img-proxy-4d09781f" {
+		t.Errorf("ContainerName = %q, want fleet-img-proxy-4d09781f", got)
 	}
-	if ContainerName("web") != ContainerName("web") {
+	if ContainerName("web", dep) != ContainerName("web", dep) {
 		t.Error("ContainerName is not stable")
+	}
+}
+
+func TestContainerNameSeparatesDeployments(t *testing.T) {
+	// The reason for the suffix: during a rollout the replacement is created
+	// while the release it replaces is still serving, and two containers
+	// cannot share a name.
+	a := ContainerName("web", "aaaaaaaa-1111-4b2a-9c31-000000000000")
+	b := ContainerName("web", "bbbbbbbb-2222-4b2a-9c31-000000000000")
+	if a == b {
+		t.Errorf("two deployments of one service produced the same name: %q", a)
+	}
+	// Still prefixed with fleet-, which is what `fleet unpair` filters on when
+	// it cleans a machine up.
+	for _, name := range []string{a, b} {
+		if !strings.HasPrefix(name, "fleet-") {
+			t.Errorf("%q lost the fleet- prefix that teardown relies on", name)
+		}
+	}
+}
+
+func TestContainerNameFallsBackWithoutADeployment(t *testing.T) {
+	// Should still produce a usable name rather than a trailing hyphen.
+	if got := ContainerName("web", ""); got != "fleet-web" {
+		t.Errorf("ContainerName = %q, want fleet-web", got)
 	}
 }
 

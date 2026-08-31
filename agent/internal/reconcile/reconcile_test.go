@@ -1,0 +1,311 @@
+package reconcile
+
+import (
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"io"
+	"os"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/fleet-os/fleet-os/agent/internal/client"
+	"github.com/fleet-os/fleet-os/agent/internal/docker"
+)
+
+/*
+A fake Docker daemon.
+
+Reconciliation is the one place in the agent where getting the bookkeeping
+wrong means a container is destroyed, so these exercise the real docker client
+against a real HTTP server rather than a hand-rolled interface — the JSON
+shapes are part of what is being tested.
+*/
+
+type fakeDaemon struct {
+	mu         sync.Mutex
+	containers []docker.ContainerSummary
+	created    []string // names, in order
+	startedIDs []string
+	removedIDs []string
+	networks   int
+	server     *httptest.Server
+}
+
+func newFakeDaemon(t *testing.T, containers ...docker.ContainerSummary) *fakeDaemon {
+	t.Helper()
+	d := &fakeDaemon{containers: containers}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		path := r.URL.Path
+
+		switch {
+		case strings.HasSuffix(path, "/version"):
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"ApiVersion": "1.44", "MinAPIVersion": "1.24", "Version": "27.0.0",
+			})
+
+		case strings.HasSuffix(path, "/_ping"):
+			w.WriteHeader(http.StatusOK)
+
+		case strings.HasSuffix(path, "/networks/create"):
+			d.networks++
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"Id":"net1"}`))
+
+		case strings.HasSuffix(path, "/containers/json"):
+			_ = json.NewEncoder(w).Encode(d.containers)
+
+		case strings.HasSuffix(path, "/images/create"):
+			// The daemon streams progress lines; an empty stream is a success.
+			w.WriteHeader(http.StatusOK)
+
+		case strings.HasSuffix(path, "/containers/create"):
+			name := r.URL.Query().Get("name")
+			d.created = append(d.created, name)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"Id":"` + name + `-id","Warnings":[]}`))
+
+		case strings.HasSuffix(path, "/start"):
+			parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+			d.startedIDs = append(d.startedIDs, parts[len(parts)-2])
+			w.WriteHeader(http.StatusNoContent)
+
+		case r.Method == http.MethodDelete && strings.Contains(path, "/containers/"):
+			parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+			d.removedIDs = append(d.removedIDs, parts[len(parts)-1])
+			w.WriteHeader(http.StatusNoContent)
+
+		default:
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "{}")
+		}
+	})
+
+	d.server = httptest.NewServer(mux)
+	t.Cleanup(d.server.Close)
+	return d
+}
+
+// engine wires a real docker client at the fake daemon.
+func (d *fakeDaemon) engine(t *testing.T) *Engine {
+	t.Helper()
+	t.Setenv("DOCKER_HOST", "tcp://"+strings.TrimPrefix(d.server.URL, "http://"))
+	return &Engine{
+		Docker: docker.New(""),
+		NodeID: "node-1",
+		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+}
+
+// managed builds a container summary the way the daemon reports one.
+func managed(service, deployment string, onNetwork bool) docker.ContainerSummary {
+	c := docker.ContainerSummary{
+		ID:     service + "-" + deployment,
+		Names:  []string{"/fleet-" + service + "-" + deployment},
+		State:  "running",
+		Status: "Up 2 minutes (healthy)",
+		Labels: map[string]string{
+			docker.LabelManaged:    "true",
+			docker.LabelService:    service,
+			docker.LabelDeployment: deployment,
+		},
+	}
+	nets := map[string]struct{}{"bridge": {}}
+	if onNetwork {
+		nets = map[string]struct{}{docker.NetworkName: {}}
+	}
+	c.NetworkSettings = &struct {
+		Networks map[string]struct{} `json:"Networks"`
+	}{Networks: nets}
+	return c
+}
+
+func desire(services ...client.DesiredService) *client.DesiredState {
+	return &client.DesiredState{NodeID: "node-1", Services: services}
+}
+
+func svc(name, deployment string) client.DesiredService {
+	return client.DesiredService{
+		Name: name, DeploymentID: deployment, Image: "nginx:1.27", ContainerPort: 8080,
+	}
+}
+
+func verbFor(actions []Action, service string) string {
+	for _, a := range actions {
+		if a.Service == service {
+			return a.Verb
+		}
+	}
+	return "<none>"
+}
+
+func TestASettledContainerIsLeftAlone(t *testing.T) {
+	d := newFakeDaemon(t, managed("web", "dep1", true))
+	actions, err := d.engine(t).Reconcile(t.Context(), desire(svc("web", "dep1")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := verbFor(actions, "web"); got != "unchanged" {
+		t.Errorf("verb = %q, want unchanged", got)
+	}
+	if len(d.created) != 0 || len(d.removedIDs) != 0 {
+		t.Errorf("a settled container was disturbed: created=%v removed=%v", d.created, d.removedIDs)
+	}
+}
+
+func TestARolloutDoesNotRemoveTheReleaseStillServing(t *testing.T) {
+	// The heart of it. During a rollout the control plane lists both the
+	// release that is serving and the one being checked, and the old container
+	// must survive until the new one is promoted. Removing it here is exactly
+	// the outage this change exists to end.
+	d := newFakeDaemon(t, managed("web", "dep1", true))
+	actions, err := d.engine(t).Reconcile(t.Context(), desire(
+		svc("web", "dep1"), // still running
+		svc("web", "dep2"), // being rolled out
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(d.removedIDs) != 0 {
+		t.Errorf("the serving release was removed mid-rollout: %v", d.removedIDs)
+	}
+	if len(d.created) != 1 || !strings.Contains(d.created[0], "dep2") {
+		t.Errorf("expected exactly the new deployment to be created, got %v", d.created)
+	}
+	// Two containers of one service, which is only representable because
+	// reconciliation keys on the deployment rather than the service name.
+	if got := verbFor(actions, "web"); got != "unchanged" && got != "started" {
+		t.Errorf("unexpected verb %q", got)
+	}
+}
+
+func TestPromotionRemovesThePreviousRelease(t *testing.T) {
+	// Once the control plane promotes the new deployment it supersedes the old
+	// one, which drops out of desired state. That is the cutover.
+	d := newFakeDaemon(t,
+		managed("web", "dep1", true),
+		managed("web", "dep2", true),
+	)
+	_, err := d.engine(t).Reconcile(t.Context(), desire(svc("web", "dep2")))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(d.removedIDs) != 1 || d.removedIDs[0] != "web-dep1" {
+		t.Errorf("expected only the superseded release to be removed, got %v", d.removedIDs)
+	}
+	if len(d.created) != 0 {
+		t.Errorf("nothing should have been created: %v", d.created)
+	}
+}
+
+func TestAContainerOffTheFleetNetworkIsReplaced(t *testing.T) {
+	// It is running the right image under the right deployment and can resolve
+	// none of its neighbours. Nothing else would notice.
+	d := newFakeDaemon(t, managed("web", "dep1", false))
+	actions, err := d.engine(t).Reconcile(t.Context(), desire(svc("web", "dep1")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := verbFor(actions, "web"); got != "replaced" {
+		t.Errorf("verb = %q, want replaced", got)
+	}
+	if len(d.removedIDs) != 1 || len(d.created) != 1 {
+		t.Errorf("expected one removal and one creation, got removed=%v created=%v", d.removedIDs, d.created)
+	}
+}
+
+func TestAServiceNoLongerScheduledHereIsRemoved(t *testing.T) {
+	d := newFakeDaemon(t, managed("web", "dep1", true), managed("api", "dep9", true))
+	actions, err := d.engine(t).Reconcile(t.Context(), desire(svc("web", "dep1")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := verbFor(actions, "api"); got != "stopped" {
+		t.Errorf("verb for the unscheduled service = %q, want stopped", got)
+	}
+	if len(d.removedIDs) != 1 || d.removedIDs[0] != "api-dep9" {
+		t.Errorf("expected only api to be removed, got %v", d.removedIDs)
+	}
+}
+
+func TestTheNewContainerGetsItsOwnName(t *testing.T) {
+	d := newFakeDaemon(t, managed("web", "dep1", true))
+	_, err := d.engine(t).Reconcile(t.Context(), desire(svc("web", "dep1"), svc("web", "dep2")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.created) != 1 {
+		t.Fatalf("expected one creation, got %v", d.created)
+	}
+	// Colliding with the serving container's name would make the create fail
+	// and the rollout stall.
+	if d.created[0] == "fleet-web-dep1" {
+		t.Errorf("the replacement reused the serving container's name: %q", d.created[0])
+	}
+	if !strings.HasPrefix(d.created[0], "fleet-web-") {
+		t.Errorf("unexpected container name %q", d.created[0])
+	}
+}
+
+func TestTheFleetNetworkIsEnsuredBeforeAnythingStarts(t *testing.T) {
+	d := newFakeDaemon(t)
+	if _, err := d.engine(t).Reconcile(t.Context(), desire(svc("web", "dep1"))); err != nil {
+		t.Fatal(err)
+	}
+	if d.networks == 0 {
+		t.Error("reconciliation started a container without ensuring the network first")
+	}
+}
+
+func TestAServiceWithNoImageFailsWithoutTouchingAnything(t *testing.T) {
+	d := newFakeDaemon(t)
+	s := svc("web", "dep1")
+	s.Image = ""
+	actions, err := d.engine(t).Reconcile(t.Context(), desire(s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := verbFor(actions, "web"); got != "failed" {
+		t.Errorf("verb = %q, want failed", got)
+	}
+	if len(d.created) != 0 {
+		t.Errorf("nothing should have been created: %v", d.created)
+	}
+}
+
+func TestListReportsTheDeploymentSoPromotionCanTellReleasesApart(t *testing.T) {
+	d := newFakeDaemon(t, managed("web", "dep1", true), managed("web", "dep2", true))
+	containers, err := d.engine(t).List(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(containers) != 2 {
+		t.Fatalf("expected both releases to be reported, got %d", len(containers))
+	}
+	seen := map[string]string{}
+	for _, c := range containers {
+		if c.DeploymentID == "" {
+			t.Error("a container was reported with no deployment id; promotion cannot match it")
+		}
+		seen[c.DeploymentID] = c.Health
+	}
+	// Health is parsed out of "Up 2 minutes (healthy)" — it is what the control
+	// plane gates promotion on.
+	if seen["dep2"] != "healthy" {
+		t.Errorf("health = %q, want healthy", seen["dep2"])
+	}
+}
+
+func TestMain(m *testing.M) {
+	// Keep a developer's real DOCKER_HOST out of these.
+	_ = os.Unsetenv("DOCKER_HOST")
+	os.Exit(m.Run())
+}

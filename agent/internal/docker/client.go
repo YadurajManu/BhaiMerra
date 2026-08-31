@@ -54,6 +54,9 @@ type Client struct {
 	// unit test can assert on the decision without launching Docker on the
 	// machine running the test.
 	start func()
+
+	netMu        sync.Mutex
+	networkReady bool // the fleet network has been created on this daemon
 }
 
 // autostartMemory is the part of the auto-start decision that has to outlive

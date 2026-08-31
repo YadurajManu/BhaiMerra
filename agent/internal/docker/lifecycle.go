@@ -53,7 +53,22 @@ func (h *HealthSpec) testCommand() []string {
 
 // ContainerName is deterministic so reconciliation can find what it created
 // after an agent restart, without keeping its own index.
-func ContainerName(service string) string { return "fleet-" + service }
+//
+// The deployment suffix is what allows a rollout to overlap: the replacement is
+// built and health-checked while the release it replaces is still serving, and
+// two containers cannot share one name. Containers created before this suffix
+// existed are still found, because reconciliation keys on the deployment label
+// rather than on the name.
+func ContainerName(service, deploymentID string) string {
+	if deploymentID == "" {
+		return "fleet-" + service
+	}
+	short := deploymentID
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	return "fleet-" + service + "-" + short
+}
 
 type pullStatus struct {
 	Error string `json:"error"`
@@ -244,13 +259,13 @@ func (c *Client) Create(ctx context.Context, spec RunSpec) (string, error) {
 	}
 
 	var out createResponse
-	path := fmt.Sprintf("/%s/containers/create?name=%s", c.api(ctx), url.QueryEscape(ContainerName(spec.Service)))
+	path := fmt.Sprintf("/%s/containers/create?name=%s", c.api(ctx), url.QueryEscape(ContainerName(spec.Service, spec.DeploymentID)))
 	if err := c.do(ctx, http.MethodPost, path, req, &out); err != nil {
 		// The usual cause of a create failing on the network is somebody having
 		// removed it since we last checked. Drop the cached "it exists" so the
 		// next reconcile recreates it instead of failing the same way forever.
 		if mentionsNetwork(err) {
-			forgetNetwork()
+			c.forgetNetwork()
 		}
 		return "", err
 	}

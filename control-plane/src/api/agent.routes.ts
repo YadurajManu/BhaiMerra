@@ -10,6 +10,7 @@ import { reclaimToNode } from '../scheduler/reclaim.js'
 import { detectDrift } from '../heartbeat/drift.js'
 import { dispatchEvent } from '../alerting/dispatch.js'
 import { buildEnv } from '../secrets/store.js'
+import { invalidateRoutesForService } from '../ingress/routes.js'
 
 /** The capability report an agent sends at registration (tech doc §7). */
 const capability = z.object({
@@ -39,6 +40,8 @@ const heartbeat = z.object({
         name: z.string().max(128),
         state: z.string().max(32),
         health: z.string().max(32).optional(),
+        /** Absent from agents older than the health-gated rollout. */
+        deployment_id: z.string().max(64).optional(),
       })
     )
     .max(200)
@@ -204,26 +207,70 @@ export async function agentRoutes(app: FastifyInstance) {
       logs: hb.logs,
     })
 
-    // Promote deployments the agent reports as actually running. The control
-    // plane schedules; only the node can say whether the container came up,
-    // so this is the one place 'deploying' becomes 'running'.
-    const up = new Set(
-      hb.containers.filter((c) => c.state === 'running').map((c) => c.name)
-    )
-    if (up.size) {
+    // Promote deployments the agent reports as actually serving. The control
+    // plane schedules; only the node can say whether the container came up, so
+    // this is the one place 'deploying' becomes 'running'.
+    //
+    // "Serving", not "started". A container whose process is up and failing
+    // every request used to count as a successful deploy, which is how a broken
+    // release replaced a working one and reported success. Where the service
+    // has a health check, Docker's verdict is what decides.
+    if (hb.containers.length) {
       const pending = await db
-        .select({ id: deployments.id, name: services.name })
+        .select({
+          id: deployments.id,
+          serviceId: deployments.serviceId,
+          name: services.name,
+          healthDisabled: services.healthDisabled,
+        })
         .from(deployments)
         .innerJoin(services, eq(services.id, deployments.serviceId))
         .where(and(eq(deployments.nodeId, nodeId), eq(deployments.status, 'deploying')))
 
-      const nowRunning = pending.filter((p) => up.has(p.name))
-      if (nowRunning.length) {
-        await db
-          .update(deployments)
-          .set({ status: 'running', finishedAt: new Date() })
-          .where(inArray(deployments.id, nowRunning.map((p) => p.id)))
-        req.log.info({ nodeId, services: nowRunning.map((p) => p.name) }, 'deployments now running')
+      if (pending.length) {
+        // Prefer the deployment id. Agents older than this report only the
+        // service name, and matching on that is still better than nothing.
+        const byDeployment = new Map(
+          hb.containers.filter((c) => c.deployment_id).map((c) => [c.deployment_id!, c])
+        )
+        const byName = new Map(hb.containers.map((c) => [c.name, c]))
+
+        const promoted = pending.filter((p) => {
+          const container = byDeployment.get(p.id) ?? byName.get(p.name)
+          if (!container || container.state !== 'running') return false
+          // No check configured means the state is the only evidence there is.
+          if (p.healthDisabled || !container.health) return true
+          return container.health === 'healthy'
+        })
+
+        for (const row of promoted) {
+          // Promotion is the cutover. The previous release is superseded here
+          // rather than when the new one was scheduled, so it keeps serving
+          // for the whole time the replacement is starting and being checked.
+          await db.transaction(async (tx) => {
+            await tx
+              .update(deployments)
+              .set({ status: 'running', finishedAt: new Date() })
+              .where(eq(deployments.id, row.id))
+
+            await tx
+              .update(deployments)
+              .set({ status: 'superseded', finishedAt: new Date() })
+              .where(
+                and(
+                  eq(deployments.serviceId, row.serviceId),
+                  ne(deployments.id, row.id),
+                  inArray(deployments.status, ['deploying', 'running'])
+                )
+              )
+          })
+          // The route must follow the new deployment's port immediately.
+          await invalidateRoutesForService(app.ctx, row.serviceId)
+        }
+
+        if (promoted.length) {
+          req.log.info({ nodeId, services: promoted.map((p) => p.name) }, 'deployments now running')
+        }
       }
     }
 

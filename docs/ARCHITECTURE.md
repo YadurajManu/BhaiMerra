@@ -103,6 +103,30 @@ Failed builds remain as failed deployment rows with a sanitized reason. A
 sweeper marks abandoned pre-deploy rows failed after the configured build
 timeout plus slack.
 
+## Rollouts
+
+A deploy does not take the previous release out of service. Both rows are live
+for the length of the rollout: the old one `running`, the new one `deploying`.
+Ingress prefers the `running` row, so traffic keeps reaching the release that
+has proved it works while its replacement is pulled and started.
+
+Promotion happens in the heartbeat, and only on evidence. Where the service has
+a health check, Docker's own verdict decides — a container whose process
+started and fails every request is not a successful deploy. Promotion is the
+cutover: the new row becomes `running` and the old one is superseded in the
+same transaction, the route is invalidated, and the node removes the old
+container once it drops out of desired state.
+
+A replacement that never reports healthy is failed by the sweeper after the
+rollout window, and the release that works is left running. Nothing has to be
+rolled back, because nothing was taken away.
+
+Two exceptions, both deliberate. A service with a persistent volume supersedes
+its predecessor immediately and is replaced in place: two processes writing one
+volume corrupt it, and a moment offline is recoverable where that is not. And a
+service with no health check is promoted on the running state, because that is
+the only evidence there is.
+
 ## Failover
 
 When a node transitions offline, the control plane evaluates each live

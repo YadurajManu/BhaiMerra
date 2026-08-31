@@ -61,27 +61,33 @@ func TestMentionsNetwork(t *testing.T) {
 	}
 }
 
-func TestEnsureNetworkCachesAcrossCalls(t *testing.T) {
-	// The cache is package-level, so reset it rather than inheriting whatever
-	// another test left behind.
-	forgetNetwork()
-	t.Cleanup(forgetNetwork)
-
-	networkOnce.mu.Lock()
-	networkOnce.ready = true
-	networkOnce.mu.Unlock()
+func TestEnsureNetworkCachesPerClient(t *testing.T) {
+	c := New("")
+	c.netMu.Lock()
+	c.networkReady = true
+	c.netMu.Unlock()
 
 	// A client with nowhere to connect would fail if the call went out; the
 	// cached answer means it never does.
-	c := New("")
 	if err := c.EnsureNetwork(t.Context()); err != nil {
 		t.Errorf("a cached network should not be re-created: %v", err)
 	}
 
-	forgetNetwork()
-	networkOnce.mu.Lock()
-	ready := networkOnce.ready
-	networkOnce.mu.Unlock()
+	// The cache must not be shared. It was package-level to begin with, which
+	// meant a second client inherited an answer about a daemon it had never
+	// spoken to — and silently skipped creating the network there.
+	other := New("")
+	other.netMu.Lock()
+	inherited := other.networkReady
+	other.netMu.Unlock()
+	if inherited {
+		t.Error("a fresh client inherited another client's network state")
+	}
+
+	c.forgetNetwork()
+	c.netMu.Lock()
+	ready := c.networkReady
+	c.netMu.Unlock()
 	if ready {
 		t.Error("forgetNetwork should clear the cache so the next pass retries")
 	}

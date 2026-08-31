@@ -42,9 +42,16 @@ type RegisterResponse struct {
 }
 
 type Container struct {
-	Name   string `json:"name"`
-	State  string `json:"state"`
+	Name  string `json:"name"`
+	State string `json:"state"`
+	// Docker's own health verdict: healthy, unhealthy, starting, or empty when
+	// the image declares no check. The control plane will not call a deployment
+	// running on the strength of "the process started".
 	Health string `json:"health,omitempty"`
+	// Which deployment this container belongs to. During a rollout two
+	// containers of the same service are up at once, and the service name alone
+	// cannot say which of them the control plane is waiting on.
+	DeploymentID string `json:"deployment_id,omitempty"`
 }
 
 type Heartbeat struct {

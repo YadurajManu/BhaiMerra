@@ -1,4 +1,4 @@
-import { and, eq, desc, inArray } from 'drizzle-orm'
+import { and, eq, ne, desc, inArray } from 'drizzle-orm'
 import { z } from 'zod'
 import type { FastifyInstance } from 'fastify'
 import { services, deployments, nodes, fleets, placementEvents } from '../db/schema.js'
@@ -411,18 +411,40 @@ export async function serviceRoutes(app: FastifyInstance) {
         const hostPort = service.internal ? null : await allocateHostPort(app.ctx, decision.nodeId)
 
         const deployment = await app.ctx.db.transaction(async (tx) => {
-          // Supersede whatever was live, so a service never has two live rows.
-          // The row being deployed is still `scheduling` here, so it excludes
-          // itself without needing to be named.
-          await tx
-            .update(deployments)
-            .set({ status: 'superseded', finishedAt: new Date() })
-            .where(
-              and(
-                eq(deployments.serviceId, service.id),
-                inArray(deployments.status, ['deploying', 'running'])
+          // A stateful service cannot overlap. Two Postgres processes writing
+          // one volume corrupt it, so for these the old release is superseded
+          // now and the node replaces the container in place. The downtime is
+          // real and is the correct trade: a moment offline is recoverable,
+          // and a corrupted volume is not.
+          if (service.persistentVolume) {
+            await tx
+              .update(deployments)
+              .set({ status: 'superseded', finishedAt: new Date() })
+              .where(
+                and(
+                  eq(deployments.serviceId, service.id),
+                  ne(deployments.id, deploymentId),
+                  inArray(deployments.status, ['deploying', 'running'])
+                )
               )
-            )
+          }
+
+          // For everything else the previous release is deliberately *not*
+          // superseded here.
+          //
+          // It used to be, which meant the moment a deploy was scheduled the old
+          // release stopped being the live one — before the new container had
+          // been pulled, let alone proved it could serve a request. That is the
+          // whole outage: the site was down from the instant the deploy started
+          // until the replacement happened to come up, and if the replacement
+          // never came up, it stayed down.
+          //
+          // Both rows are live for the length of the rollout. Ingress prefers
+          // the running one, so traffic keeps reaching the old release, and the
+          // heartbeat supersedes it at the moment the new one reports healthy.
+          //
+          // A stateful service is the exception and is handled on the node: two
+          // containers cannot share one volume without corrupting it.
 
           // The row already exists; going live is its last phase, not a second
           // insert. Two rows per deploy would double every history view.

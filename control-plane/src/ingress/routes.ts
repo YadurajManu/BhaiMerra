@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { and, eq, inArray, isNotNull } from 'drizzle-orm'
+import { and, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm'
 import { deployments, fleets, nodes, services } from '../db/schema.js'
 import type { AppContext } from '../api/context.js'
 
@@ -61,6 +61,11 @@ export async function resolveRoute(ctx: AppContext, hostname: string): Promise<R
         eq(services.hostname, host)
       )
     )
+    // During a rollout the old release is `running` and its replacement is
+    // `deploying`. Traffic belongs on the one that has proved it can serve,
+    // until the heartbeat promotes the new one and supersedes this row.
+    // Without the ordering this is a coin flip between them.
+    .orderBy(sql`case ${deployments.status} when 'running' then 0 else 1 end`, desc(deployments.startedAt))
     .limit(1)
 
   let row = rows[0]
@@ -85,6 +90,12 @@ export async function resolveRoute(ctx: AppContext, hostname: string): Promise<R
       )
       .innerJoin(nodes, eq(nodes.id, deployments.nodeId))
       .where(eq(services.domain, host))
+      // Same rule as above: serve the proven release while its replacement
+      // is still being checked.
+      .orderBy(
+        sql`case ${deployments.status} when 'running' then 0 else 1 end`,
+        desc(deployments.startedAt)
+      )
       .limit(1)
     row = byDomain[0]
   }
