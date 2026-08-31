@@ -147,3 +147,39 @@ describe('unpacking an uploaded build context', () => {
     await access(workdir) // still there
   })
 })
+
+describe('a context with no Dockerfile', () => {
+  test('is refused at upload, not several minutes into a build', async () => {
+    // The usual cause is a .dockerignore listing `Dockerfile` — correct for a
+    // local build, which reads it from the host, and wrong for one shipped
+    // elsewhere. buildx reports this as "failed to read dockerfile" after the
+    // build has already started, against a context that otherwise looks fine.
+    const ctx = createContext(loadConfig())
+    const workdir = await mkdtemp(join(tmpdir(), 'fleet-nodf-'))
+    const src = await mkdtemp(join(tmpdir(), 'fleet-src-'))
+    await writeFile(join(src, 'package.json'), '{}\n')
+
+    const archive = await new Promise<Buffer>((resolve, reject) => {
+      const child = spawn('tar', ['-czf', '-', '-C', src, '.'], { stdio: ['ignore', 'pipe', 'pipe'] })
+      const chunks: Buffer[] = []
+      child.stdout.on('data', (c: Buffer) => chunks.push(c))
+      child.on('close', (code) =>
+        code === 0 ? resolve(Buffer.concat(chunks)) : reject(new Error('tar failed'))
+      )
+      child.on('error', reject)
+    })
+
+    await assert.rejects(
+      () => extractContext(workdir, archive),
+      (err: ApiError) => {
+        assert.equal(err.code, 'no_dockerfile')
+        // The message has to name the likely cause, or it is just a restatement.
+        assert.match(err.message, /\.dockerignore/)
+        return true
+      }
+    )
+
+    await rm(workdir, { recursive: true, force: true })
+    await closeContext(ctx)
+  })
+})

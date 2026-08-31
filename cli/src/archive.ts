@@ -24,6 +24,25 @@ import { CliError, EXIT } from './api.js'
 const ALWAYS_EXCLUDE = ['.git', 'node_modules', '.DS_Store']
 
 /**
+ * Patterns that must never be honoured, however the .dockerignore is written.
+ *
+ * `Dockerfile` in a .dockerignore is standard, recommended practice: a local
+ * `docker build` reads it from the host rather than from the context, so
+ * excluding it avoids shipping it twice. Here the context is built somewhere
+ * else, and the Dockerfile has to travel with it — honouring that line
+ * produces "failed to read dockerfile" on a context that is otherwise perfect.
+ *
+ * A bare `*` is the other one. It is the whitelist idiom, always paired with
+ * `!keep-this` lines, and since negations are not supported it would otherwise
+ * mean "exclude the entire project".
+ */
+function mustNotExclude(pattern: string): boolean {
+  const p = pattern.replace(/^\.?\//, '').replace(/^\*\*\//, '')
+  if (p === '*' || p === '**' || p === '.') return true
+  return /^\*?dockerfile/i.test(p)
+}
+
+/**
  * Read .dockerignore into tar exclusion patterns.
  *
  * The two formats are close but not identical: .dockerignore has negations
@@ -46,6 +65,7 @@ export async function ignorePatterns(dir: string): Promise<string[]> {
     .filter((line) => line && !line.startsWith('#') && !line.startsWith('!'))
     .map((line) => line.replace(/^\/+/, '').replace(/\/+$/, ''))
     .filter(Boolean)
+    .filter((line) => !mustNotExclude(line))
 
   return [...new Set([...ALWAYS_EXCLUDE, ...patterns])]
 }

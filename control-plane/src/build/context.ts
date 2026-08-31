@@ -70,6 +70,8 @@ export async function extractContext(
   }
 
   const listing = await runTar(['-tzf', '-'], undefined, archive)
+  let hasDockerfile = false
+
   for (const raw of listing.split('\n')) {
     const entry = raw.trim()
     if (!entry) continue
@@ -79,6 +81,19 @@ export async function extractContext(
     if (entry.split('/').includes('..')) {
       throw ApiError.unprocessable('unsafe_context', `The archive escapes its own directory: ${entry}`)
     }
+    if (entry.replace(/^\.\//, '') === 'Dockerfile') hasDockerfile = true
+  }
+
+  // Caught here rather than several minutes into a build, where it surfaces as
+  // buildx's own "failed to read dockerfile" against a context that otherwise
+  // looks fine. The usual cause is a .dockerignore listing `Dockerfile` —
+  // correct for a local build, which reads it from the host, and wrong for one
+  // shipped somewhere else to be built.
+  if (!hasDockerfile) {
+    throw ApiError.unprocessable(
+      'no_dockerfile',
+      'The build context has no Dockerfile at its root. If your .dockerignore excludes it, that line is for local builds — the Dockerfile has to travel with a context that is built elsewhere.'
+    )
   }
 
   const id = randomUUID()

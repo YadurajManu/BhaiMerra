@@ -137,3 +137,36 @@ describe('packing a build context', () => {
     assert.ok(!patterns.some((p) => p.startsWith('!')))
   })
 })
+
+describe('patterns that must never be honoured', () => {
+  test('a .dockerignore listing Dockerfile does not exclude it', async () => {
+    // This is standard, recommended practice: a local `docker build` reads the
+    // Dockerfile from the host, not the context. But a context built elsewhere
+    // has to carry it, and honouring the line produced "failed to read
+    // dockerfile" against an otherwise perfect upload.
+    const dir = await mkdtemp(join(tmpdir(), 'fleet-ctx-'))
+    await writeFile(join(dir, '.dockerignore'), 'node_modules\nDockerfile\n.dockerignore\ndist\n')
+    const patterns = await ignorePatterns(dir)
+
+    assert.ok(!patterns.includes('Dockerfile'), 'the Dockerfile must always be uploaded')
+    // Everything else in the file is still honoured.
+    assert.ok(patterns.includes('dist'))
+    assert.ok(patterns.includes('node_modules'))
+  })
+
+  test('Dockerfile variants are protected too', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'fleet-ctx-'))
+    await writeFile(join(dir, '.dockerignore'), 'Dockerfile*\n./Dockerfile\n**/Dockerfile\n')
+    const patterns = await ignorePatterns(dir)
+    assert.ok(!patterns.some((p) => /dockerfile/i.test(p)), `leaked: ${patterns.join(', ')}`)
+  })
+
+  test('a bare * does not exclude the entire project', async () => {
+    // `*` followed by `!keep-this` is the whitelist idiom. Negations are not
+    // supported, so honouring the `*` alone would upload nothing at all.
+    const dir = await mkdtemp(join(tmpdir(), 'fleet-ctx-'))
+    await writeFile(join(dir, '.dockerignore'), '*\n!src\n!package.json\n')
+    const patterns = await ignorePatterns(dir)
+    assert.ok(!patterns.includes('*'), 'a bare * would have emptied the context')
+  })
+})
