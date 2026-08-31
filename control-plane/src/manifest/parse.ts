@@ -32,6 +32,16 @@ const SERVICE_NAME = /^[a-z0-9]([a-z0-9-]{0,46}[a-z0-9])?$/
 /** POSIX environment variable name. Shared by `env:` keys and `secrets:` entries. */
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/
 
+/**
+ * Env keys whose value plausibly names a host.
+ *
+ * The co-location warning matches env values against service names, and
+ * without this it fires on `DB_USER: postgres` — a username that happens to
+ * equal a service name. A warning that is wrong as often as it is right is
+ * one people learn to scroll past.
+ */
+const HOSTISH_KEY = /(^|_)(HOST|HOSTNAME|ADDR|ADDRESS|SERVER|URL|URI|ENDPOINT)$/i
+
 const quantity = z.union([z.string(), z.number()]).transform((v, ctx) => {
   const mb = parseQuantityMb(v)
   if (mb === null || mb <= 0) {
@@ -296,6 +306,7 @@ export function parseManifest(source: string): ParsedManifest {
 
   // Cross-service checks, once every service is known to be individually valid.
   const names = new Set(services.map((s) => s.name))
+  const byName = new Map(services.map((s) => [s.name, s]))
   for (const svc of services) {
     for (const [field, refs] of [['affinity', svc.affinity], ['anti_affinity', svc.anti_affinity]] as const) {
       for (const ref of refs) {
@@ -335,9 +346,27 @@ export function parseManifest(source: string): ParsedManifest {
     // place the two apart — at which point the name stops resolving at runtime,
     // far away from the file that caused it.
     for (const [key, value] of Object.entries(svc.env)) {
+      // Only keys that plausibly name a host. `DB_USER: postgres` is a
+      // username that happens to match a service name, and warning about it
+      // is how a warning system teaches people to ignore it.
+      if (!HOSTISH_KEY.test(key)) continue
+
       const target = String(value)
       if (!names.has(target) || target === svc.name) continue
       if (svc.affinity.includes(target)) continue
+
+      // Two services pinned to the same node cannot be placed apart, so
+      // there is nothing here to warn about.
+      const other = byName.get(target)
+      if (
+        svc.placement === 'pinned' &&
+        other?.placement === 'pinned' &&
+        svc.node &&
+        svc.node === other.node
+      ) {
+        continue
+      }
+
       warnings.push(
         `services.${svc.name}.env.${key}: points at "${target}", which the scheduler may place on ` +
           `another node — and names only resolve between services on the same one. ` +

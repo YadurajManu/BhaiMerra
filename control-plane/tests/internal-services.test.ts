@@ -250,4 +250,60 @@ services:
 `)
     assert.deepEqual(parsed.warnings, [])
   })
+
+  test('a username that happens to match a service name is not a dependency', () => {
+    // DB_USER: postgres is a login, not a hostname. Warning about it is how a
+    // warning system trains people to scroll past warnings.
+    const parsed = parseManifest(`
+fleet: homelab
+services:
+  postgres:
+    image: postgres:16
+    internal: true
+  web:
+    image: nginx
+    env:
+      DB_USER: postgres
+`)
+    assert.deepEqual(parsed.warnings, [])
+  })
+
+  test('services pinned to the same node cannot be split, so there is nothing to warn about', () => {
+    const parsed = parseManifest(`
+fleet: homelab
+services:
+  postgres:
+    image: postgres:16
+    internal: true
+    placement: pinned
+    node: node-a
+  web:
+    image: nginx
+    placement: pinned
+    node: node-a
+    env:
+      DB_HOST: postgres
+`)
+    assert.deepEqual(parsed.warnings, [])
+  })
+
+  test('but pinning them to different nodes is exactly the case worth warning about', () => {
+    const parsed = parseManifest(`
+fleet: homelab
+services:
+  postgres:
+    image: postgres:16
+    internal: true
+    placement: pinned
+    node: node-a
+  web:
+    image: nginx
+    placement: pinned
+    node: node-b
+    env:
+      DB_HOST: postgres
+`)
+    assert.equal(parsed.warnings.length, 1)
+    assert.match(parsed.warnings[0]!, /DB_HOST/)
+  })
 })
