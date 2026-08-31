@@ -7,6 +7,13 @@ import { syncManifest } from '../manifest/sync.js'
 import { place } from '../scheduler/placement.js'
 import { fleetSnapshot, toServiceSpec } from '../scheduler/snapshot.js'
 import { platformsFor, BuildUnavailableError } from '../build/runner.js'
+import {
+  extractContext,
+  disposeContext,
+  contextPath,
+  assertValidContextId,
+  MAX_CONTEXT_BYTES,
+} from '../build/context.js'
 import { managedHostname, allocateHostPort, invalidateRoutesForService, invalidateRouteHosts } from '../ingress/routes.js'
 import { recordAudit } from '../lib/audit.js'
 import { resolveSecrets } from '../secrets/store.js'
@@ -293,14 +300,60 @@ export async function serviceRoutes(app: FastifyInstance) {
     }
   )
 
+  /**
+   * Upload a build context.
+   *
+   * The counterpart to a git checkout: the CLI sends the directory it would
+   * have pushed, and the deploy that follows builds it exactly as it builds a
+   * pushed commit — multi-arch, tagged for the registry the nodes can reach.
+   * Without this, `build:` only ever worked through a webhook.
+   */
+  app.post(
+    '/services/:serviceId/build-context',
+    {
+      preHandler: requireServicePermission('service.deploy'),
+      // The global limit is 1MB, which is right for JSON and useless here.
+      bodyLimit: MAX_CONTEXT_BYTES,
+    },
+    async (req, reply) => {
+      const archive = req.body
+      if (!Buffer.isBuffer(archive)) {
+        throw ApiError.badRequest(
+          'invalid_context',
+          'Send the build context as a gzipped tar with content-type application/gzip'
+        )
+      }
+
+      const { service } = await loadService(app, req.params as { serviceId: string })
+      const uploaded = await extractContext(app.ctx.config.BUILD_WORKDIR, archive)
+
+      req.log.info(
+        { service: service.name, contextId: uploaded.id, bytes: archive.length },
+        'build context uploaded'
+      )
+
+      return reply.code(201).send({
+        contextId: uploaded.id,
+        bytes: archive.length,
+        note: 'Pass this as contextId on the next deploy. It is removed once the build finishes.',
+      })
+    }
+  )
+
   /** POST /services/:id/deploy — schedule a deployment (FR-3 build is Phase 2). */
   app.post(
     '/services/:serviceId/deploy',
     { preHandler: requireServicePermission('service.deploy') },
     async (req, reply) => {
       const body = z
-        .object({ gitSha: z.string().max(64).optional(), image: z.string().max(512).optional() })
+        .object({
+          gitSha: z.string().max(64).optional(),
+          image: z.string().max(512).optional(),
+          /** An upload from POST /services/:id/build-context. */
+          contextId: z.string().max(64).optional(),
+        })
         .parse(req.body ?? {})
+      if (body.contextId) assertValidContextId(body.contextId)
 
       const { service, fleetId, orgId } = await loadService(app, req.params as { serviceId: string })
       const { nodes: snapshot, placements, antiAffinityBy } = await fleetSnapshot(app.ctx, fleetId)
@@ -381,6 +434,12 @@ export async function serviceRoutes(app: FastifyInstance) {
           const built = await app.ctx.builds.build({
             serviceName: service.name,
             buildContext: buildPlan.buildContext,
+            // An uploaded directory is rooted where it was extracted; without
+            // one the build workspace is the root, which is what a webhook
+            // checkout lands inside.
+            contextRoot: body.contextId
+              ? contextPath(app.ctx.config.BUILD_WORKDIR, body.contextId)
+              : undefined,
             gitSha,
             platforms: buildPlan.platforms,
             registry: app.ctx.config.REGISTRY_URL ?? '',
@@ -516,6 +575,15 @@ export async function serviceRoutes(app: FastifyInstance) {
           })
         }
         throw err
+      } finally {
+        // Both paths, always. Customer source is held only for as long as it
+        // takes to build it, and a control plane that keeps every upload runs
+        // out of disk in a week.
+        if (body.contextId) {
+          await disposeContext(app.ctx.config.BUILD_WORKDIR, body.contextId).catch((err) => {
+            req.log.warn({ err, contextId: body.contextId }, 'could not remove the build context')
+          })
+        }
       }
     }
   )

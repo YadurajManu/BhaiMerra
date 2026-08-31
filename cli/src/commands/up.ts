@@ -14,6 +14,8 @@ import { c } from '../render.js'
 import { task, glyph } from '../ui.js'
 import { withLadder } from '../ladder.js'
 import { DEPLOY_STEPS, follow, phaseWalker } from '../progress.js'
+import { planFromManifest, deployOrder } from '../plan.js'
+import { uploadContext, humanBytes } from '../archive.js'
 import type { Flags } from '../args.js'
 
 type Service = {
@@ -84,102 +86,163 @@ export const upCommand = {
       console.log(`${glyph.warn} ${c.yellow('warning')}  ${w}`)
     }
 
-    // ── Step 3: pick the target service ───────────────────────────────
-    const serviceName = args[0] || applyResult.created[0] || applyResult.updated[0]
-    if (!serviceName) {
+    // ── Step 3: decide what to deploy, and in what order ──────────────
+    const planned = planFromManifest(manifest)
+    const buildContexts = new Map(planned.map((p) => [p.name, p.build]))
+
+    // No argument means the whole stack. A manifest describes a system, and
+    // deploying one service of it and leaving the rest was never what anybody
+    // wanted — it just meant typing the command again in the right order.
+    const targets = args[0] ? [args[0]] : deployOrder(planned)
+    if (!targets.length) {
       throw new CliError(
-        'Could not determine which service to deploy. Pass the name: fleet up <service>',
+        'The manifest declares no services to deploy.',
         EXIT.usage
       )
     }
 
-    // Look it up
     const { body: listBody } = await request<{ services: Service[] }>('GET', `/fleets/${fleetId}/services`)
-    const service = listBody.services.find((s) => s.name === serviceName || s.id === serviceName)
-    if (!service) {
-      throw new CliError(
-        `Service "${serviceName}" not found after apply. Known: ${listBody.services.map((s) => s.name).join(', ')}`,
-        EXIT.usage
-      )
-    }
-
-    // ── Step 4: deploy ────────────────────────────────────────────────
-    const gitSha = typeof flags.sha === 'string' ? flags.sha : undefined
-
-    const deployResult = await withLadder(
-      DEPLOY_STEPS,
-      async (ladder) => {
-        const walker = phaseWalker(ladder)
-        const progress = follow(service.id, (p) => walker.apply(p), {
-          onUnavailable: () => ladder.note(c.dim('live progress unavailable; continuing with the deploy request')),
-        })
-        try {
-          const result = (
-            await request<{
-              placedOn: { name: string }
-              score: number
-              url: string | null
-              warnings: string[]
-            }>('POST', `/services/${service.id}/deploy`, { body: { gitSha } })
-          ).body
-          walker.finish(`scheduled onto ${result.placedOn.name}`)
-          return result
-        } finally {
-          await progress.stop()
-        }
-      },
-      {
-        mark: true,
-        title: `deploying ${service.name}`,
-        onCancel: `deploy is still running on the control plane; inspect with fleet deployments ${service.name}`,
+    const resolved = targets.map((name) => {
+      const service = listBody.services.find((s) => s.name === name || s.id === name)
+      if (!service) {
+        throw new CliError(
+          `Service "${name}" not found after apply. Known: ${listBody.services.map((s) => s.name).join(', ')}`,
+          EXIT.usage
+        )
       }
-    )
+      return service
+    })
 
-    for (const w of deployResult.warnings ?? []) {
-      console.log(`${glyph.warn} ${c.yellow('warning')}  ${w}`)
-    }
-
-    // ── Step 5: wait for healthy ──────────────────────────────────────
-    if (!flags['no-wait']) {
-      await task(
-        `waiting for ${c.bold(service.name)} to come up`,
-        async (s) => {
-          s.hints([
-            'the agent picks up desired state on its next poll',
-            "a cold image pull takes as long as the node's uplink does",
-            'this clears once the agent reports the container running',
-          ])
-          const deadline = Date.now() + 180_000
-          while (Date.now() < deadline) {
-            const { body } = await request<{ services: Service[] }>('GET', `/fleets/${fleetId}/services`)
-            const current = body.services.find((s) => s.id === service.id)?.current
-            if (current?.status === 'running') return
-            if (current?.status === 'failed') {
-              throw new CliError(
-                `"${service.name}" did not start. \`fleet deployments ${service.name}\` has the reason.`,
-                EXIT.healthCheckFailed
-              )
-            }
-            await sleep(2000)
-          }
-          throw new CliError(
-            `"${service.name}" was scheduled but has not reported running.`,
-            EXIT.healthCheckFailed
-          )
-        },
-        { done: () => `${c.bold(service.name)} is running` }
+    if (resolved.length > 1) {
+      console.log(
+        `\n  ${c.dim('deploying')} ${resolved.map((s) => c.bold(s.name)).join(c.dim(' → '))}\n`
       )
     }
 
-    // ── Step 6: print the URL ─────────────────────────────────────────
-    const url = deployResult.url ?? service.domain ?? service.hostname
-    if (url) {
-      const fullUrl = url.startsWith('http') ? url : `https://${url}`
+    const gitSha = typeof flags.sha === 'string' ? flags.sha : undefined
+    const deployed: Array<{ service: Service; url: string | null }> = []
+
+    for (const service of resolved) {
+      const url = await deployOne(service, {
+        fleetId,
+        gitSha,
+        buildContext: buildContexts.get(service.name),
+        wait: !flags['no-wait'],
+      })
+      deployed.push({ service, url })
+    }
+
+    // ── Step 6: print the URLs ────────────────────────────────────────
+    for (const { service, url } of deployed) {
+      const target = url ?? service.domain ?? service.hostname
+      if (!target) continue
+      const fullUrl = target.startsWith('http') ? target : `https://${target}`
       console.log(`\n${glyph.ok} ${c.green('live')}  ${c.bold(c.cyan(fullUrl))}`)
     }
 
-    console.log(c.dim(`\n  fleet open ${service.name}   open in browser`))
-    console.log(c.dim(`  fleet logs ${service.name}   follow logs`))
-    console.log(c.dim(`  fleet down ${service.name}   tear down`))
+    const last = deployed[deployed.length - 1]?.service
+    if (last) {
+      console.log(c.dim(`\n  fleet open ${last.name}   open in browser`))
+      console.log(c.dim(`  fleet logs ${last.name}   follow logs`))
+      console.log(c.dim(`  fleet down ${last.name}   tear down`))
+    }
   },
+}
+
+/**
+ * Deploy one service: upload its build context if it has one, run the deploy,
+ * and wait for it to report running.
+ *
+ * Returns the URL the control plane handed back, or null for a service that
+ * has none — an internal one, which is reached by name from its neighbours
+ * rather than from outside.
+ */
+async function deployOne(
+  service: Service,
+  opts: { fleetId: string; gitSha?: string; buildContext?: string; wait: boolean }
+): Promise<string | null> {
+  // A service that builds from source sends its directory first. The control
+  // plane then builds it for every architecture the fleet has, which is the
+  // part that is easy to get wrong by hand and silent when you do.
+  let contextId: string | undefined
+  if (opts.buildContext) {
+    const dir = join(process.cwd(), opts.buildContext)
+    const uploaded = await task(
+      `packaging ${c.bold(service.name)}`,
+      async () => uploadContext(service.id, dir),
+      { done: (r) => `uploaded ${humanBytes(r.bytes)} of build context` }
+    )
+    contextId = uploaded.contextId
+  }
+
+  const deployResult = await withLadder(
+    DEPLOY_STEPS,
+    async (ladder) => {
+      const walker = phaseWalker(ladder)
+      const progress = follow(service.id, (p) => walker.apply(p), {
+        onUnavailable: () => ladder.note(c.dim('live progress unavailable; continuing with the deploy request')),
+      })
+      try {
+        const result = (
+          await request<{
+            placedOn: { name: string }
+            score: number
+            url: string | null
+            warnings: string[]
+          }>('POST', `/services/${service.id}/deploy`, {
+            body: { gitSha: opts.gitSha, contextId },
+          })
+        ).body
+        walker.finish(`scheduled onto ${result.placedOn.name}`)
+        return result
+      } finally {
+        await progress.stop()
+      }
+    },
+    {
+      mark: true,
+      title: `deploying ${service.name}`,
+      onCancel: `deploy is still running on the control plane; inspect with fleet deployments ${service.name}`,
+    }
+  )
+
+  for (const w of deployResult.warnings ?? []) {
+    console.log(`${glyph.warn} ${c.yellow('warning')}  ${w}`)
+  }
+
+  if (opts.wait) {
+    await task(
+      `waiting for ${c.bold(service.name)} to come up`,
+      async (s) => {
+        s.hints([
+          'the agent picks up desired state on its next poll',
+          "a cold image pull takes as long as the node's uplink does",
+          'a service with a health check goes running once it passes, not before',
+        ])
+        const deadline = Date.now() + 180_000
+        while (Date.now() < deadline) {
+          const { body } = await request<{ services: Service[] }>(
+            'GET',
+            `/fleets/${opts.fleetId}/services`
+          )
+          const current = body.services.find((s) => s.id === service.id)?.current
+          if (current?.status === 'running') return
+          if (current?.status === 'failed') {
+            throw new CliError(
+              `"${service.name}" did not start. \`fleet deployments ${service.name}\` has the reason.`,
+              EXIT.healthCheckFailed
+            )
+          }
+          await sleep(2000)
+        }
+        throw new CliError(
+          `"${service.name}" was scheduled but has not reported running.`,
+          EXIT.healthCheckFailed
+        )
+      },
+      { done: () => `${c.bold(service.name)} is running` }
+    )
+  }
+
+  return deployResult.url
 }

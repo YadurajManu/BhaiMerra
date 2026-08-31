@@ -10,6 +10,8 @@ import {
   follow,
   phaseWalker,
 } from '../progress.js'
+import { planFromManifest } from '../plan.js'
+import { uploadContext, humanBytes } from '../archive.js'
 import type { Flags } from '../args.js'
 
 type Service = {
@@ -232,6 +234,22 @@ async function waitUntilRunning(fleetId: string, name: string, timeoutMs = 180_0
   )
 }
 
+/**
+ * The build context a service declares, if any, read from the local manifest.
+ *
+ * Absent when there is no fleet.yaml here — deploying from outside the
+ * repository is legitimate for a prebuilt `image:` service, and should not
+ * become an error about a file the operator never needed.
+ */
+async function buildContextFor(serviceName: string): Promise<string | undefined> {
+  try {
+    const source = await readFile('fleet.yaml', 'utf8')
+    return planFromManifest(source).find((s) => s.name === serviceName)?.build
+  } catch {
+    return undefined
+  }
+}
+
 export const deployCommand = {
   async run(args: string[], flags: Flags) {
     const fleetId = await requireFleet(typeof flags.fleet === 'string' ? flags.fleet : undefined)
@@ -259,6 +277,21 @@ export const deployCommand = {
       return
     }
 
+    // A service that builds from source needs its directory sent, or the
+    // control plane has nothing to build and says the context does not exist.
+    // Read from the manifest here rather than from the service row, because
+    // the build path is relative to the file the operator is standing in.
+    let contextId: string | undefined
+    const buildContext = await buildContextFor(service.name)
+    if (buildContext) {
+      const uploaded = await task(
+        `packaging ${c.bold(service.name)}`,
+        async () => uploadContext(service.id, join(process.cwd(), buildContext)),
+        { done: (r) => `uploaded ${humanBytes(r.bytes)} of build context` }
+      )
+      contextId = uploaded.contextId
+    }
+
     const body = await withLadder(
       DEPLOY_STEPS,
       async (ladder) => {
@@ -273,7 +306,7 @@ export const deployCommand = {
               score: number
               url: string | null
               warnings: string[]
-            }>('POST', `/services/${service.id}/deploy`, { body: { gitSha } })
+            }>('POST', `/services/${service.id}/deploy`, { body: { gitSha, contextId } })
           ).body
           walker.finish(`scheduled onto ${result.placedOn.name}`)
           return result

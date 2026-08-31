@@ -36,6 +36,14 @@ export async function buildServer(ctx: AppContext): Promise<FastifyInstance> {
   })
 
   app.decorate('ctx', ctx)
+
+  // Build contexts arrive as a gzipped tar. Fastify has no parser for that, and
+  // without one the upload route sees an unsupported-media-type error instead
+  // of its body. Kept as a raw Buffer: the route unpacks it with tar.
+  app.addContentTypeParser('application/gzip', { parseAs: 'buffer' }, (_req, body, done) =>
+    done(null, body)
+  )
+
   await app.register(cors, { origin: true, credentials: true })
   await app.register(jwt, { secret: ctx.config.JWT_SECRET })
 

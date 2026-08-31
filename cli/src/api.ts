@@ -20,7 +20,13 @@ export type ApiResult<T> = { status: number; body: T }
 export async function request<T = any>(
   method: string,
   path: string,
-  opts: { body?: unknown; auth?: boolean; profile?: Profile } = {}
+  opts: {
+    body?: unknown
+    /** Sent as-is with its own content type. Used for the build context tarball. */
+    raw?: { data: Uint8Array; contentType: string }
+    auth?: boolean
+    profile?: Profile
+  } = {}
 ): Promise<ApiResult<T>> {
   const profile = opts.profile ?? (await loadProfile())
   if (!profile.api) {
@@ -38,9 +44,13 @@ export async function request<T = any>(
       method,
       headers: {
         ...(token ? { authorization: `Bearer ${token}` } : {}),
-        ...(opts.body ? { 'content-type': 'application/json' } : {}),
+        ...(opts.raw
+          ? { 'content-type': opts.raw.contentType }
+          : opts.body
+            ? { 'content-type': 'application/json' }
+            : {}),
       },
-      body: opts.body ? JSON.stringify(opts.body) : undefined,
+      body: opts.raw ? opts.raw.data : opts.body ? JSON.stringify(opts.body) : undefined,
       signal: AbortSignal.timeout(20 * 60_000),
     })
 

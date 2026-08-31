@@ -18,7 +18,7 @@ const GROUPS: Array<[string, Array<[string, string]>]> = [
   [
     'getting started',
     [
-      ['up [service]', 'Detect, scaffold, apply, and deploy in one command'],
+      ['up [service]', 'Deploy the whole fleet.yaml, in dependency order'],
       ['init', 'Scaffold a fleet.yaml and Dockerfile from this repository'],
       ['config show', 'Show the saved control plane and selected fleet'],
       ['use <fleet>', 'Select the default fleet for later commands'],
