@@ -58,11 +58,52 @@ const resources = z
   })
   .prefault({})
 
+const DURATION = /^(\d+(?:\.\d+)?)\s*(ms|s|m|h)?$/i
+
+/**
+ * Accepts "5s", "1m", "500ms", or a bare number meaning seconds.
+ *
+ * Rounded up rather than down: a 500ms timeout that became 0 would mean "no
+ * timeout" to Docker, which is the opposite of what was asked for.
+ */
+export function parseDurationSec(input: string | number): number | null {
+  if (typeof input === 'number') return Number.isFinite(input) ? Math.max(1, Math.ceil(input)) : null
+  const match = DURATION.exec(input.trim())
+  if (!match) return null
+  const value = Number(match[1])
+  const factor: Record<string, number> = { ms: 1 / 1000, s: 1, m: 60, h: 3600 }
+  const scale = factor[(match[2] ?? 's').toLowerCase()]
+  if (scale === undefined) return null
+  const seconds = value * scale
+  return seconds <= 0 ? null : Math.max(1, Math.ceil(seconds))
+}
+
+const duration = (fallback: string) =>
+  z
+    .union([z.string(), z.number()])
+    .default(fallback)
+    .transform((v, ctx) => {
+      const seconds = parseDurationSec(v)
+      if (seconds === null) {
+        ctx.addIssue({
+          code: 'custom',
+          message: `"${v}" is not a valid duration. Use 5s, 500ms, 1m, or a plain number of seconds.`,
+        })
+        return z.NEVER
+      }
+      return seconds
+    })
+
 const healthCheck = z
   .object({
     path: z.string().startsWith('/', 'health.path must start with "/"').default('/'),
-    timeout: z.string().default('5s'),
-    interval: z.string().default('15s'),
+    timeout: duration('5s'),
+    interval: duration('15s'),
+    /**
+     * For images with no shell to probe with. A distroless container cannot run
+     * a health check, and one it can never pass is worse than none at all.
+     */
+    disabled: z.boolean().default(false),
   })
   .prefault({})
 
@@ -83,7 +124,21 @@ const serviceFields = z
     arch: z.array(z.enum(['arm64', 'armv7', 'amd64'])).default([]),
     min_reliability: z.enum(['any', 'opportunistic', 'standard', 'high']).default('any'),
     gpu: z.boolean().default(false),
-    volume: z.string().optional(),
+    /**
+     * `volume: pgdata` mounts at /data. `volume: { name: pgdata, path: ... }`
+     * mounts where the image actually keeps its data, which is what a database
+     * needs — the string form is kept because it is what most services want and
+     * what every existing manifest says.
+     */
+    volume: z
+      .union([
+        z.string(),
+        z.object({
+          name: z.string().min(1),
+          path: z.string().startsWith('/', 'volume.path must be an absolute path').optional(),
+        }),
+      ])
+      .optional(),
     domain: z.string().optional(),
     /** Reachable only by other services on the same node, by name. */
     internal: z.boolean().default(false),
@@ -104,6 +159,10 @@ const serviceSchema = serviceFields
   .transform((val) => ({
     ...val,
     port: val.container_port ?? val.port,
+    // Both spellings of `volume` collapse to a name and an optional path here,
+    // so nothing downstream has to know there were two.
+    volume: typeof val.volume === 'string' ? val.volume : val.volume?.name,
+    volumePath: typeof val.volume === 'string' ? undefined : val.volume?.path,
   }))
   .superRefine((svc, ctx) => {
     if (!svc.build && !svc.image) {

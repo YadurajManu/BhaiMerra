@@ -47,15 +47,18 @@ end with a hyphen.
 | `image` | reference | — | Prebuilt image. Skips the build step. |
 | `placement` | enum | `flexible` | `flexible`, `preferred`, `pinned`. |
 | `node` | node name | — | Required for `pinned`; invalid for `flexible`. |
-| `resources.ram` | quantity | `256Mi` | Hard constraint during filtering. |
+| `resources.ram` | quantity | `256Mi` | Hard constraint during filtering, and enforced as the container's memory limit. |
 | `resources.cpu` | number | `0.25` | Used for ranking, not enforced as a cap. |
 | `arch` | list | all | `arm64`, `armv7`, `amd64`. Empty means any. |
 | `min_reliability` | enum | `any` | `any`, `opportunistic`, `standard`, `high`. |
 | `gpu` | bool | `false` | Filters to nodes reporting a GPU. |
-| `volume` | name | — | Named volume. Anchors the service to one node. |
+| `volume` | name or `{name, path}` | — | Named volume. Anchors the service to one node. |
 | `domain` | hostname | — | Public ingress. TLS is automatic. |
 | `internal` | bool | `false` | Reachable only by other services on the same node. No published port, no hostname. |
 | `health.path` | path | `/` | Must start with `/`. |
+| `health.interval` | duration | `15s` | How often the container is probed. |
+| `health.timeout` | duration | `5s` | How long one probe may take. |
+| `health.disabled` | bool | `false` | For images with no shell to probe with. |
 | `env` | map | `{}` | Plain values, committed to git. Use `secrets` for anything sensitive. |
 | `secrets` | list | `[]` | Names resolved from the fleet secret store. Values never appear in this file. |
 | `replicas` | int | `1` | Spread across distinct nodes where possible. |
@@ -127,11 +130,38 @@ an `env` value names another service in the manifest and no affinity is
 declared, `fleet validate` warns — a dependency the scheduler is free to split
 would otherwise fail at runtime, a long way from the file that caused it.
 
+## Volumes and health
+
+A volume mounts at `/data` unless you say otherwise. Most images are happy with
+that; a database is not, because it keeps its data where it keeps it:
+
+```yaml
+volume: pgdata                                        # mounts at /data
+volume: { name: pgdata, path: /var/lib/postgresql/data }   # mounts where Postgres looks
+```
+
+Getting this wrong is quiet rather than loud — the volume is attached, the
+container starts, and the data goes into the image layer instead, where the
+next deploy discards it.
+
+Health checks probe the container's own port over HTTP, trying `wget` and then
+`curl`. An image carrying neither cannot be probed this way, and a check that
+can never pass is worse than none, so those set `health: { disabled: true }`.
+
 ### Quantities
 
 `512Mi`, `2Gi`, `1G`, or a bare number meaning megabytes. Binary units are
 powers of 1024; decimal units are powers of 1000. Anything else is rejected
 rather than guessed at.
+
+`resources.ram` is both a placement constraint and the container's memory
+limit. A service that exceeds it is stopped by the kernel rather than being
+allowed to take the node down with it.
+
+### Durations
+
+`5s`, `500ms`, `1m`, `2h`, or a bare number meaning seconds. Rounded up to the
+nearest second, since a timeout that rounded to zero would mean no timeout.
 
 ## Placement
 

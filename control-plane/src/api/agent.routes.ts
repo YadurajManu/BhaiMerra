@@ -306,7 +306,12 @@ export async function agentRoutes(app: FastifyInstance) {
         hostPort: deployments.hostPort,
         containerPort: services.containerPort,
         healthCheckPath: services.healthCheckPath,
+        healthIntervalSec: services.healthIntervalSec,
+        healthTimeoutSec: services.healthTimeoutSec,
+        healthDisabled: services.healthDisabled,
         volumeName: services.volumeName,
+        volumePath: services.volumePath,
+        requestRamMb: services.requestRamMb,
         replicas: services.replicas,
         env: services.env,
         secretRefs: services.secretRefs,
@@ -357,9 +362,18 @@ export async function agentRoutes(app: FastifyInstance) {
         deployment_id: r.deploymentId,
         image: r.image ?? r.imageTags[0] ?? null,
         health_check_path: r.healthCheckPath,
+        health_interval_sec: r.healthIntervalSec,
+        health_timeout_sec: r.healthTimeoutSec,
+        health_disabled: r.healthDisabled,
         host_port: r.hostPort,
         container_port: r.containerPort,
         volume: r.volumeName,
+        volume_path: r.volumePath,
+        // The RAM the scheduler reserved for this service, so the node can hold
+        // it to that. Placement already weights headroom heavily precisely
+        // because a node driven into swap takes its neighbours down with it —
+        // and then nothing enforced the number it planned around.
+        memory_mb: r.requestRamMb,
         replicas: r.replicas,
         env,
       })),

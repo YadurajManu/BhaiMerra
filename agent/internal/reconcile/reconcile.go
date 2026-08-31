@@ -132,23 +132,43 @@ func (e *Engine) start(ctx context.Context, svc client.DesiredService) error {
 		return fmt.Errorf("pull: %w", err)
 	}
 
+	containerPort := svc.ContainerPort
+	if containerPort == 0 {
+		containerPort = 8080
+	}
+
 	spec := docker.RunSpec{
-		Service:      svc.Name,
-		DeploymentID: svc.DeploymentID,
-		NodeID:       e.NodeID,
-		Image:        svc.Image,
-		Volume:       svc.Volume,
-		HealthPath:   svc.HealthCheckPath,
-		Env:          svc.Env,
+		Service:       svc.Name,
+		DeploymentID:  svc.DeploymentID,
+		NodeID:        e.NodeID,
+		Image:         svc.Image,
+		Volume:        svc.Volume,
+		VolumePath:    svc.VolumePath,
+		Env:           svc.Env,
+		ContainerPort: containerPort,
+	}
+
+	// The scheduler reserved this much; hold the container to it. Docker
+	// refuses a limit under 6MB, and a service declared that small is a
+	// mistake in the manifest rather than an instruction worth honouring.
+	const minMemoryMb = 6
+	if svc.MemoryMb >= minMemoryMb {
+		spec.Memory = int64(svc.MemoryMb) * 1024 * 1024
+	}
+
+	if !svc.HealthDisabled && svc.HealthCheckPath != "" {
+		spec.Health = &docker.HealthSpec{
+			Path:        svc.HealthCheckPath,
+			Port:        containerPort,
+			IntervalSec: svc.HealthInterval,
+			TimeoutSec:  svc.HealthTimeout,
+		}
 	}
 
 	// Publish the container port on the host port the control plane allocated,
-	// so its ingress has somewhere to send traffic.
+	// so its ingress has somewhere to send traffic. An internal service is sent
+	// no host port, and so is never bound on the node's interface.
 	if svc.HostPort > 0 {
-		containerPort := svc.ContainerPort
-		if containerPort == 0 {
-			containerPort = 8080
-		}
 		spec.Ports = map[string]string{
 			fmt.Sprintf("%d/tcp", containerPort): strconv.Itoa(svc.HostPort),
 		}

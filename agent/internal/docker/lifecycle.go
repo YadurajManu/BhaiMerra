@@ -15,16 +15,40 @@ import (
 
 // RunSpec is everything needed to bring one service up on this node.
 type RunSpec struct {
-	Service      string
-	DeploymentID string
-	NodeID       string
-	Image        string
-	Env          map[string]string
-	Ports        map[string]string // container port "8080/tcp" -> host port
-	Volume       string            // named volume mounted at VolumePath
-	VolumePath   string
-	HealthPath   string
-	Memory       int64 // bytes; 0 means unlimited
+	Service       string
+	DeploymentID  string
+	NodeID        string
+	Image         string
+	Env           map[string]string
+	Ports         map[string]string // container port "8080/tcp" -> host port
+	Volume        string            // named volume mounted at VolumePath
+	VolumePath    string
+	ContainerPort int
+	Health        *HealthSpec // nil disables the check
+	Memory        int64       // bytes; 0 means unlimited
+}
+
+// HealthSpec is what the manifest's `health:` block becomes.
+type HealthSpec struct {
+	Path        string
+	Port        int
+	IntervalSec int
+	TimeoutSec  int
+}
+
+// testCommand builds the probe.
+//
+// wget first, then curl, because a minimal image usually has exactly one of
+// them: busybox-based images ship wget, Debian-based ones usually curl. An
+// image with neither cannot be probed this way at all, which is what
+// `health: { disabled: true }` is for — the alternative is a container that
+// reports unhealthy forever because the check itself could not run.
+func (h *HealthSpec) testCommand() []string {
+	url := fmt.Sprintf("http://127.0.0.1:%d%s", h.Port, h.Path)
+	return []string{
+		"CMD-SHELL",
+		fmt.Sprintf("wget -q -O /dev/null %q 2>/dev/null || curl -fsS -o /dev/null %q 2>/dev/null || exit 1", url, url),
+	}
 }
 
 // ContainerName is deterministic so reconciliation can find what it created
@@ -199,6 +223,24 @@ func (c *Client) Create(ctx context.Context, spec RunSpec) (string, error) {
 			target = "/data"
 		}
 		req.HostConfig.Mounts = []mount{{Type: "volume", Source: spec.Volume, Target: target}}
+	}
+
+	if spec.Health != nil {
+		interval := spec.Health.IntervalSec
+		if interval <= 0 {
+			interval = 15
+		}
+		timeout := spec.Health.TimeoutSec
+		if timeout <= 0 {
+			timeout = 5
+		}
+		// Docker takes these in nanoseconds.
+		req.Healthcheck = &healthcheck{
+			Test:     spec.Health.testCommand(),
+			Interval: int64(interval) * int64(time.Second),
+			Timeout:  int64(timeout) * int64(time.Second),
+			Retries:  3,
+		}
 	}
 
 	var out createResponse

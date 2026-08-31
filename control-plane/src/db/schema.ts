@@ -226,9 +226,19 @@ export const services = pgTable(
 
     persistentVolume: boolean('persistent_volume').notNull().default(false),
     volumeName: text('volume_name'),
+    /**
+     * Where the volume is mounted inside the container. The image decides this
+     * — Postgres wants /var/lib/postgresql/data — so a single hardcoded /data
+     * mounted the volume somewhere the process never writes.
+     */
+    volumePath: text('volume_path'),
     replicas: integer('replicas').notNull().default(1),
 
     healthCheckPath: text('health_check_path').default('/'),
+    healthIntervalSec: integer('health_interval_sec').notNull().default(15),
+    healthTimeoutSec: integer('health_timeout_sec').notNull().default(5),
+    /** For images with no shell to probe with. */
+    healthDisabled: boolean('health_disabled').notNull().default(false),
     /**
      * Plain configuration from the manifest's `env:` block. Not sensitive by
      * definition — anything that is belongs in `secrets` and is referenced by
