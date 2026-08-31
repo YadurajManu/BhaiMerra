@@ -245,8 +245,17 @@ export const services = pgTable(
     containerPort: integer('container_port').notNull().default(8080),
     /** User-supplied hostname, e.g. web.yourdomain.dev. */
     domain: text('domain'),
-    /** Always-present managed hostname, e.g. web.homelab.fleetos.app. */
+    /**
+     * Managed hostname, e.g. web-homelab-7efe4c.fleetos.app. Null for internal
+     * services, which are deliberately not addressable from outside the node.
+     */
     hostname: text('hostname'),
+    /**
+     * Reachable only by other services, by name, on the node's fleet network.
+     * No published host port, no managed hostname, no ingress route — which is
+     * what a database wants and what every service used to get anyway.
+     */
+    internal: boolean('internal').notNull().default(false),
     reclaimPolicy: reclaimPolicy('reclaim_policy'),
 
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

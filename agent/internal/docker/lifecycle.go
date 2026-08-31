@@ -89,12 +89,26 @@ func splitTag(image string) (string, string) {
 }
 
 type createRequest struct {
-	Image        string              `json:"Image"`
-	Env          []string            `json:"Env,omitempty"`
-	Labels       map[string]string   `json:"Labels"`
-	ExposedPorts map[string]struct{} `json:"ExposedPorts,omitempty"`
-	HostConfig   hostConfig          `json:"HostConfig"`
-	Healthcheck  *healthcheck        `json:"Healthcheck,omitempty"`
+	Image            string              `json:"Image"`
+	Env              []string            `json:"Env,omitempty"`
+	Labels           map[string]string   `json:"Labels"`
+	ExposedPorts     map[string]struct{} `json:"ExposedPorts,omitempty"`
+	HostConfig       hostConfig          `json:"HostConfig"`
+	Healthcheck      *healthcheck        `json:"Healthcheck,omitempty"`
+	NetworkingConfig *networkingConfig   `json:"NetworkingConfig,omitempty"`
+}
+
+// networkingConfig attaches the container at creation time. Only one network
+// can be given here, which is all we need — the fleet network is the one that
+// carries name resolution between services.
+type networkingConfig struct {
+	EndpointsConfig map[string]endpointConfig `json:"EndpointsConfig"`
+}
+
+type endpointConfig struct {
+	// The service name, so a neighbour can connect to `postgres` rather than to
+	// `fleet-postgres` or to an IP that changes on every restart.
+	Aliases []string `json:"Aliases,omitempty"`
 }
 
 type healthcheck struct {
@@ -122,6 +136,7 @@ type hostConfig struct {
 	PortBindings map[string][]portBinding `json:"PortBindings,omitempty"`
 	Mounts       []mount                  `json:"Mounts,omitempty"`
 	Memory       int64                    `json:"Memory,omitempty"`
+	NetworkMode  string                   `json:"NetworkMode,omitempty"`
 }
 
 type createResponse struct {
@@ -140,10 +155,19 @@ func (c *Client) Create(ctx context.Context, spec RunSpec) (string, error) {
 			LabelNode:       spec.NodeID,
 		},
 		HostConfig: hostConfig{Memory: spec.Memory},
+		// Join the fleet network and answer to the service's own name. Both
+		// halves matter: the network provides DNS at all, and the alias is what
+		// makes the name the one a person would write in a connection string.
+		NetworkingConfig: &networkingConfig{
+			EndpointsConfig: map[string]endpointConfig{
+				NetworkName: {Aliases: []string{spec.Service}},
+			},
+		},
 	}
 	// The agent may be restarting, or the node rebooting; the workload should
 	// come back without waiting for the control plane to notice.
 	req.HostConfig.RestartPolicy.Name = "unless-stopped"
+	req.HostConfig.NetworkMode = NetworkName
 
 	// Sorted, because Go randomises map iteration and an unordered Env makes
 	// two identical specs produce two different create requests — which is
@@ -180,9 +204,23 @@ func (c *Client) Create(ctx context.Context, spec RunSpec) (string, error) {
 	var out createResponse
 	path := fmt.Sprintf("/%s/containers/create?name=%s", c.api(ctx), url.QueryEscape(ContainerName(spec.Service)))
 	if err := c.do(ctx, http.MethodPost, path, req, &out); err != nil {
+		// The usual cause of a create failing on the network is somebody having
+		// removed it since we last checked. Drop the cached "it exists" so the
+		// next reconcile recreates it instead of failing the same way forever.
+		if mentionsNetwork(err) {
+			forgetNetwork()
+		}
 		return "", err
 	}
 	return out.ID, nil
+}
+
+func mentionsNetwork(err error) bool {
+	var de *Error
+	if !asError(err, &de) {
+		return false
+	}
+	return strings.Contains(strings.ToLower(de.Message), "network")
 }
 
 func (c *Client) Start(ctx context.Context, nameOrID string) error {

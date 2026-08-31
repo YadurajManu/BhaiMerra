@@ -54,6 +54,7 @@ end with a hyphen.
 | `gpu` | bool | `false` | Filters to nodes reporting a GPU. |
 | `volume` | name | — | Named volume. Anchors the service to one node. |
 | `domain` | hostname | — | Public ingress. TLS is automatic. |
+| `internal` | bool | `false` | Reachable only by other services on the same node. No published port, no hostname. |
 | `health.path` | path | `/` | Must start with `/`. |
 | `env` | map | `{}` | Plain values, committed to git. Use `secrets` for anything sensitive. |
 | `secrets` | list | `[]` | Names resolved from the fleet secret store. Values never appear in this file. |
@@ -91,6 +92,40 @@ stores an override for a single service, which wins over the fleet value.
 Deploying a service whose secrets are not set fails before anything is built,
 naming what is missing. Changing a value takes effect on the next deploy;
 already-running containers keep the environment they started with.
+
+## Talking to another service
+
+Every container the agent starts joins a user-defined Docker network called
+`fleet` and answers to its own service name. So `web` reaches the database at
+`postgres:5432` — a name, not an address that changes on every restart.
+
+```yaml
+services:
+  postgres:
+    image: postgres:16-alpine
+    internal: true              # no published port, no public hostname
+    secrets: [POSTGRES_PASSWORD]
+
+  web:
+    build: .
+    domain: app.example.com
+    affinity: [postgres]        # keeps them on one node, so the name resolves
+    env:
+      DATABASE_HOST: postgres
+    secrets: [POSTGRES_PASSWORD]
+```
+
+`internal: true` is what a database wants: no host port is published, so it is
+not reachable from the rest of your network, and no managed hostname is issued,
+so ingress has nothing to route. Setting `internal` and `domain` together is an
+error rather than a precedence rule — they say opposite things.
+
+**Names resolve between services on the same node.** Nothing resolves across
+machines until the mesh in [ADR 0001](adr/0001-mesh-and-ingress.md) lands, so a
+service that depends on another needs `affinity` to keep the two together. When
+an `env` value names another service in the manifest and no affinity is
+declared, `fleet validate` warns — a dependency the scheduler is free to split
+would otherwise fail at runtime, a long way from the file that caused it.
 
 ### Quantities
 

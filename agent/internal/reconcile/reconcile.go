@@ -43,6 +43,14 @@ func (e *Engine) Reconcile(ctx context.Context, desired *client.DesiredState) ([
 		return nil, fmt.Errorf("container runtime unavailable: %w", err)
 	}
 
+	// Before anything is started: without this network there is no DNS between
+	// containers, so a service can only be reached by an address that changes
+	// on every restart. Idempotent and cached, so this is one call on the first
+	// pass and free afterwards.
+	if err := e.Docker.EnsureNetwork(ctx); err != nil {
+		return nil, fmt.Errorf("create the %s network: %w", docker.NetworkName, err)
+	}
+
 	running, err := e.Docker.ListManaged(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list managed containers: %w", err)
@@ -68,7 +76,15 @@ func (e *Engine) Reconcile(ctx context.Context, desired *client.DesiredState) ([
 		}
 
 		existing, present := current[svc.Name]
-		if present && existing.Labels[docker.LabelDeployment] == svc.DeploymentID && isUp(existing.State) {
+		// A container from before the fleet network existed is running the
+		// right image under the right deployment, so every other check passes —
+		// and it cannot resolve a single one of its neighbours. Treat being off
+		// the network as a reason to replace, or those containers stay broken
+		// until something else happens to redeploy them.
+		if present &&
+			existing.Labels[docker.LabelDeployment] == svc.DeploymentID &&
+			isUp(existing.State) &&
+			docker.OnFleetNetwork(existing) {
 			actions = append(actions, Action{svc.Name, "unchanged", existing.State})
 			continue
 		}

@@ -403,8 +403,12 @@ export async function serviceRoutes(app: FastifyInstance) {
         }
 
         await phases.set('scheduling')
-        // Allocated per node, so the ingress proxy has somewhere to send traffic.
-        const hostPort = await allocateHostPort(app.ctx, decision.nodeId)
+        // Allocated per node, so the ingress proxy has somewhere to send
+        // traffic. An internal service gets none on purpose: publishing a port
+        // binds it on the node's interface, which is how a database ends up
+        // reachable from the whole LAN. Its neighbours reach it by name on the
+        // fleet network instead.
+        const hostPort = service.internal ? null : await allocateHostPort(app.ctx, decision.nodeId)
 
         const deployment = await app.ctx.db.transaction(async (tx) => {
           // Supersede whatever was live, so a service never has two live rows.
@@ -460,7 +464,15 @@ export async function serviceRoutes(app: FastifyInstance) {
           deployment: { id: deployment.id, status: deployment.status },
           placedOn: { id: decision.nodeId, name: decision.nodeName },
           // The point of the whole exercise: a URL, handed back on deploy.
-          url: service.domain ? `https://${service.domain}` : service.hostname ? `https://${service.hostname}` : null,
+          // An internal service has none, and says how it is reached instead.
+          url: service.internal
+            ? null
+            : service.domain
+              ? `https://${service.domain}`
+              : service.hostname
+                ? `https://${service.hostname}`
+                : null,
+          reachableAs: service.internal ? `${service.name}:${service.containerPort}` : null,
           score: decision.candidates[0]?.score,
           warnings: decision.warnings,
           note: 'The agent will converge on its next desired-state poll.',

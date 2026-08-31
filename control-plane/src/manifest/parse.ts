@@ -85,6 +85,8 @@ const serviceFields = z
     gpu: z.boolean().default(false),
     volume: z.string().optional(),
     domain: z.string().optional(),
+    /** Reachable only by other services on the same node, by name. */
+    internal: z.boolean().default(false),
     /** The port the container listens on. Ingress publishes it for you. */
     port: z.number().int().min(1).max(65535).default(8080),
     container_port: z.number().int().min(1).max(65535).optional(),
@@ -134,6 +136,13 @@ const serviceSchema = serviceFields
           message: `secret "${name}" is not a usable environment variable name. Use A-Z, 0-9 and _, not starting with a digit.`,
         })
       }
+    }
+    if (svc.internal && svc.domain) {
+      ctx.addIssue({
+        code: 'custom',
+        message:
+          '"internal" and "domain" contradict each other: one says nothing outside may reach this service, the other publishes it. Remove whichever you did not mean.',
+      })
     }
     const duplicated = svc.secrets.filter((name) => name in svc.env)
     if (duplicated.length) {
@@ -260,6 +269,23 @@ export function parseManifest(source: string): ParsedManifest {
           `Unless the image handles concurrent writers, this will corrupt data.`
       )
     }
+    // Service discovery is per node: a container resolves its neighbours by
+    // name on the node's fleet network, and nothing resolves across machines
+    // until the mesh lands. So an env value naming another service in this
+    // manifest is a dependency, and without affinity the scheduler is free to
+    // place the two apart — at which point the name stops resolving at runtime,
+    // far away from the file that caused it.
+    for (const [key, value] of Object.entries(svc.env)) {
+      const target = String(value)
+      if (!names.has(target) || target === svc.name) continue
+      if (svc.affinity.includes(target)) continue
+      warnings.push(
+        `services.${svc.name}.env.${key}: points at "${target}", which the scheduler may place on ` +
+          `another node — and names only resolve between services on the same one. ` +
+          `Add affinity: [${target}] to keep them together.`
+      )
+    }
+
     if (svc.gpu && svc.placement === 'flexible' && !svc.arch.length) {
       warnings.push(
         `services.${svc.name}: requires a GPU but names no architecture. ` +

@@ -507,6 +507,11 @@ type ContainerSummary struct {
 	State  string            `json:"State"`
 	Status string            `json:"Status"`
 	Labels map[string]string `json:"Labels"`
+	// Which networks the container is attached to. Reconciliation uses this to
+	// notice a container that predates the fleet network and replace it.
+	NetworkSettings *struct {
+		Networks map[string]struct{} `json:"Networks"`
+	} `json:"NetworkSettings"`
 }
 
 // ListManaged returns only containers this agent owns.

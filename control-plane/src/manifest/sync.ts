@@ -88,9 +88,12 @@ export async function syncManifest(
         secretRefs: svc.secrets,
         domain: svc.domain ?? null,
         containerPort: svc.port,
-        // Every service gets a managed hostname whether or not it brings its
-        // own domain, so there is always a URL to hand back after a deploy.
-        hostname: managedHostname(svc.name, fleetName, fleetId, zone),
+        internal: svc.internal,
+        // Every public service gets a managed hostname whether or not it brings
+        // its own domain, so there is always a URL to hand back after a deploy.
+        // An internal service gets none: a name that resolves publicly is
+        // exactly what it is asking not to have.
+        hostname: svc.internal ? null : managedHostname(svc.name, fleetName, fleetId, zone),
         reclaimPolicy: svc.reclaim ?? null,
       }
 
