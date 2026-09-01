@@ -31,6 +31,7 @@ export const SITE_MAP = [
     heading: 'Company',
     links: [
       ['About', '#/about'],
+      ['Who builds it', '#/founder'],
       ['Writing', '#/blog'],
       ['Roadmap', '#/roadmap'],
       ['Security', '#/security'],

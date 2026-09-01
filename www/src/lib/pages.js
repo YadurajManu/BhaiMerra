@@ -674,6 +674,7 @@ export const PAGES = {
       P('Yaduraj Singh — a full-stack and AI/ML engineer in Dehradun and Greater Noida, India. Fleet OS is one project among a fairly wide range: a multi-tenant hospital SaaS, an anonymous video chat with WebRTC signalling written by hand, a cognitive OS running a local LLM on an ESP32-S3, and a couple of iOS apps. This one started as infrastructure for the others and turned out to be the piece worth generalising.'),
       P('Saying so matters more here than it would for most software. Fleet OS asks for your machines, your credentials and eventually your customers\u2019 data, and \u201ctrust the README\u201d is not a reasonable thing to ask. The source is MIT-licensed and public, the control plane is a Compose file you run yourself, and it never phones home \u2014 so none of that trust has to be taken on faith.'),
       { t: 'links', items: [
+        ['Who builds it', '#/founder', 'The long version — why Fleet OS exists, and what a one-person project can and cannot promise you.'],
         ['yaduraj.me', 'https://yaduraj.me', 'Prior work, in more detail than fits here.'],
         ['GitHub', 'https://github.com/YadurajManu', 'Fleet OS and everything else, in the open.'],
         ['LinkedIn', 'https://www.linkedin.com/in/yadurajenc', 'The professional version.'],

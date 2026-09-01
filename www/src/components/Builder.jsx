@@ -50,6 +50,10 @@ const LINKS = [
   ['LinkedIn', 'https://www.linkedin.com/in/yadurajenc'],
 ]
 
+// This section is the summary. The page is where the argument gets made —
+// including the half about what a one-person project cannot give you.
+const FULL_PAGE = '#/founder'
+
 export default function Builder() {
   return (
     <section id="builder" className="relative border-b border-[var(--color-line)]">
@@ -133,12 +137,21 @@ export default function Builder() {
           </div>
         </div>
 
-        <Reveal i={2} className="mt-10">
+        <Reveal i={2} className="mt-10 flex flex-wrap items-end justify-between gap-6">
           <p className="max-w-[62ch] text-[13.5px] leading-[1.7] text-[var(--color-fg-dim)] text-pretty">
             Fleet OS is MIT-licensed and developed in the open. Read the source, file an issue,
             or take the whole thing and run it yourself — the control plane is a Docker Compose
             file, and it never phones home.
           </p>
+          <a
+            href={FULL_PAGE}
+            className="group shrink-0 font-mono text-[12.5px] text-[var(--color-signal)]"
+          >
+            <span className="link-draw">the longer version</span>
+            <span className="ml-1.5 inline-block transition-transform duration-300 group-hover:translate-x-1">
+              →
+            </span>
+          </a>
         </Reveal>
       </div>
     </section>

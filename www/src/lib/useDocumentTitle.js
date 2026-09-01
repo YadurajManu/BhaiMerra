@@ -5,6 +5,19 @@ const HOME_TITLE = 'Fleet OS — git push to hardware you already own'
 const HOME_DESC =
   'Fleet OS turns the Raspberry Pi, old laptop and spare mini PC you already own into one resilient deploy target. Multi-arch builds, constraint-based placement, encrypted mesh, automatic failover.'
 
+/**
+ * Routes that render their own component rather than a PAGES entry. Without
+ * this they resolve to no page and get titled "Not found", which is a bad
+ * thing for a browser tab to say about a page that exists.
+ */
+const STANDALONE = {
+  founder: {
+    title: 'Yaduraj Singh',
+    lede:
+      'Fleet OS is built and maintained by one person. Why it exists, what running it alone can and cannot give you, and how to get hold of me.',
+  },
+}
+
 function setMeta(selector, value) {
   const el = document.head.querySelector(selector)
   if (el) el.setAttribute('content', value)
@@ -20,7 +33,7 @@ function setMeta(selector, value) {
  */
 export function useDocumentTitle(route) {
   useEffect(() => {
-    const page = route === null ? null : PAGES[route]
+    const page = route === null ? null : (PAGES[route] ?? STANDALONE[route])
 
     if (page) {
       document.title = `${page.title} — Fleet OS`

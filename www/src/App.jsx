@@ -11,6 +11,7 @@ import Pricing from './components/Pricing'
 import Builder from './components/Builder'
 import FinalCTA from './components/FinalCTA'
 import Footer from './components/Footer'
+import Founder from './components/Founder'
 import PageShell from './components/PageShell'
 import { useSmoothScroll } from './lib/useCapability'
 import { useRoute } from './lib/router'
@@ -56,7 +57,15 @@ export default function App() {
       <div className="grain" aria-hidden="true" />
       <Nav onPage={route !== null} />
       <main id="main" tabIndex={-1}>
-        {route === null ? <Landing /> : <PageShell route={route} />}
+        {/* Founder is not a PAGES entry — it needs its own layout rather than
+            the doc shell's breadcrumb, TOC and "last updated" stamp. */}
+        {route === null ? (
+          <Landing />
+        ) : route === 'founder' ? (
+          <Founder />
+        ) : (
+          <PageShell route={route} />
+        )}
       </main>
       <Footer />
     </>
