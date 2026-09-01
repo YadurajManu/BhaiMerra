@@ -93,6 +93,33 @@ export async function setSecret(
 }
 
 /** Names and timestamps. There is deliberately no function that returns values. */
+/**
+ * Does this key already have a value?
+ *
+ * Asked before generating a database credential, because regenerating one is
+ * destructive in a way that is not obvious: the engine wrote the original into
+ * its data directory when it initialised, and a new value locks the
+ * application out of a database that is otherwise working.
+ */
+export async function hasSecret(
+  ctx: AppContext,
+  scope: SecretScope,
+  key: string
+): Promise<boolean> {
+  const rows = await ctx.db
+    .select({ id: secrets.id })
+    .from(secrets)
+    .where(
+      and(
+        eq(secrets.fleetId, scope.fleetId),
+        eq(secrets.key, key),
+        scope.serviceId ? eq(secrets.serviceId, scope.serviceId) : isNull(secrets.serviceId)
+      )
+    )
+    .limit(1)
+  return rows.length > 0
+}
+
 export async function listSecrets(ctx: AppContext, fleetId: string): Promise<SecretSummary[]> {
   const rows = await ctx.db
     .select({
@@ -206,16 +233,70 @@ export async function resolveSecrets(
   return { values, missing }
 }
 
+/** `${secret:NAME}` inside a plain env value. */
+const SECRET_REF = /\$\{secret:([A-Z_][A-Z0-9_]{0,127})\}/g
+
+/** Every secret a set of env values interpolates, so they can be fetched. */
+export function referencedSecrets(env: Record<string, string>): string[] {
+  const found = new Set<string>()
+  for (const value of Object.values(env)) {
+    for (const match of value.matchAll(SECRET_REF)) found.add(match[1]!)
+  }
+  return [...found]
+}
+
+/**
+ * Substitute `${secret:NAME}` references in a plain env value.
+ *
+ * This exists because some values are *composed* of a secret rather than being
+ * one: a connection string is a scheme, a host, a database name and a
+ * password, and only the password is sensitive. Without interpolation the
+ * choices are to store the whole URL as a secret — duplicating a password into
+ * a second place that can drift out of step with the first — or to make every
+ * application read four discrete variables and assemble the URL itself.
+ *
+ * An unresolved reference is left as written and reported. Substituting an
+ * empty string would produce a URL that looks plausible and fails to
+ * authenticate somewhere far away from here.
+ */
+export function interpolate(
+  env: Record<string, string>,
+  values: Record<string, string>
+): { env: Record<string, string>; unresolved: string[] } {
+  const unresolved = new Set<string>()
+  const out: Record<string, string> = {}
+  for (const [key, value] of Object.entries(env)) {
+    out[key] = value.replace(SECRET_REF, (whole, name: string) => {
+      if (name in values) return values[name]!
+      unresolved.add(name)
+      return whole
+    })
+  }
+  return { env: out, unresolved: [...unresolved] }
+}
+
 /**
  * The full environment for a service: plain manifest values first, then
  * secrets, so a secret always wins over a same-named plain value rather than
  * being silently shadowed by one.
+ *
+ * Plain values may also *reference* secrets, which is how a generated
+ * DATABASE_URL carries a password without the password being written into the
+ * manifest or duplicated into a second secret.
  */
 export async function buildEnv(
   ctx: AppContext,
   fleetId: string,
   service: { id: string; env: Record<string, string>; secretRefs: string[] }
 ): Promise<{ env: Record<string, string>; missing: string[] }> {
-  const { values, missing } = await resolveSecrets(ctx, fleetId, service.id, service.secretRefs)
-  return { env: { ...service.env, ...values }, missing }
+  // Anything interpolated is needed just as much as anything declared, so the
+  // two are fetched together and a missing one is missing either way.
+  const needed = [...new Set([...service.secretRefs, ...referencedSecrets(service.env)])]
+  const { values, missing } = await resolveSecrets(ctx, fleetId, service.id, needed)
+  const { env: plain, unresolved } = interpolate(service.env, values)
+
+  return {
+    env: { ...plain, ...values },
+    missing: [...new Set([...missing, ...unresolved])],
+  }
 }

@@ -82,6 +82,92 @@ pass show db/url | fleet secrets set DATABASE_URL   # or pipe it
 fleet secrets ls
 ```
 
+## Databases
+
+Declaring Postgres by hand means getting six things right at once: the image
+and tag, a volume mounted at the engine's own data directory, `PGDATA` pointed
+at a *subdirectory* because Postgres refuses to initialise into a mount
+containing a `lost+found`, `internal: true` so the port is not published on the
+node's LAN interface, a pin to the node holding the volume, and two secrets
+whose values must match exactly. Each has a failure that only appears minutes
+later somewhere else.
+
+Two facts actually differ between deployments. Say those:
+
+```yaml
+fleet: homelab
+
+databases:
+  main:
+    engine: postgres@16
+    node: kakashi
+  cache:
+    engine: redis
+    node: kakashi
+
+services:
+  api:
+    build: ./api
+    uses: [main, cache]
+```
+
+Fleet derives the rest. `main` becomes an internal service pinned to `kakashi`
+with a volume at `/var/lib/postgresql/data`, `PGDATA` in its own subdirectory,
+no health check (the prober speaks HTTP and Postgres does not), and a generated
+password stored encrypted as `MAIN_PASSWORD`.
+
+`uses:` gives the dependent service its connection details and pins it to the
+same node — services resolve each other by name on that node's Docker network,
+and that network does not span machines, so anywhere else the hostname simply
+does not resolve.
+
+| Variable | Value |
+| --- | --- |
+| `DATABASE_URL` | `postgres://postgres:‹password›@main:5432/main` |
+| `DATABASE_HOST` | `main` |
+| `DATABASE_PORT` | `5432` |
+| `DATABASE_NAME` | `main` |
+| `DATABASE_USER` · `DATABASE_PASSWORD` | the generated credential |
+
+The first database gets the unprefixed `DATABASE_*` names every framework
+already looks for; any others are named after themselves (`CACHE_URL`). A value
+you write yourself is never overwritten.
+
+Engines: `postgres`, `mysql`, `mariadb`, `mongo`, `redis`. A bare name takes a
+sensible default version; `postgres@16` pins one. Optional keys are `database`,
+`user`, and `resources`.
+
+Redis is deliberately given no password: the stock image does not enforce one,
+and generating a credential the server ignores would misrepresent how protected
+it is. It stays internal instead.
+
+### The password is generated once
+
+It is created on the first apply that declares the database and never
+regenerated, because the engine writes it into its data directory at
+initialisation — changing it later locks the application out of a database that
+is working perfectly. It is generated rather than requested because the value
+must be byte-identical in two places, and a person typing it twice is exactly
+how those two drift apart.
+
+### Composing a secret into a value
+
+`${secret:NAME}` interpolates a stored secret into a plain `env` value. This is
+how a connection string carries a password without the password being written
+into the manifest or duplicated into a second secret:
+
+```yaml
+env:
+  SENTRY_DSN: https://${secret:SENTRY_KEY}@o0.ingest.sentry.io/0
+```
+
+The reference is resolved only in the desired state sent to the agent that runs
+the container. An unresolved one is reported and left as written — substituting
+an empty string would produce a URL that looks plausible and fails to
+authenticate somewhere far away.
+
+## Secrets
+
 When the values already exist in a `.env`, import them instead of retyping:
 
 ```bash

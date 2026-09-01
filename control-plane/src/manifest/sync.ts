@@ -1,4 +1,7 @@
+import { randomBytes } from 'node:crypto'
 import { and, eq, inArray, notInArray } from 'drizzle-orm'
+import { ENGINES, passwordRefFor } from './databases.js'
+import { hasSecret, setSecret } from '../secrets/store.js'
 import { managedHostname } from '../ingress/routes.js'
 import { services, nodes, fleets } from '../db/schema.js'
 import { recordAudit } from '../lib/audit.js'
@@ -16,6 +19,8 @@ export type SyncResult = {
   /** In the fleet but no longer in the manifest — reported, never deleted. */
   orphaned: string[]
   warnings: string[]
+  /** Database credentials created by this apply, by name. Never the values. */
+  generatedSecrets: string[]
 }
 
 /**
@@ -60,6 +65,29 @@ export async function syncManifest(
     .map((s) => `services.${s.name}.node: no node named "${s.node}" in this fleet`)
   if (unresolved.length) {
     throw ApiError.unprocessable('unknown_node', 'The manifest names nodes that are not in this fleet', unresolved)
+  }
+
+  /* ── credentials for managed databases ──────────────────────────
+     Generated once, on the first apply that declares the database, and
+     never regenerated: the password is written into the engine's data
+     directory at initialisation, so changing it later would lock the
+     application out of a database that is working perfectly.
+
+     This is also why they are generated rather than asked for. The value
+     has to be identical in two places — what the engine is created with,
+     and what the client connects with — and a person typing it twice is
+     exactly how those two drift apart. */
+  const createdSecrets: string[] = []
+  for (const db of manifest.databases) {
+    const spec = ENGINES[db.engine]
+    if (!spec?.usesPassword) continue
+    const key = passwordRefFor(db.name)
+    if (await hasSecret(ctx, { fleetId }, key)) continue
+    // base64url of 24 random bytes: no shell-special characters, nothing that
+    // needs escaping in a connection string, and 192 bits of entropy.
+    const value = randomBytes(24).toString('base64url')
+    await setSecret(ctx, { fleetId }, key, value)
+    createdSecrets.push(key)
   }
 
   const existing = await ctx.db.select().from(services).where(eq(services.fleetId, fleetId))
@@ -148,5 +176,16 @@ export async function syncManifest(
     )
   }
 
-  return { project, created, updated, orphaned, warnings }
+  // Said out loud, because a credential that appears without being asked for
+  // is surprising even when it is what you wanted — and because it is the
+  // user's to rotate, back up, or replace.
+  if (createdSecrets.length) {
+    warnings.push(
+      `Generated ${createdSecrets.join(', ')} for the databases in this manifest. ` +
+        `The values are stored encrypted and are never shown; a database keeps the password it was ` +
+        `created with, so replacing one means recreating that database.`
+    )
+  }
+
+  return { project, created, updated, orphaned, warnings, generatedSecrets: createdSecrets }
 }

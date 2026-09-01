@@ -1,5 +1,13 @@
 import { parse as parseYaml } from 'yaml'
 import { z } from 'zod'
+import {
+  ENGINES,
+  clientEnv,
+  expandDatabase,
+  prefixFor,
+  splitEngine,
+  type DatabaseDecl,
+} from './databases.js'
 
 /**
  * The fleet.yaml manifest (PRD 7.2, docs/fleet-yaml-spec.md).
@@ -159,6 +167,14 @@ const serviceFields = z
     env: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).default({}),
     secrets: z.array(z.string()).default([]),
     replicas: z.number().int().min(1).max(50).default(1),
+    /**
+     * Managed databases this service connects to.
+     *
+     * Naming one gets its connection details as environment variables and
+     * co-locates this service with it: they resolve each other by name on the
+     * node's fleet network, which does not span machines.
+     */
+    uses: z.array(z.string()).default([]),
     affinity: z.array(z.string()).default([]),
     anti_affinity: z.array(z.string()).default([]),
     tags: z.array(z.string()).default([]),
@@ -222,6 +238,37 @@ const serviceSchema = serviceFields
     }
   })
 
+/**
+ * A managed database.
+ *
+ * `node` is required and deliberately so: a volume does not follow a service
+ * between machines, so a database that is not pinned is a database that can be
+ * scheduled away from its own data. Making the user say where it lives is the
+ * one decision that cannot be defaulted.
+ */
+const databaseSchema = z.object({
+  engine: z.string().min(1, 'name an engine, such as postgres@16'),
+  node: z.string().min(1, 'a database must say which node holds its data'),
+  /** The database to create. Defaults to the declaration's own name. */
+  database: z.string().min(1).optional(),
+  user: z.string().min(1).optional(),
+  /**
+   * Deliberately not the service `resources` schema.
+   *
+   * That one carries `.prefault({})`, so `.optional()` on it never yields
+   * undefined — every declaration arrived carrying the *service* defaults of
+   * 256MB and 0.25 cores, which made "the user did not say" indistinguishable
+   * from "the user asked for 256MB" and silently overrode the larger default a
+   * database actually wants.
+   */
+  resources: z
+    .object({
+      ram: quantity.optional(),
+      cpu: z.coerce.number().positive().max(256).optional(),
+    })
+    .optional(),
+})
+
 const manifestSchema = z.object({
   fleet: z.string().min(1, 'the manifest must name the fleet it deploys into'),
   /**
@@ -239,6 +286,14 @@ const manifestSchema = z.object({
     )
     .optional(),
   defaults: serviceFields.partial().optional(),
+  /**
+   * Databases Fleet runs for you.
+   *
+   * Two facts differ between deployments — which engine, and which node holds
+   * the data. Everything else about running Postgres in a container is the
+   * same every time and is derived rather than retyped.
+   */
+  databases: z.record(z.string(), databaseSchema).optional(),
   services: z.record(z.string(), z.unknown()).refine((v) => Object.keys(v).length > 0, {
     message: 'a manifest with no services has nothing to deploy',
   }),
@@ -251,6 +306,12 @@ export type ParsedManifest = {
   /** Declared by the manifest, or undefined for the caller to default. */
   project?: string
   services: Array<ServiceManifest & { name: string }>
+  /**
+   * Databases the manifest declared, so the caller can create the credentials
+   * they need. They are already present in `services` as well — this is the
+   * record of which of those were generated and what they require.
+   */
+  databases: DatabaseDecl[]
   warnings: string[]
 }
 
@@ -268,7 +329,7 @@ export class ManifestError extends Error {
  * found, not just the first — fixing a manifest one error per deploy is a
  * miserable loop.
  */
-export function parseManifest(source: string): ParsedManifest {
+export function parseManifest(source: string, project?: string): ParsedManifest {
   let raw: unknown
   try {
     raw = parseYaml(source)
@@ -291,7 +352,57 @@ export function parseManifest(source: string): ParsedManifest {
   const warnings: string[] = []
   const services: ParsedManifest['services'] = []
 
-  for (const [name, body] of Object.entries(top.data.services)) {
+  /* ── databases become services ──────────────────────────────────
+     Expanded before anything is validated, so a generated database is
+     checked by exactly the same rules as a hand-written service and
+     nothing downstream has to know it was generated. */
+  const declared = new Map<string, DatabaseDecl>()
+  const generated: Record<string, unknown> = {}
+
+  for (const [name, body] of Object.entries(top.data.databases ?? {})) {
+    if (!SERVICE_NAME.test(name)) {
+      issues.push({
+        path: `databases.${name}`,
+        message:
+          'database names must be lowercase letters, digits and hyphens, and cannot start or end with a hyphen',
+      })
+      continue
+    }
+    if (name in top.data.services) {
+      issues.push({
+        path: `databases.${name}`,
+        message: `there is already a service called "${name}". A database becomes a service, so the two names would collide.`,
+      })
+      continue
+    }
+
+    const { engine, version } = splitEngine(body.engine)
+    const spec = ENGINES[engine]
+    if (!spec) {
+      issues.push({
+        path: `databases.${name}.engine`,
+        message: `"${body.engine}" is not an engine Fleet manages. Available: ${Object.keys(ENGINES).join(', ')}.`,
+      })
+      continue
+    }
+
+    const decl: DatabaseDecl = {
+      name,
+      engine,
+      version: version ?? spec.defaultVersion,
+      node: body.node,
+      database: body.database ?? name.replace(/-/g, '_'),
+      user: body.user ?? spec.defaultUser,
+      ramMb: body.resources?.ram,
+      cpu: body.resources?.cpu,
+    }
+    declared.set(name, decl)
+    // Volumes are global to a node, so the project scopes the name. Two
+    // clients each with a database called "main" must not land on one volume.
+    generated[name] = expandDatabase(decl, top.data.project ?? project ?? 'default')
+  }
+
+  for (const [name, body] of Object.entries({ ...generated, ...top.data.services })) {
     if (!SERVICE_NAME.test(name)) {
       issues.push({
         path: `services.${name}`,
@@ -316,6 +427,56 @@ export function parseManifest(source: string): ParsedManifest {
     }
 
     services.push({ ...parsed.data, name })
+  }
+
+  /* ── uses: → connection env and co-location ─────────────────────
+     Applied after validation so the generated values cannot be rejected
+     by rules the user did not write, and so `uses` referring to a
+     database that does not exist is reported as the mistake it is. */
+  const primary = [...declared.keys()][0]
+  for (const svc of services) {
+    if (!svc.uses.length) continue
+    if (declared.has(svc.name)) {
+      issues.push({
+        path: `services.${svc.name}.uses`,
+        message: 'a database cannot use another database',
+      })
+      continue
+    }
+
+    for (const ref of svc.uses) {
+      const db = declared.get(ref)
+      if (!db) {
+        issues.push({
+          path: `services.${svc.name}.uses`,
+          message: `"${ref}" is not a database in this manifest. Declared: ${[...declared.keys()].join(', ') || 'none'}.`,
+        })
+        continue
+      }
+      const spec = ENGINES[db.engine]!
+      const injected = clientEnv(db, spec, prefixFor(db.name, db.name === primary))
+
+      // The manifest wins. Someone who wrote DATABASE_URL by hand meant it,
+      // and silently replacing it would be the worst kind of magic.
+      for (const [key, value] of Object.entries(injected)) {
+        if (!(key in svc.env)) svc.env[key] = value
+      }
+
+      // A service reaches its database by name on the node's fleet network,
+      // and that network does not span machines. Pinning it to the same node
+      // is not an optimisation — anywhere else and the hostname does not
+      // resolve at all.
+      if (svc.placement === 'flexible') {
+        svc.placement = 'pinned'
+        svc.node = db.node
+      } else if (svc.node && svc.node !== db.node) {
+        issues.push({
+          path: `services.${svc.name}.node`,
+          message: `pinned to "${svc.node}" but uses database "${ref}" on "${db.node}". Services resolve a database by name only on the same node.`,
+        })
+      }
+      if (!svc.affinity.includes(ref)) svc.affinity.push(ref)
+    }
   }
 
   if (issues.length) throw new ManifestError(issues)
@@ -400,5 +561,5 @@ export function parseManifest(source: string): ParsedManifest {
 
   if (issues.length) throw new ManifestError(issues)
 
-  return { fleet: top.data.fleet, project: top.data.project, services, warnings }
+  return { fleet: top.data.fleet, project: top.data.project, services, databases: [...declared.values()], warnings }
 }

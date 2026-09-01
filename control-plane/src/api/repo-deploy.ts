@@ -74,7 +74,10 @@ export async function deployRepository(
     // single push change resources, routes, or services without a second
     // manual dashboard step.
     const manifestPath = spec.connected?.manifestPath ?? 'fleet.yaml'
-    const parsedManifest = parseManifest(await readFile(join(checkout.path, manifestPath), 'utf8'))
+    const parsedManifest = parseManifest(
+      await readFile(join(checkout.path, manifestPath), 'utf8'),
+      projectForRepo(spec.connected?.fullName ?? spec.sourceUrl)
+    )
 
     // A connected repository is enough to bootstrap: services in its manifest
     // inherit its safe, App-authorised clone URL unless they explicitly point

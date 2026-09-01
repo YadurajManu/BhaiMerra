@@ -51,7 +51,9 @@ export async function serviceRoutes(app: FastifyInstance) {
 
       let parsed
       try {
-        parsed = parseManifest(body.data.manifest)
+        // The project scopes generated volume names, so it has to be known
+        // before the manifest is expanded rather than after.
+        parsed = parseManifest(body.data.manifest, body.data.project)
       } catch (err) {
         if (err instanceof ManifestError) {
           // Every problem at once — fixing a manifest one error per deploy is
