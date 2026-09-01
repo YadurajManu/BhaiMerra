@@ -101,8 +101,21 @@ curl -fsS -m 4 "http://localhost:${WWW_PORT:-8083}/" >/dev/null 2>&1 \
   && ok "landing page serving" || bad "landing page not responding"
 curl -fsS -m 4 "http://localhost:${DASHBOARD_PORT:-8082}/" >/dev/null 2>&1 \
   && ok "dashboard serving" || bad "dashboard not responding"
-curl -fsS -m 4 "http://localhost:${REGISTRY_PORT:-5001}/v2/" >/dev/null 2>&1 \
-  && ok "registry up" || bad "registry not responding"
+# 401 is the *healthy* answer from a registry with authentication turned on —
+# it means the auth layer is in front of the API, which is the point. `curl -f`
+# treats every 4xx as a failure, so it reported a working registry as down from
+# the moment credentials were added. The compose healthcheck accepts both for
+# the same reason; these two must agree or they disagree about the same
+# container. The status code is reported on failure because "not responding"
+# is not something anyone can act on.
+registry_status=$(curl -s -o /dev/null -w '%{http_code}' -m 4 \
+  "http://localhost:${REGISTRY_PORT:-5001}/v2/" 2>/dev/null || echo 000)
+case "$registry_status" in
+  200) ok "registry up" ;;
+  401) ok "registry up (authenticated)" ;;
+  000) bad "registry not responding (no answer on port ${REGISTRY_PORT:-5001})" ;;
+  *)   bad "registry not responding (HTTP $registry_status)" ;;
+esac
 
 # ── tunnel ──────────────────────────────────────────────────────────
 if [ "$WITH_TUNNEL" = 1 ]; then
