@@ -45,9 +45,12 @@ export default function LogTerminal({
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [copied, setCopied] = useState(false)
 
+  /** Lines that arrived while scrolled back, so the pill can say how many. */
+  const [pendingLines, setPendingLines] = useState(0)
+
   const containerRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
-  const isUserScrollingRef = useRef(false)
+  const lastCountRef = useRef(0)
 
   // Parse lines to detect log levels and timestamps
   const parsedLines = useMemo<ParsedLine[]>(() => {
@@ -55,11 +58,29 @@ export default function LogTerminal({
       let level: 'error' | 'warn' | 'info' | 'plain' = 'plain'
       const lower = line.toLowerCase()
 
-      if (lower.includes('error') || lower.includes('fatal') || lower.includes('panic') || lower.includes('exception') || lower.includes('failed') || lower.includes('status 5') || lower.includes('500') || lower.includes('502') || lower.includes('504')) {
+      // Severity is matched on whole words and on status codes in the places
+      // a status code actually appears.
+      //
+      // Substring matching tinted half the screen red: `"error": null` is a
+      // successful response, `includes('500')` matches a byte count, a port,
+      // or a timestamp, and `includes('200')` matched the year in every
+      // timestamp of the form 2026-.... The result was a log where the colour
+      // carried no information, which is worse than no colour at all.
+      const hasWord = (re: RegExp) => re.test(lower)
+      // "level":"error", level=error, [ERROR], ERROR:, or the bare word.
+      const ERROR_WORDS = /\b(error|fatal|panic|exception|failed|failure)\b/
+      const WARN_WORDS = /\b(warn|warning|deprecated)\b/
+      const INFO_WORDS = /\b(info|started|connected|ready|listening)\b/
+      // A status code, only where one is plausibly being reported: after a
+      // method and path, or after "status"/"code".
+      const statusCode = lower.match(/\b(?:status|code)[":= ]+(\d{3})\b/)?.[1]
+        ?? lower.match(/"\s*(?:get|post|put|patch|delete|head|options)\s[^"]*"\s+(\d{3})\b/)?.[1]
+
+      if (ERROR_WORDS.test(lower) || (statusCode && statusCode.startsWith('5'))) {
         level = 'error'
-      } else if (lower.includes('warn') || lower.includes('status 4') || lower.includes('404') || lower.includes('403') || lower.includes('401')) {
+      } else if (hasWord(WARN_WORDS) || (statusCode && statusCode.startsWith('4'))) {
         level = 'warn'
-      } else if (lower.includes('info') || lower.includes('status 2') || lower.includes('200') || lower.includes('started') || lower.includes('connected') || lower.includes('ready')) {
+      } else if (hasWord(INFO_WORDS) || (statusCode && statusCode.startsWith('2'))) {
         level = 'info'
       }
 
@@ -116,20 +137,32 @@ export default function LogTerminal({
     })
   }, [parsedLines, activeLevel, search, useRegex])
 
-  // Auto-scroll when lines change if autoScroll is enabled
+  // Follow the tail, or count what is being missed while scrolled back.
+  //
+  // `isUserScrollingRef` was declared, read here, and never assigned, so the
+  // guard it looked like it provided did nothing at all.
   useEffect(() => {
-    if (autoScroll && bottomRef.current && !isUserScrollingRef.current) {
-      bottomRef.current.scrollIntoView({ behavior: 'smooth' })
+    const arrived = filteredLines.length - lastCountRef.current
+    lastCountRef.current = filteredLines.length
+    if (autoScroll) {
+      setPendingLines(0)
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    } else if (arrived > 0) {
+      setPendingLines((n) => n + arrived)
     }
   }, [filteredLines, autoScroll])
 
-  // Handle user scroll detection
+  // Scrolling back pauses the follow; scrolling to the bottom resumes it.
+  // Only the first half existed, so once you looked at anything you had to
+  // find the button to start following again.
   const handleScroll = () => {
     if (!containerRef.current) return
     const { scrollTop, scrollHeight, clientHeight } = containerRef.current
     const isAtBottom = scrollHeight - scrollTop - clientHeight < 40
-    if (!isAtBottom && autoScroll) {
-      setAutoScroll(false)
+    if (!isAtBottom && autoScroll) setAutoScroll(false)
+    if (isAtBottom && !autoScroll) {
+      setAutoScroll(true)
+      setPendingLines(0)
     }
   }
 
@@ -363,6 +396,21 @@ export default function LogTerminal({
             Wrap
           </button>
 
+          {/* `showLineNumbers` had a setter that nothing called: the state
+              existed, the column honoured it, and there was no way to reach
+              it. Either give it a control or delete it. */}
+          <button
+            onClick={() => setShowLineNumbers(!showLineNumbers)}
+            title="Toggle line numbers"
+            className={`h-[28px] rounded-[3px] border px-2 font-mono text-[10.5px] transition-colors ${
+              showLineNumbers
+                ? 'border-[var(--color-signal-dim)] text-[var(--color-fg)]'
+                : 'border-[var(--color-line)] text-[var(--color-fg-dim)] hover:border-[var(--color-line-2)]'
+            }`}
+          >
+            №
+          </button>
+
           <button
             onClick={() => setShowTimestamps(!showTimestamps)}
             title="Toggle timestamp column"
@@ -486,17 +534,25 @@ export default function LogTerminal({
           </div>
         )}
 
-        {/* Floating "Scroll to Bottom" button when user scrolled away */}
+        {/* Scrolled back, and lines still arriving.
+            `fixed` pinned this to the viewport's corner rather than the
+            terminal's, so on any page where the terminal was not the last
+            thing on screen the button appeared somewhere unrelated to it. */}
         {!autoScroll && filteredLines.length > 0 && (
           <button
             onClick={() => {
               setAutoScroll(true)
+              setPendingLines(0)
               bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
             }}
-            className="fixed bottom-6 right-8 z-30 inline-flex items-center gap-1.5 rounded-[3px] border border-[var(--color-signal-dim)] bg-[var(--color-ink-900)] px-3 py-1.5 font-mono text-[11px] text-[var(--color-signal)] shadow-lg transition-all hover:bg-[var(--color-ink-850)]"
+            className="press sticky bottom-2 left-full z-30 mr-2 inline-flex items-center gap-1.5 rounded-[3px] border border-[var(--color-signal-dim)] bg-[var(--color-ink-900)] px-3 py-1.5 font-mono text-[11px] text-[var(--color-signal)] shadow-lg hover:bg-[var(--color-ink-850)]"
           >
-            <span>↓ Jump to latest</span>
-            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--color-signal)]" />
+            <span>
+              {pendingLines > 0
+                ? `↓ ${pendingLines} new line${pendingLines === 1 ? '' : 's'}`
+                : '↓ Jump to latest'}
+            </span>
+            {pendingLines > 0 && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--color-signal)]" />}
           </button>
         )}
       </div>

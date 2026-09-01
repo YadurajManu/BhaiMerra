@@ -149,6 +149,8 @@ export default function Services() {
   const [openReason, setOpenReason] = useState<string | null>(null)
   /** Services with a deploy in flight, showing the live phase ladder. */
   const [watching, setWatching] = useState<string[]>([])
+  /** Stop asks first — it takes down what is currently serving. */
+  const [confirmStop, setConfirmStop] = useState<Service | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<Service | null>(null)
 
   const services = useMemo(() => data?.services ?? [], [data])
@@ -873,14 +875,23 @@ export default function Services() {
                   {canDeploy && (
                     <div className="flex items-center gap-2">
                       {isRunning && (
-                        <button
-                          onClick={() => void stop(s)}
-                          disabled={busy !== null}
-                          title="Stop and tear down running containers"
-                          className="inline-flex items-center gap-1.5 rounded-[3px] border border-[var(--color-line-2)] bg-[var(--color-ink-900)] px-3 py-1 font-mono text-[11px] text-[var(--color-down)] transition-colors hover:border-[var(--color-down)] disabled:opacity-40 disabled:cursor-not-allowed"
-                        >
-                          {busy === `stop-${s.id}` ? 'Stopping…' : '⏹ Stop'}
-                        </button>
+                        <>
+                          {/* Stop takes down what is serving, and on a service
+                              holding a volume it does so immediately with no
+                              replacement standing by. It sat inline with
+                              Restart and Redeploy at identical weight; this
+                              session logged five Stop requests, several landing
+                              on top of a running deploy. */}
+                          <button
+                            onClick={() => setConfirmStop(s)}
+                            disabled={busy !== null}
+                            title="Tear down the running containers"
+                            className="press inline-flex items-center gap-1.5 rounded-[3px] border border-[var(--color-line-2)] bg-[var(--color-ink-900)] px-3 py-1 font-mono text-[11px] text-[var(--color-down)] hover:border-[var(--color-down)] disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            {busy === `stop-${s.id}` ? <span className="breathe">Stopping…</span> : '⏹ Stop'}
+                          </button>
+                          <span aria-hidden="true" className="mx-0.5 h-4 w-px self-center bg-[var(--color-line-2)]" />
+                        </>
                       )}
 
                       <button
@@ -929,6 +940,29 @@ export default function Services() {
           })}
         </div>
       )}
+
+      <ConfirmDialog
+        open={confirmStop !== null}
+        title={`Stop ${confirmStop?.name ?? 'service'}`}
+        body="Its containers are torn down and it stops serving."
+        consequences={[
+          'The public URL stops answering immediately',
+          confirmStop?.persistentVolume
+            ? 'This service holds a volume, so it goes down with no replacement standing by'
+            : 'A replacement is not started; use Deploy to bring it back',
+          'Nothing is deleted — the service and its history remain',
+        ]}
+        confirmLabel="Stop service"
+        busy={busy === `stop-${confirmStop?.id}`}
+        onConfirm={() => {
+          if (confirmStop) {
+            const target = confirmStop
+            setConfirmStop(null)
+            void stop(target)
+          }
+        }}
+        onCancel={() => setConfirmStop(null)}
+      />
 
       <ConfirmDialog
         open={confirmDelete !== null}

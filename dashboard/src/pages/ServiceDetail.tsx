@@ -40,8 +40,46 @@ export default function ServiceDetail() {
 
   const service = services.data?.services.find((s) => s.id === serviceId)
 
+  /**
+   * Actions that change what is currently serving, and what to say about them.
+   *
+   * Rollback used to be guarded by window.confirm — an unstyled browser box on
+   * an action that replaces the running release — while delete, which is no
+   * more consequential, got the real dialog. Stop had no guard at all, and on
+   * a stateful service it supersedes the release immediately: this session
+   * logged five of them, several landing on top of a running deploy.
+   */
+  const GUARDED: Record<string, { title: string; body: string; consequences: string[]; confirmLabel: string }> = {
+    rollback: {
+      title: `Roll back ${service?.name ?? 'service'}`,
+      body: 'The previous release is redeployed and becomes the live one.',
+      consequences: [
+        'The release running now is superseded, not deleted',
+        'Its container is replaced on the node it runs on',
+        'The rollback is itself a deployment, and can be rolled back',
+      ],
+      confirmLabel: 'Roll back',
+    },
+    stop: {
+      title: `Stop ${service?.name ?? 'service'}`,
+      body: 'Its containers are torn down and the service stops serving.',
+      consequences: [
+        'The public URL stops answering immediately',
+        'A service holding a volume goes down without a replacement standing by',
+        'Deploy brings it back; nothing is deleted',
+      ],
+      confirmLabel: 'Stop service',
+    },
+  }
+  const [confirming, setConfirming] = useState<{ path: string; key: string } | null>(null)
+
   async function act(path: string, key: string) {
-    if (key === 'rollback' && !window.confirm('Roll back to the previous release? The current release will be preserved in deployment history.')) return
+    // Anything that takes down what is serving asks first.
+    if (GUARDED[key] && !confirming) {
+      setConfirming({ path, key })
+      return
+    }
+    setConfirming(null)
     setBusy(key)
     setActionError(null)
     try {
@@ -101,13 +139,15 @@ export default function ServiceDetail() {
               )}
             </div>
           </div>
+          {/* Two groups, separated by a rule.
+              Left: things that bring a service up or move it. Right: things
+              that take down what is currently serving. They were one flat row
+              of equal weight, so Stop sat between Deploy and Restart and
+              looked exactly like them. */}
           {canDeploy && (
-            <div className="flex flex-wrap gap-2">
-              <Button onClick={() => void act(`/services/${serviceId}/deploy`, 'deploy')} disabled={busy !== null}>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button variant="primary" onClick={() => void act(`/services/${serviceId}/deploy`, 'deploy')} disabled={busy !== null}>
                 {busy === 'deploy' ? 'deploying…' : 'Deploy'}
-              </Button>
-              <Button onClick={() => void act(`/services/${serviceId}/stop`, 'stop')} disabled={busy !== null} title="Stop running containers">
-                {busy === 'stop' ? 'stopping…' : 'Stop'}
               </Button>
               <Button
                 onClick={() => void act(`/services/${serviceId}/reschedule`, 'move')}
@@ -122,6 +162,16 @@ export default function ServiceDetail() {
               </Button>
               <Button onClick={() => void act(`/services/${serviceId}/restart`, 'restart')} disabled={busy !== null}>
                 {busy === 'restart' ? 'restarting…' : 'Restart'}
+              </Button>
+
+              <span aria-hidden="true" className="mx-1 h-5 w-px self-center bg-[var(--color-line-2)]" />
+
+              <Button
+                onClick={() => void act(`/services/${serviceId}/stop`, 'stop')}
+                disabled={busy !== null}
+                title="Tear down the running containers"
+              >
+                {busy === 'stop' ? 'stopping…' : 'Stop'}
               </Button>
               <Button variant="danger" onClick={() => void act(`/services/${serviceId}/rollback`, 'rollback')} disabled={busy !== null}>
                 {busy === 'rollback' ? 'rolling back…' : 'Rollback'}
@@ -259,6 +309,20 @@ export default function ServiceDetail() {
         loading={logs.loading}
         isLive={true}
         height="420px"
+      />
+
+      {/* Rollback and Stop, with the same weight delete has always had. */}
+      <ConfirmDialog
+        open={confirming !== null}
+        title={confirming ? GUARDED[confirming.key]!.title : ''}
+        body={confirming ? GUARDED[confirming.key]!.body : ''}
+        consequences={confirming ? GUARDED[confirming.key]!.consequences : []}
+        confirmLabel={confirming ? GUARDED[confirming.key]!.confirmLabel : ''}
+        busy={busy === confirming?.key}
+        onConfirm={() => {
+          if (confirming) void act(confirming.path, confirming.key)
+        }}
+        onCancel={() => setConfirming(null)}
       />
 
       <ConfirmDialog
