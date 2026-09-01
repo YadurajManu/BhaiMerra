@@ -14,7 +14,7 @@ import { c } from '../render.js'
 import { task, glyph } from '../ui.js'
 import { withLadder } from '../ladder.js'
 import { DEPLOY_STEPS, follow, phaseWalker } from '../progress.js'
-import { planFromManifest, deployOrder } from '../plan.js'
+import { planFromManifest, deployOrder, projectNameFor } from '../plan.js'
 import { uploadContext, humanBytes } from '../archive.js'
 import type { Flags } from '../args.js'
 
@@ -68,17 +68,20 @@ export const upCommand = {
       async () =>
         (
           await request<{
+            project: string
             created: string[]
             updated: string[]
             orphaned: string[]
             warnings: string[]
-          }>('POST', `/fleets/${fleetId}/services`, { body: { manifest } })
+          }>('POST', `/fleets/${fleetId}/services`, {
+            body: { manifest, project: projectNameFor(process.cwd()) },
+          })
         ).body,
       {
         done: (b) =>
           b.created.length || b.updated.length
-            ? `applied ${b.created.length + b.updated.length} service(s)`
-            : 'no changes',
+            ? `applied ${b.created.length + b.updated.length} service(s) to project ${b.project}`
+            : `no changes in project ${b.project}`,
       }
     )
 

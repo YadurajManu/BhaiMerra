@@ -195,7 +195,21 @@ export async function webhookRoutes(app: FastifyInstance) {
               services: parsedManifest.services.map((service) => ({ ...service, repo: service.repo ?? connected.cloneUrl })),
             }
           : parsedManifest
-        const synced = await syncManifest(app.ctx, fleetId, fleet.orgId, manifest)
+        // A push deploy names its project after the repository, which is the
+        // grouping a person already has in their head for these services.
+        const repoProject = normaliseRepo(connected?.fullName ?? sourceUrl)
+          .split('/')
+          .pop()
+          ?.replace(/[^a-z0-9-]+/g, '-')
+          .replace(/^-+|-+$/g, '')
+        const synced = await syncManifest(
+          app.ctx,
+          fleetId,
+          fleet.orgId,
+          manifest,
+          undefined,
+          repoProject || undefined
+        )
         const refreshed = await db.select().from(services).where(eq(services.fleetId, fleetId))
         const toDeploy = refreshed.filter(
           (service) => service.repoUrl && candidates.includes(normaliseRepo(service.repoUrl))

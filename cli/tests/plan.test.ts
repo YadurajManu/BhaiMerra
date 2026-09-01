@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
-import { planFromManifest, deployOrder } from '../src/plan.js'
+import { planFromManifest, deployOrder, projectNameFor } from '../src/plan.js'
 import { ignorePatterns } from '../src/archive.js'
 import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -168,5 +168,24 @@ describe('patterns that must never be honoured', () => {
     await writeFile(join(dir, '.dockerignore'), '*\n!src\n!package.json\n')
     const patterns = await ignorePatterns(dir)
     assert.ok(!patterns.includes('*'), 'a bare * would have emptied the context')
+  })
+})
+
+describe('project names', () => {
+  test('come from the directory, the way Compose does', () => {
+    assert.equal(projectNameFor('/Users/me/Desktop/MuhDikhai'), 'muhdikhai')
+    assert.equal(projectNameFor('/srv/my-app'), 'my-app')
+  })
+
+  test('are normalised to something the server will accept', () => {
+    // The server validates project names like service names, so a derived one
+    // must never be a name it would reject.
+    assert.equal(projectNameFor('/tmp/My Project (v2)'), 'my-project-v2')
+    assert.equal(projectNameFor('/tmp/___'), 'default')
+    assert.equal(projectNameFor('/'), 'default')
+    for (const dir of ['/a/Weird__Name!!', '/x/-leading', '/x/trailing-']) {
+      const name = projectNameFor(dir)
+      assert.match(name, /^[a-z0-9]([a-z0-9-]{0,46}[a-z0-9])?$/, `${dir} -> ${name}`)
+    }
   })
 })

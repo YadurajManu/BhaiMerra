@@ -122,6 +122,32 @@ export default function Services() {
     })
   }, [services, filterStatus, search])
 
+  // Filtered services, grouped by the manifest they came from.
+  //
+  // A fleet.yaml describes a stack. Rendering its services flat among every
+  // other manifest's is how four related things came to look like four
+  // unrelated ones — and how a service from a different project looked like
+  // an orphan rather than simply somebody else's.
+  const projects = useMemo(() => {
+    const groups = new Map<string, Service[]>()
+    for (const s of filteredServices) {
+      const key = s.project || 'default'
+      const group = groups.get(key) ?? []
+      group.push(s)
+      groups.set(key, group)
+    }
+    return [...groups]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([name, group]) => ({
+        name,
+        services: group,
+        running: group.filter(
+          (s) => s.current?.status === 'running' || s.current?.status === 'online'
+        ).length,
+        ram: group.reduce((sum, s) => sum + (s.requestRamMb || 0), 0),
+      }))
+  }, [filteredServices])
+
   const handleTemplateChange = (tmplKey: string) => {
     setSelectedTemplate(tmplKey)
     if (TEMPLATES[tmplKey]) {
@@ -435,8 +461,36 @@ export default function Services() {
           </button>
         </div>
       ) : (
-        <div className="grid gap-3">
-          {filteredServices.map((s) => {
+        <div className="grid gap-8">
+          {projects.map((project) => (
+          <div key={project.name} className="grid gap-3">
+            {/* One manifest, one heading. */}
+            <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-[var(--color-line)] pb-2">
+              <div className="flex items-baseline gap-2.5">
+                <span className="font-mono text-[13px] font-semibold text-[var(--color-fg)]">
+                  {project.name}
+                </span>
+                <span className="font-mono text-[11px] text-[var(--color-fg-dim)]">
+                  {project.services.length} service{project.services.length === 1 ? '' : 's'}
+                </span>
+              </div>
+              <div className="flex items-center gap-3 font-mono text-[11px] text-[var(--color-fg-dim)]">
+                <span
+                  className={
+                    project.running === project.services.length
+                      ? 'text-[var(--color-signal)]'
+                      : project.running === 0
+                        ? 'text-[var(--color-fg-dim)]'
+                        : 'text-[var(--color-warn)]'
+                  }
+                >
+                  {project.running}/{project.services.length} running
+                </span>
+                <span>{mb(project.ram)}</span>
+              </div>
+            </div>
+
+          {project.services.map((s) => {
             const url = s.domain || s.hostname ? `https://${s.domain ?? s.hostname}` : null
             const isRunning = s.current?.status === 'running' || s.current?.status === 'online'
             const isDeploying = busy === `deploy-${s.id}`
@@ -648,6 +702,8 @@ export default function Services() {
               </div>
             )
           })}
+          </div>
+          ))}
         </div>
       )}
 

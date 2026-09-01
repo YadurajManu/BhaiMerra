@@ -224,6 +224,20 @@ const serviceSchema = serviceFields
 
 const manifestSchema = z.object({
   fleet: z.string().min(1, 'the manifest must name the fleet it deploys into'),
+  /**
+   * What this manifest's services are collectively called.
+   *
+   * Optional, because most manifests never said one and adding a required key
+   * would break every existing file. When it is absent the caller supplies a
+   * default — the CLI uses the directory name, the way Compose does.
+   */
+  project: z
+    .string()
+    .regex(
+      SERVICE_NAME,
+      'project names must be lowercase letters, digits and hyphens, and cannot start or end with a hyphen'
+    )
+    .optional(),
   defaults: serviceFields.partial().optional(),
   services: z.record(z.string(), z.unknown()).refine((v) => Object.keys(v).length > 0, {
     message: 'a manifest with no services has nothing to deploy',
@@ -234,6 +248,8 @@ export type ServiceManifest = z.infer<typeof serviceSchema>
 
 export type ParsedManifest = {
   fleet: string
+  /** Declared by the manifest, or undefined for the caller to default. */
+  project?: string
   services: Array<ServiceManifest & { name: string }>
   warnings: string[]
 }
@@ -384,5 +400,5 @@ export function parseManifest(source: string): ParsedManifest {
 
   if (issues.length) throw new ManifestError(issues)
 
-  return { fleet: top.data.fleet, services, warnings }
+  return { fleet: top.data.fleet, project: top.data.project, services, warnings }
 }

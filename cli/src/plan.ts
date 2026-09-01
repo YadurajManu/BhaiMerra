@@ -8,6 +8,24 @@
  */
 import { parse as parseYaml } from 'yaml'
 
+/**
+ * What to call this manifest's services collectively when it does not say.
+ *
+ * The directory name, which is what Compose does and what a person would
+ * answer if asked "which project is this". Normalised to the same shape a
+ * service name has to be, so the server never rejects a name it derived.
+ */
+export function projectNameFor(dir: string): string {
+  const base = dir.split('/').filter(Boolean).pop() ?? 'default'
+  const slug = base
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48)
+    .replace(/-+$/, '')
+  return slug || 'default'
+}
+
 export type PlannedService = {
   name: string
   /** Build context path, relative to the manifest. Absent for a prebuilt image. */

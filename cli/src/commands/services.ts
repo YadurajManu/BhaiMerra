@@ -10,13 +10,14 @@ import {
   follow,
   phaseWalker,
 } from '../progress.js'
-import { planFromManifest } from '../plan.js'
+import { planFromManifest, projectNameFor } from '../plan.js'
 import { uploadContext, humanBytes } from '../archive.js'
 import type { Flags } from '../args.js'
 
 type Service = {
   id: string
   name: string
+  project: string
   repoUrl: string | null
   placementPolicy: string
   requestRamMb: number
@@ -89,17 +90,20 @@ export const applyCommand = {
       async () =>
         (
           await request<{
+            project: string
             created: string[]
             updated: string[]
             orphaned: string[]
             warnings: string[]
-          }>('POST', `/fleets/${fleetId}/services`, { body: { manifest } })
+          }>('POST', `/fleets/${fleetId}/services`, {
+            body: { manifest, project: projectNameFor(process.cwd()) },
+          })
         ).body,
       {
         done: (b) =>
           b.created.length || b.updated.length
-            ? `applied ${b.created.length + b.updated.length} service(s)`
-            : 'no changes',
+            ? `applied ${b.created.length + b.updated.length} service(s) to project ${b.project}`
+            : `no changes in project ${b.project}`,
       }
     )
 
@@ -127,19 +131,37 @@ export const servicesCommand = {
     if (flags.json) return console.log(JSON.stringify(body.services, null, 2))
     if (!body.services.length) return console.log('No services. Run `fleet apply` with a fleet.yaml.')
 
-    console.log(
-      table(
-        ['service', 'url', 'placement', 'node', 'sha', 'status'],
-        body.services.map((s) => [
-          s.name + (s.persistentVolume ? c.dim(' ⛁') : ''),
-          s.domain ?? s.hostname ?? c.dim('—'),
-          s.placementPolicy,
-          s.current?.nodeName ?? c.dim('—'),
-          s.current?.gitSha?.slice(0, 7) ?? c.dim('—'),
-          s.current ? statusColour(s.current.status) : c.dim('not deployed'),
-        ])
+    // Grouped by project. A fleet.yaml describes a stack, and listing its
+    // services flat among somebody else's is how four related things came to
+    // look like four unrelated ones.
+    const byProject = new Map<string, Service[]>()
+    for (const s of body.services) {
+      const key = s.project || 'default'
+      const group = byProject.get(key) ?? []
+      group.push(s)
+      byProject.set(key, group)
+    }
+
+    for (const [project, group] of [...byProject].sort((a, b) => a[0].localeCompare(b[0]))) {
+      const running = group.filter((s) => s.current?.status === 'running').length
+      const ram = group.reduce((sum, s) => sum + s.requestRamMb, 0)
+      console.log(
+        `\n${c.bold(project)}  ${c.dim(`${running}/${group.length} running · ${mb(ram)}`)}`
       )
-    )
+      console.log(
+        table(
+          ['service', 'url', 'placement', 'node', 'sha', 'status'],
+          group.map((s) => [
+            s.name + (s.persistentVolume ? c.dim(' ⛁') : ''),
+            s.domain ?? s.hostname ?? c.dim('—'),
+            s.placementPolicy,
+            s.current?.nodeName ?? c.dim('—'),
+            s.current?.gitSha?.slice(0, 7) ?? c.dim('—'),
+            s.current ? statusColour(s.current.status) : c.dim('not deployed'),
+          ])
+        )
+      )
+    }
   },
 }
 

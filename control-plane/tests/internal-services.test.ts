@@ -307,3 +307,117 @@ services:
     assert.match(parsed.warnings[0]!, /DB_HOST/)
   })
 })
+
+describe('projects', () => {
+  test('a manifest can name itself', () => {
+    const parsed = parseManifest(`
+fleet: homelab
+project: muhdikhai
+services:
+  web: { image: nginx }
+`)
+    assert.equal(parsed.project, 'muhdikhai')
+  })
+
+  test('and does not have to', () => {
+    // Adding a required key would break every manifest already written.
+    const parsed = parseManifest('fleet: homelab\nservices:\n  web: { image: nginx }\n')
+    assert.equal(parsed.project, undefined)
+  })
+
+  test('a project name that could not be a service name is rejected', () => {
+    assert.throws(
+      () => parseManifest('fleet: homelab\nproject: "Not Valid"\nservices:\n  web: { image: nginx }\n'),
+      (err: Error) => /project names must be lowercase/.test(err.message)
+    )
+  })
+})
+
+describe('applying two projects into one fleet', () => {
+  let ctx: AppContext
+  let app: FastifyInstance
+  let token: string
+  let fleetId: string
+  let orgId: string
+  let userId: string
+
+  before(async () => {
+    ctx = createContext(loadConfig())
+    app = await buildServer(ctx)
+    const signup = await app.inject({
+      method: 'POST',
+      url: '/auth/signup',
+      payload: { email: `proj-${Date.now()}@example.test`, password: 'a-long-enough-password' },
+    })
+    const b = signup.json()
+    token = b.accessToken
+    fleetId = b.fleet.id
+    orgId = b.org.id
+    userId = b.user.id
+  })
+
+  after(async () => {
+    await app.close()
+    await ctx.db.delete(orgs).where(eq(orgs.id, orgId))
+    await ctx.db.delete(users).where(eq(users.id, userId))
+    await closeContext(ctx)
+  })
+
+  const apply = (manifest: string, project?: string) =>
+    app.inject({
+      method: 'POST',
+      url: `/fleets/${fleetId}/services`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { manifest, project },
+    })
+
+  test('services are tagged with the project they came from', async () => {
+    const res = await apply('fleet: homelab\nservices:\n  api: { image: nginx }\n  db: { image: postgres:16 }\n', 'muhdikhai')
+    assert.equal(res.statusCode, 200, res.body)
+    assert.equal(res.json().project, 'muhdikhai')
+
+    const rows = await ctx.db.select().from(services).where(eq(services.fleetId, fleetId))
+    assert.deepEqual(new Set(rows.map((r) => r.project)), new Set(['muhdikhai']))
+  })
+
+  test('a project: key in the manifest wins over the caller default', async () => {
+    // The file is portable; the directory name is a convenience.
+    const res = await apply(
+      'fleet: homelab\nproject: named-in-file\nservices:\n  worker: { image: alpine }\n',
+      'from-the-directory'
+    )
+    assert.equal(res.json().project, 'named-in-file')
+  })
+
+  test('applying another project does NOT warn about the first', async () => {
+    // The whole point. Computed across the fleet, "no longer in fleet.yaml"
+    // warned about every service belonging to somebody else's manifest.
+    const res = await apply('fleet: homelab\nservices:\n  site: { image: nginx }\n', 'otherproject')
+    assert.equal(res.statusCode, 200, res.body)
+
+    const body = res.json()
+    assert.equal(body.project, 'otherproject')
+    assert.deepEqual(body.orphaned, [], `warned about another project's services: ${body.orphaned}`)
+    assert.deepEqual(
+      body.warnings.filter((w: string) => /no longer/.test(w)),
+      []
+    )
+  })
+
+  test('but dropping a service from its own project still warns, and names the project', async () => {
+    const res = await apply('fleet: homelab\nservices:\n  api: { image: nginx }\n', 'muhdikhai')
+    const body = res.json()
+    assert.deepEqual(body.orphaned, ['db'])
+    assert.match(body.warnings.join('\n'), /"muhdikhai"/)
+  })
+
+  test('nothing was deleted — the other projects are untouched', async () => {
+    const rows = await ctx.db.select().from(services).where(eq(services.fleetId, fleetId))
+    const byProject = new Map<string, string[]>()
+    for (const r of rows) byProject.set(r.project, [...(byProject.get(r.project) ?? []), r.name].sort())
+
+    assert.deepEqual(byProject.get('muhdikhai')?.sort(), ['api', 'db'])
+    assert.deepEqual(byProject.get('named-in-file'), ['worker'])
+    assert.deepEqual(byProject.get('otherproject'), ['site'])
+  })
+})

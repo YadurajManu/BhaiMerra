@@ -140,6 +140,8 @@ export type Node = {
 export type Service = {
   id: string
   name: string
+  /** The manifest these services came from; the dashboard groups by it. */
+  project: string
   repoUrl: string | null
   placementPolicy: 'pinned' | 'preferred' | 'flexible'
   pinnedNodeId: string | null

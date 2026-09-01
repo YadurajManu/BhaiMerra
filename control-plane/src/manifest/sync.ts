@@ -9,6 +9,8 @@ import type { ParsedManifest } from './parse.js'
 const TIER = { any: 'opportunistic', opportunistic: 'opportunistic', standard: 'standard', high: 'high' } as const
 
 export type SyncResult = {
+  /** The project these services now belong to. */
+  project: string
   created: string[]
   updated: string[]
   /** In the fleet but no longer in the manifest — reported, never deleted. */
@@ -28,8 +30,15 @@ export async function syncManifest(
   fleetId: string,
   orgId: string,
   manifest: ParsedManifest,
-  actorUserId?: string
+  actorUserId?: string,
+  /**
+   * What to call this manifest's services when it does not name itself. The
+   * CLI passes the directory name, the way Compose does; the webhook passes
+   * the repository. Falls back to 'default' so nothing has to supply one.
+   */
+  fallbackProject?: string
 ): Promise<SyncResult> {
+  const project = manifest.project ?? fallbackProject ?? 'default'
   const [fleet] = await ctx.db
     .select({ name: fleets.name })
     .from(fleets)
@@ -63,6 +72,7 @@ export async function syncManifest(
     for (const svc of manifest.services) {
       const values = {
         fleetId,
+        project,
         name: svc.name,
         repoUrl: svc.repo ?? null,
         buildContext: svc.build ?? null,
@@ -117,21 +127,26 @@ export async function syncManifest(
       action: 'service.manifest_applied',
       targetType: 'fleet',
       targetId: fleetId,
-      metadata: { created, updated, services: manifest.services.length },
+      metadata: { project, created, updated, services: manifest.services.length },
     })
   })
 
+  // Scoped to this project. Computed across the whole fleet, "no longer in
+  // fleet.yaml" warned about every service belonging to somebody else's
+  // manifest — which is not a thing this apply could possibly have removed.
   const declared = new Set(manifest.services.map((s) => s.name))
-  const orphaned = existing.filter((s) => !declared.has(s.name)).map((s) => s.name)
+  const orphaned = existing
+    .filter((s) => s.project === project && !declared.has(s.name))
+    .map((s) => s.name)
 
   const warnings = [...manifest.warnings]
   if (orphaned.length) {
     warnings.push(
-      `${orphaned.join(', ')} ${orphaned.length === 1 ? 'is' : 'are'} no longer in fleet.yaml but still ` +
-        `${orphaned.length === 1 ? 'exists' : 'exist'} in the fleet. Nothing was deleted — remove ` +
-        `${orphaned.length === 1 ? 'it' : 'them'} explicitly if that was intended.`
+      `${orphaned.join(', ')} ${orphaned.length === 1 ? 'is' : 'are'} no longer in the "${project}" ` +
+        `manifest but still ${orphaned.length === 1 ? 'exists' : 'exist'} in the fleet. Nothing was ` +
+        `deleted — remove ${orphaned.length === 1 ? 'it' : 'them'} explicitly if that was intended.`
     )
   }
 
-  return { created, updated, orphaned, warnings }
+  return { project, created, updated, orphaned, warnings }
 }

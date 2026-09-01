@@ -50,6 +50,13 @@
       "when": 1787306000000,
       "tag": "0006_volume_paths_and_health",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1787307000000,
+      "tag": "0007_projects",
+      "breakpoints": true
     }
   ]
 }

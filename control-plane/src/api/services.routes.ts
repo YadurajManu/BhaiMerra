@@ -30,7 +30,18 @@ export async function serviceRoutes(app: FastifyInstance) {
     { preHandler: requireFleetPermission('service.create') },
     async (req, reply) => {
       const body = z
-        .object({ manifest: z.string().min(1, 'manifest is required') })
+        .object({
+          manifest: z.string().min(1, 'manifest is required'),
+          /**
+           * What to call these services when the manifest does not name itself.
+           * The CLI sends the directory name, the way Compose does. A `project:`
+           * key inside the manifest always wins.
+           */
+          project: z
+            .string()
+            .regex(/^[a-z0-9]([a-z0-9-]{0,46}[a-z0-9])?$/)
+            .optional(),
+        })
         .safeParse(req.body)
       if (!body.success) {
         throw ApiError.badRequest('missing_manifest', 'Send the fleet.yaml contents as { manifest }')
@@ -50,7 +61,14 @@ export async function serviceRoutes(app: FastifyInstance) {
         throw err
       }
 
-      const result = await syncManifest(app.ctx, fleetId, req.orgId!, parsed, req.userId)
+      const result = await syncManifest(
+        app.ctx,
+        fleetId,
+        req.orgId!,
+        parsed,
+        req.userId,
+        body.data.project
+      )
       return reply.code(200).send({ fleet: parsed.fleet, ...result })
     }
   )

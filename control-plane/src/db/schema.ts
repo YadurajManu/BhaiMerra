@@ -206,6 +206,15 @@ export const services = pgTable(
       .notNull()
       .references(() => fleets.id, { onDelete: 'cascade' }),
     name: text('name').notNull(),
+    /**
+     * The manifest this service came from. A fleet.yaml describes a stack, and
+     * without this the stack is lost the moment it is applied — four related
+     * services become four unrelated rows next to somebody else's.
+     *
+     * Also what scopes the orphan warning: "no longer in fleet.yaml" is only
+     * meaningful about the manifest being applied.
+     */
+    project: text('project').notNull().default('default'),
 
     repoUrl: text('repo_url'),
     buildContext: text('build_context'),
@@ -276,6 +285,7 @@ export const services = pgTable(
     // the database refuses it rather than the proxy guessing.
     uniqueIndex('services_hostname_key').on(t.hostname),
     uniqueIndex('services_domain_key').on(t.domain),
+    index('services_fleet_project_idx').on(t.fleetId, t.project),
   ]
 )
 
