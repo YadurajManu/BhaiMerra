@@ -2,7 +2,69 @@ import { useState, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { api, type Service } from '../lib/api'
 import { useAuth, usePoll } from '../lib/auth'
-import { mb, toneOf } from '../lib/format'
+import { mb, since, toneOf } from '../lib/format'
+
+/**
+ * What is going on with this service, in a sentence.
+ *
+ * The list used to render "not placed" for everything that was not currently
+ * running — accurate and useless. It could not do better, because the reason a
+ * deployment failed was never sent to the browser; finding out meant opening a
+ * shell on the node, which is the thing a control plane exists to avoid.
+ *
+ * `current` answers "is it up". `last` answers "and if not, what happened".
+ */
+function describeState(s: Service): {
+  label: string
+  tone: 'ok' | 'warn' | 'down' | 'idle'
+  when: string | null
+  detail: string | null
+  busy: boolean
+} {
+  const live = s.current?.status
+  if (live === 'running' || live === 'online') {
+    return { label: 'running', tone: 'ok', when: s.last ? since(s.last.startedAt) : null, detail: null, busy: false }
+  }
+  if (live === 'deploying') {
+    return { label: 'deploying', tone: 'warn', when: s.last ? since(s.last.startedAt) : null, detail: null, busy: true }
+  }
+  if (live === 'pinned_unavailable') {
+    return {
+      label: 'node unavailable',
+      tone: 'down',
+      when: s.last ? since(s.last.startedAt) : null,
+      // Not a failure of the service. Saying so prevents an hour spent
+      // debugging an application that never got the chance to start.
+      detail: `Pinned to ${s.last?.nodeName ?? 'a node'}, which is not reporting. A pinned service is deliberately never moved — its volume does not follow it.`,
+      busy: false,
+    }
+  }
+
+  if (!s.last) {
+    return { label: 'never deployed', tone: 'idle', when: null, detail: null, busy: false }
+  }
+  if (s.last.status === 'failed') {
+    return {
+      label: 'failed',
+      tone: 'down',
+      when: since(s.last.finishedAt ?? s.last.startedAt),
+      detail: s.last.failureReason,
+      busy: false,
+    }
+  }
+  if (s.last.status === 'superseded') {
+    return { label: 'stopped', tone: 'idle', when: since(s.last.startedAt), detail: null, busy: false }
+  }
+  return { label: s.last.status.replace(/_/g, ' '), tone: 'idle', when: since(s.last.startedAt), detail: null, busy: false }
+}
+
+/** A build failure carries a whole buildx transcript; lead with the sentence. */
+function summarise(reason: string): { head: string; rest: string | null } {
+  const lines = reason.split('\n').filter((l) => l.trim())
+  const head = lines[0] ?? reason
+  const rest = lines.length > 1 ? lines.slice(1).join('\n') : null
+  return { head: head.length > 200 ? `${head.slice(0, 197)}…` : head, rest }
+}
 import { Button, ConfirmDialog, Copyable, Dot, Empty, ErrorNote, Panel, StatusPill } from '../components/ui'
 
 const TEMPLATES: Record<string, string> = {
@@ -82,6 +144,8 @@ export default function Services() {
   const [actionError, setActionError] = useState<unknown>(null)
   const [actionSuccess, setActionSuccess] = useState<string | null>(null)
   const [copiedId, setCopiedId] = useState<string | null>(null)
+  /** Which service has its failure reason expanded. One at a time. */
+  const [openReason, setOpenReason] = useState<string | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<Service | null>(null)
 
   const services = useMemo(() => data?.services ?? [], [data])
@@ -396,7 +460,10 @@ export default function Services() {
             [
               ['ALL', `All (${services.length})`],
               ['RUNNING', `Running (${metrics.running})`],
-              ['STOPPED', `Stopped (${metrics.total - metrics.running})`],
+              // "Stopped" is something a person does on purpose. A service
+              // that failed its rollout did not stop, it broke, and calling
+              // both the same word hides the only distinction that matters.
+              ['STOPPED', `Not running (${metrics.total - metrics.running})`],
               ['FLEXIBLE', `Flexible`],
               ['PINNED', `Pinned`],
             ] as const
@@ -461,23 +528,71 @@ export default function Services() {
           </button>
         </div>
       ) : (
-        <div className="grid gap-8">
-          {projects.map((project) => (
-          <div key={project.name} className="grid gap-3">
-            {/* One manifest, one heading. */}
-            <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-[var(--color-line)] pb-2">
-              <div className="flex items-baseline gap-2.5">
-                <span className="font-mono text-[13px] font-semibold text-[var(--color-fg)]">
-                  {project.name}
-                </span>
-                <span className="font-mono text-[11px] text-[var(--color-fg-dim)]">
-                  {project.services.length} service{project.services.length === 1 ? '' : 's'}
-                </span>
+        <div className="grid gap-6">
+          {projects.map((project, projectIndex) => {
+          // A manifest is one thing. Four services from one fleet.yaml belong
+          // inside one frame, the way a repository holds its files — not as
+          // four free-floating cards that happen to sit near each other.
+          const allUp = project.running === project.services.length
+          const anyDown = project.services.some((s) => describeState(s).tone === 'down')
+          const edge = allUp
+            ? 'var(--color-signal)'
+            : anyDown
+              ? 'var(--color-down)'
+              : 'var(--color-warn)'
+
+          return (
+          <section
+            key={project.name}
+            className="rise-in overflow-hidden rounded-[6px] border border-[var(--color-line)] bg-[var(--color-ink-900)]"
+            style={{ animationDelay: `${Math.min(projectIndex, 6) * 55}ms` }}
+          >
+            {/* Project header — the stack's own summary line. */}
+            <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-[var(--color-line)] bg-[var(--color-ink-850)] px-5 py-3.5">
+              <div className="flex min-w-0 items-center gap-3">
+                <span
+                  aria-hidden="true"
+                  className="h-6 w-[3px] shrink-0 rounded-full"
+                  style={{ background: edge }}
+                />
+                <div className="min-w-0">
+                  <h2 className="truncate font-mono text-[14px] font-semibold tracking-tight text-[var(--color-fg)]">
+                    {project.name}
+                  </h2>
+                  <p className="mt-0.5 font-mono text-[10.5px] text-[var(--color-fg-dim)]">
+                    from fleet.yaml · {project.services.length} service{project.services.length === 1 ? '' : 's'}
+                  </p>
+                </div>
               </div>
-              <div className="flex items-center gap-3 font-mono text-[11px] text-[var(--color-fg-dim)]">
+
+              <div className="flex items-center gap-4 font-mono text-[11px]">
+                {/* A bar per service: the stack's health at a glance, before
+                    reading a single word. */}
+                <div className="flex items-center gap-1" title={`${project.running} of ${project.services.length} running`}>
+                  {project.services.map((s) => {
+                    const t = describeState(s)
+                    return (
+                      <span
+                        key={s.id}
+                        aria-hidden="true"
+                        className={`h-3.5 w-1.5 rounded-full ${t.busy ? 'breathe' : ''}`}
+                        style={{
+                          background:
+                            t.tone === 'ok'
+                              ? 'var(--color-signal)'
+                              : t.tone === 'down'
+                                ? 'var(--color-down)'
+                                : t.tone === 'warn'
+                                  ? 'var(--color-warn)'
+                                  : 'var(--color-line-2)',
+                        }}
+                      />
+                    )
+                  })}
+                </div>
                 <span
                   className={
-                    project.running === project.services.length
+                    allUp
                       ? 'text-[var(--color-signal)]'
                       : project.running === 0
                         ? 'text-[var(--color-fg-dim)]'
@@ -486,20 +601,27 @@ export default function Services() {
                 >
                   {project.running}/{project.services.length} running
                 </span>
-                <span>{mb(project.ram)}</span>
+                <span className="text-[var(--color-fg-dim)]">{mb(project.ram)}</span>
               </div>
-            </div>
+            </header>
 
-          {project.services.map((s) => {
+            <div className="divide-y divide-[var(--color-line)]">
+
+          {project.services.map((s, rowIndex) => {
             const url = s.domain || s.hostname ? `https://${s.domain ?? s.hostname}` : null
             const isRunning = s.current?.status === 'running' || s.current?.status === 'online'
             const isDeploying = busy === `deploy-${s.id}`
             const isRestarting = busy === `restart-${s.id}`
+            const state = describeState(s)
+            // An endpoint is only a link while something is answering on it.
+            const reachable = isRunning && Boolean(url)
+            const expanded = openReason === s.id
 
             return (
               <div
                 key={s.id}
-                className="panel flex flex-col justify-between gap-4 rounded-[4px] bg-[var(--color-ink-950)] p-5 transition-all duration-200 hover:border-[var(--color-line-2)]"
+                className="rise-in flex flex-col justify-between gap-4 bg-[var(--color-ink-950)] p-5 transition-colors duration-200 hover:bg-[var(--color-ink-900)]"
+                style={{ animationDelay: `${Math.min(rowIndex, 8) * 45}ms` }}
               >
                 {/* ── Top Header Row ─────────────────────────────── */}
                 <div className="flex flex-wrap items-start justify-between gap-3">
@@ -538,7 +660,9 @@ export default function Services() {
                       )}
                     </div>
 
-                    {/* Repository / Image Info */}
+                    {/* Where the image comes from. "Image: manual" told the
+                        reader nothing; the two real cases are a repository and
+                        a build context uploaded from a machine. */}
                     <div className="mt-1.5 flex flex-wrap items-center gap-3 font-mono text-[11px] text-[var(--color-fg-dim)]">
                       {s.repoUrl ? (
                         <a
@@ -548,42 +672,100 @@ export default function Services() {
                           className="truncate hover:text-[var(--color-fg-muted)]"
                           title="Open Git Repository"
                         >
-                          📦 {s.repoUrl.replace('https://github.com/', '')}
+                          {s.repoUrl.replace('https://github.com/', '')} ↗
                         </a>
                       ) : (
-                        <span>📦 Image: manual</span>
+                        <span title="Built from a context uploaded by the CLI, not from a connected repository">
+                          built from an uploaded context
+                        </span>
                       )}
+                      {state.when && <span title="When this deployment started">· {state.when}</span>}
                     </div>
                   </div>
 
-                  {/* Status Pill */}
-                  <div className="shrink-0">
-                    {s.current ? (
-                      <StatusPill status={s.current.status} />
+                  {/* State — and, when it is not good news, why. */}
+                  <div className="flex shrink-0 flex-col items-end gap-1.5">
+                    {isRunning ? (
+                      <StatusPill status={s.current!.status} />
                     ) : (
-                      <span className="inline-flex items-center gap-1.5 font-mono text-[10.5px] uppercase tracking-[0.1em] text-[var(--color-fg-dim)]">
-                        <Dot tone="idle" size={5} />
-                        not placed
+                      <span
+                        className={`inline-flex items-center gap-1.5 font-mono text-[10.5px] uppercase tracking-[0.1em] ${
+                          state.tone === 'down'
+                            ? 'text-[var(--color-down)]'
+                            : state.tone === 'warn'
+                              ? 'text-[var(--color-warn)]'
+                              : 'text-[var(--color-fg-dim)]'
+                        }`}
+                      >
+                        <Dot tone={state.tone} size={5} />
+                        <span className={state.busy ? 'breathe' : undefined}>{state.label}</span>
                       </span>
+                    )}
+                    {state.detail && (
+                      <button
+                        onClick={() => setOpenReason(expanded ? null : s.id)}
+                        aria-expanded={expanded}
+                        className="press font-mono text-[10.5px] text-[var(--color-fg-dim)] underline underline-offset-2 hover:text-[var(--color-fg-muted)]"
+                      >
+                        {expanded ? 'hide reason' : 'why?'}
+                      </button>
                     )}
                   </div>
                 </div>
 
+                {/* The reason, in the place a person is already looking. */}
+                {state.detail && (
+                  <div className="reveal -mt-1" data-open={expanded}>
+                    <div>
+                      <div className="rounded-[3px] border-l-2 border-[var(--color-down)] bg-[color-mix(in_oklab,var(--color-down)_6%,transparent)] px-3.5 py-3">
+                        <p className="font-mono text-[11.5px] leading-relaxed text-[var(--color-fg-muted)]">
+                          {summarise(state.detail).head}
+                        </p>
+                        {summarise(state.detail).rest && (
+                          <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-all border-t border-[var(--color-line)] pt-2 font-mono text-[10.5px] leading-relaxed text-[var(--color-fg-dim)]">
+                            {summarise(state.detail).rest}
+                          </pre>
+                        )}
+                        <Link
+                          to={`/logs?service=${s.id}`}
+                          className="mt-2.5 inline-block font-mono text-[10.5px] text-[var(--color-fg-muted)] underline underline-offset-2 hover:text-[var(--color-fg)]"
+                        >
+                          open the container logs →
+                        </Link>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {/* ── Middle Row: Public URL & Node Placement ────── */}
                 <div className="grid gap-3 rounded-[3px] border border-[var(--color-line)] bg-[var(--color-ink-900)] p-3.5 sm:grid-cols-[1fr_auto]">
                   <div className="min-w-0">
-                    <div className="mono-label text-[9px] mb-1 text-[var(--color-fg-dim)]">PUBLIC ENDPOINT</div>
+                    <div className="mono-label text-[9px] mb-1 text-[var(--color-fg-dim)]">
+                      {url ? 'PUBLIC ENDPOINT' : 'REACHABLE AS'}
+                    </div>
                     {url ? (
                       <div className="flex items-center gap-2.5">
+                        {/* Presenting a dead URL in signal green, with a Copy
+                            button, is the page telling you something works
+                            when it does not. */}
                         <a
                           href={url}
                           target="_blank"
                           rel="noreferrer"
-                          className="truncate font-mono text-[12px] text-[var(--color-signal)] transition-colors hover:underline hover:text-[#55ee9c]"
-                          title="Open live endpoint in browser"
+                          className={`truncate font-mono text-[12px] transition-colors hover:underline ${
+                            reachable
+                              ? 'text-[var(--color-signal)] hover:text-[#55ee9c]'
+                              : 'text-[var(--color-fg-dim)] line-through decoration-[var(--color-line-2)]'
+                          }`}
+                          title={reachable ? 'Open live endpoint in browser' : 'Nothing is serving this address right now'}
                         >
                           {url} ↗
                         </a>
+                        {!reachable && (
+                          <span className="shrink-0 font-mono text-[9.5px] uppercase tracking-[0.1em] text-[var(--color-warn)]">
+                            not serving
+                          </span>
+                        )}
                         <button
                           onClick={() => {
                             void navigator.clipboard?.writeText(url)
@@ -591,13 +773,22 @@ export default function Services() {
                             setTimeout(() => setCopiedId(null), 2000)
                           }}
                           title="Copy URL"
-                          className="shrink-0 rounded-[2px] border border-[var(--color-line-2)] px-1.5 py-0.5 font-mono text-[9.5px] text-[var(--color-fg-dim)] transition-colors hover:border-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
+                          className={`press shrink-0 rounded-[2px] border px-1.5 py-0.5 font-mono text-[9.5px] ${
+                            copiedId === s.id
+                              ? 'border-[var(--color-signal-dim)] text-[var(--color-signal)]'
+                              : 'border-[var(--color-line-2)] text-[var(--color-fg-dim)] hover:border-[var(--color-fg-muted)] hover:text-[var(--color-fg)]'
+                          }`}
                         >
                           {copiedId === s.id ? '✓ Copied' : 'Copy'}
                         </button>
                       </div>
                     ) : (
-                      <span className="font-mono text-[11px] text-[var(--color-fg-dim)]">No public domain attached</span>
+                      // An internal service has no public address by design.
+                      // "No public domain attached" framed that as a lack.
+                      <span className="font-mono text-[11px] text-[var(--color-fg-muted)]">
+                        <span className="text-[var(--color-fg)]">{s.name}</span>
+                        <span className="text-[var(--color-fg-dim)]"> — private to the fleet network</span>
+                      </span>
                     )}
                   </div>
 
@@ -621,10 +812,16 @@ export default function Services() {
                       <span>{mb(s.requestRamMb)}</span>
                     </div>
 
-                    <div>
-                      <span className="block mono-label text-[9px] text-[var(--color-fg-dim)]">REPLICAS</span>
-                      <span>{s.replicas}</span>
-                    </div>
+                    {/* Only shown when it says something. A permanent
+                        "REPLICAS 1" is a column of noise — and the scheduler
+                        does not act on this number yet, so advertising it on
+                        every row promises behaviour that does not exist. */}
+                    {s.replicas > 1 && (
+                      <div>
+                        <span className="block mono-label text-[9px] text-[var(--color-fg-dim)]">REPLICAS</span>
+                        <span>{s.replicas}</span>
+                      </div>
+                    )}
 
                     {s.current?.gitSha && (
                       <div>
@@ -671,19 +868,25 @@ export default function Services() {
                       <button
                         onClick={() => void restart(s)}
                         disabled={busy !== null || !isRunning}
-                        title={!isRunning ? 'Service is not running' : 'Restart container on current node'}
-                        className="inline-flex items-center gap-1.5 rounded-[3px] border border-[var(--color-line-2)] bg-[var(--color-ink-900)] px-3 py-1 font-mono text-[11px] text-[var(--color-fg-muted)] transition-colors hover:border-[var(--color-fg-dim)] hover:text-[var(--color-fg)] disabled:opacity-40 disabled:cursor-not-allowed"
+                        // A disabled control with no explanation is
+                        // indistinguishable from a broken one.
+                        title={
+                          !isRunning
+                            ? 'Nothing is running to restart — use Deploy'
+                            : 'Replace the container on its current node'
+                        }
+                        className="press inline-flex items-center gap-1.5 rounded-[3px] border border-[var(--color-line-2)] bg-[var(--color-ink-900)] px-3 py-1 font-mono text-[11px] text-[var(--color-fg-muted)] hover:border-[var(--color-fg-dim)] hover:text-[var(--color-fg)] disabled:opacity-40 disabled:cursor-not-allowed"
                       >
-                        {isRestarting ? 'Restarting…' : '⚡ Restart'}
+                        {isRestarting ? <span className="breathe">Restarting…</span> : '⚡ Restart'}
                       </button>
 
                       <Button
                         variant={isRunning ? 'ghost' : 'primary'}
                         onClick={() => void deploy(s)}
                         disabled={busy !== null}
-                        className="h-[30px] px-3.5 text-[11px]"
+                        className={`press h-[30px] px-3.5 text-[11px] ${isDeploying ? 'shimmer' : ''}`}
                       >
-                        {isDeploying ? 'Deploying…' : isRunning ? '🚀 Redeploy' : '🚀 Deploy'}
+                        {isDeploying ? <span className="breathe">Deploying…</span> : isRunning ? '🚀 Redeploy' : '🚀 Deploy'}
                       </Button>
 
                       {canEdit && (
@@ -702,8 +905,10 @@ export default function Services() {
               </div>
             )
           })}
-          </div>
-          ))}
+            </div>
+          </section>
+          )
+          })}
         </div>
       )}
 

@@ -155,6 +155,19 @@ export type Service = {
   minReliabilityTier: string
   compatibleArches: string[]
   current: { nodeId: string | null; nodeName: string | null; status: string; gitSha: string | null } | null
+  /**
+   * The most recent deployment whatever its outcome, so a service that is not
+   * running can still say what happened to it and when. `current` is null in
+   * exactly that case, which is why it cannot answer this on its own.
+   */
+  last: {
+    status: string
+    failureReason: string | null
+    startedAt: string
+    finishedAt: string | null
+    nodeName: string | null
+    gitSha: string | null
+  } | null
 }
 
 export type PlacementMapNode = {

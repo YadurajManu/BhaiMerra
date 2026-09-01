@@ -117,6 +117,69 @@
 }
 .fade-up { animation: fade-up 0.45s cubic-bezier(0.16, 1, 0.3, 1) both; }
 
+/* ── micro-interaction ────────────────────────────────────────────
+   Motion here is only ever used to explain a change: what arrived,
+   what is still working, what just failed. Nothing moves for
+   decoration, and every one of these is switched off wholesale by the
+   reduced-motion block at the end of this file. */
+
+/* A card entering a list. Staggered by index so a group of services
+   reads as one thing arriving in order rather than four at once. */
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.995); }
+  to   { opacity: 1; transform: none; }
+}
+.rise-in {
+  animation: rise-in 0.42s var(--ease-out-expo) both;
+}
+
+/* Work in progress, on a control that is waiting for the server. */
+@keyframes shimmer {
+  to { background-position: 200% 0; }
+}
+.shimmer {
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in oklab, var(--color-signal) 12%, transparent) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.4s linear infinite;
+}
+
+/* A row whose state just changed, so the eye lands on it. */
+@keyframes flash-signal {
+  from { background-color: color-mix(in oklab, var(--color-signal) 14%, transparent); }
+  to   { background-color: transparent; }
+}
+.flash-signal { animation: flash-signal 1.1s var(--ease-out-expo) both; }
+
+/* The one thing that should keep moving: something is still deploying. */
+@keyframes breathe {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.45; }
+}
+.breathe { animation: breathe 1.6s ease-in-out infinite; }
+
+/* Disclosure for a failure reason: height cannot be transitioned from
+   auto, and a fixed max-height either clips a long reason or leaves a
+   gap after a short one. Grid rows interpolate correctly for both. */
+.reveal {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.28s var(--ease-out-expo);
+}
+.reveal[data-open='true'] { grid-template-rows: 1fr; }
+.reveal > * { overflow: hidden; }
+
+/* Press feedback. Buttons that do something to a live service should
+   feel like a physical control rather than a link. */
+.press {
+  transition: transform 0.12s var(--ease-out-expo), border-color 0.16s, color 0.16s, background-color 0.16s;
+}
+.press:active:not(:disabled) { transform: translateY(1px) scale(0.985); }
+
 @keyframes dash-flow {
   to { stroke-dashoffset: -40; }
 }

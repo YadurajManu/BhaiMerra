@@ -126,8 +126,37 @@ export async function serviceRoutes(app: FastifyInstance) {
         )
       const byService = new Map(live.map((d) => [d.serviceId, d]))
 
+      // The most recent deployment whatever its outcome.
+      //
+      // `current` only ever holds a live state, so a service whose deployment
+      // failed has `current: null` and renders as "not placed" — accurate, and
+      // useless. The reason it failed is sitting in this table; without it the
+      // only way to learn why a service is down was to open a shell on the
+      // node, which is precisely what a control plane exists to avoid.
+      const lastRows = rows.length
+        ? await db
+            .selectDistinctOn([deployments.serviceId], {
+              serviceId: deployments.serviceId,
+              status: deployments.status,
+              failureReason: deployments.failureReason,
+              startedAt: deployments.startedAt,
+              finishedAt: deployments.finishedAt,
+              nodeName: nodes.name,
+              gitSha: deployments.gitSha,
+            })
+            .from(deployments)
+            .leftJoin(nodes, eq(nodes.id, deployments.nodeId))
+            .where(inArray(deployments.serviceId, rows.map((r) => r.id)))
+            .orderBy(deployments.serviceId, desc(deployments.startedAt))
+        : []
+      const lastByService = new Map(lastRows.map((d) => [d.serviceId, d]))
+
       return {
-        services: rows.map((s) => ({ ...s, current: byService.get(s.id) ?? null })),
+        services: rows.map((s) => ({
+          ...s,
+          current: byService.get(s.id) ?? null,
+          last: lastByService.get(s.id) ?? null,
+        })),
       }
     }
   )
