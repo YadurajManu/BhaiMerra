@@ -117,6 +117,11 @@ type DesiredState struct {
 	NodeID      string           `json:"node_id"`
 	GeneratedAt string           `json:"generated_at"`
 	Services    []DesiredService `json:"services"`
+	// Docker's X-Registry-Auth payload for the fleet registry, or empty when it
+	// needs no credentials. A registry reachable from outside the LAN has to
+	// require them, and without this the pull fails with a 401 the node cannot
+	// do anything about.
+	RegistryAuth string `json:"registry_auth,omitempty"`
 }
 
 // APIError carries the control plane's machine-readable code so the agent can

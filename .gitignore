@@ -8,6 +8,10 @@
 *.key
 !**/testdata/**/*.key
 
+# Registry credentials. Bcrypt hashes, but they are still the thing standing
+# between a publicly reachable registry and anyone who wants to push to it.
+deploy/registry-auth/
+
 # agent state — contains the node's long-lived credential
 agent.json
 *.agent.json

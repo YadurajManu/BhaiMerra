@@ -17,6 +17,8 @@ export class BuildxRunner implements BuildRunner {
   constructor(
     private readonly opts: {
       registry?: string
+      /** "username:password" for a registry that requires them. */
+      credentials?: string
       builder?: string
       /** Root the build context must stay inside. */
       workdir: string
@@ -52,10 +54,58 @@ export class BuildxRunner implements BuildRunner {
     }
   }
 
+  /**
+   * Authenticate against the registry before pushing.
+   *
+   * A registry reachable from outside the LAN has to require credentials, and
+   * `REGISTRY_CREDENTIALS` has been in the config schema since the beginning
+   * without anything reading it — so a push to an authenticated registry
+   * failed with a 401 that looked like a build error.
+   *
+   * The password goes in on stdin. As an argument it would be visible in `ps`
+   * to every user on the host and recorded in any process accounting.
+   */
+  private async login(): Promise<void> {
+    const credentials = this.opts.credentials
+    const registry = this.opts.registry
+    if (!credentials || !registry) return
+
+    const separator = credentials.indexOf(':')
+    if (separator < 1) {
+      throw new BuildUnavailableError(
+        'REGISTRY_CREDENTIALS must be "username:password"'
+      )
+    }
+    const username = credentials.slice(0, separator)
+    const password = credentials.slice(separator + 1)
+
+    // `run` resolves with the exit code rather than throwing on a non-zero
+    // one, so a failed login has to be checked for, not caught.
+    let code: number
+    try {
+      ;({ code } = await run(
+        'docker',
+        ['login', registry, '--username', username, '--password-stdin'],
+        { timeoutMs: 30_000, stdin: password }
+      ))
+    } catch {
+      code = 1
+    }
+
+    if (code !== 0) {
+      // Deliberately does not include docker's output: it echoes the registry
+      // address and can include the credential on some versions.
+      throw new BuildUnavailableError(
+        `could not sign in to the registry at ${registry} as "${username}". Check REGISTRY_CREDENTIALS.`
+      )
+    }
+  }
+
   async build(req: BuildRequest): Promise<BuildResult> {
     if (!(await this.available())) {
       throw new BuildUnavailableError('docker buildx is not available on the control plane host')
     }
+    await this.login()
 
     const context = await this.resolveContext(req.buildContext, req.contextRoot)
 
@@ -251,10 +301,18 @@ export function parseBuildLine(line: string): BuildProgress | null {
 function run(
   command: string,
   args: string[],
-  opts: { timeoutMs: number; onLine?: (line: string) => void }
+  opts: { timeoutMs: number; onLine?: (line: string) => void; stdin?: string }
 ): Promise<{ stdout: string; stderr: string; code: number }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'] })
+
+    // stdin is always a pipe and always closed straight away. Closing it is
+    // what 'ignore' would have achieved — the child reads EOF — and keeping
+    // the shape fixed is what lets stdout and stderr be typed as streams.
+    child.stdin.on('error', () => {
+      /* the close handler reports why the process went away */
+    })
+    child.stdin.end(opts.stdin ?? '')
     // Let the streams do the UTF-8 decoding, so a chunk boundary falling inside
     // a multi-byte character cannot turn it into a replacement glyph.
     child.stdout.setEncoding('utf8')

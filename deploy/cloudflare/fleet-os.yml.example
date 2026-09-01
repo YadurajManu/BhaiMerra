@@ -58,6 +58,23 @@ ingress:
   #
   # Explicit records on the zone still win over a wildcard, so anything else
   # already on plastikworld.xyz keeps working.
+  #
+  # The image registry, so nodes that are not on this LAN can pull. Above the
+  # wildcard on purpose: cloudflared matches these top to bottom, and
+  # "*.REPLACE_ZONE" would otherwise swallow image pulls into the ingress edge.
+  #
+  # Cloudflare terminates TLS, so a node reaches the registry over https and
+  # needs no insecure-registries entry — which is the whole reason this beats
+  # publishing a port on the LAN. It also means the registry is reachable from
+  # the internet, so run deploy/setup-registry-auth.sh first: registry:2 has no
+  # access control of its own, and without credentials anyone who finds the
+  # address can pull every image you have built and push whatever they like.
+  - hostname: fleetregistry.REPLACE_ZONE
+    service: http://registry:5000
+    originRequest:
+      # Image layers are large; a slow uplink must not time out a push.
+      connectTimeout: 60s
+
   - hostname: "*.REPLACE_ZONE"
     service: http://control-plane:8081
 

@@ -52,13 +52,27 @@ services:
     image: registry:2
     container_name: fleet-registry
     restart: unless-stopped
+    environment:
+      # Authentication, because a registry reachable from outside the LAN is
+      # otherwise readable *and writable* by anyone who finds the address —
+      # registry:2 has no access control of its own. The htpasswd file is
+      # generated at setup and is not in the repository.
+      REGISTRY_AUTH: htpasswd
+      REGISTRY_AUTH_HTPASSWD_REALM: 'Fleet OS registry'
+      REGISTRY_AUTH_HTPASSWD_PATH: /auth/htpasswd
     ports:
       # Published because the agents on your other machines pull from it.
       - '${REGISTRY_PORT:-5001}:5000'
     volumes:
       - registrydata:/var/lib/registry
+      - ./registry-auth:/auth:ro
     healthcheck:
-      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:5000/v2/ >/dev/null || exit 1']
+      # 401 means the registry is up and asking for credentials, which is
+      # exactly healthy. A plain `wget -qO-` exits non-zero on it and would
+      # report an authenticated registry as broken.
+      test:
+        - CMD-SHELL
+        - 'wget -S -O /dev/null http://127.0.0.1:5000/v2/ 2>&1 | grep -qE "HTTP/1.1 (200|401)"'
       interval: 10s
       timeout: 5s
       retries: 5
@@ -85,6 +99,10 @@ services:
       # Agents pull by this address, so it must be what *they* can reach —
       # not "registry", which only resolves inside this compose network.
       REGISTRY_URL: ${REGISTRY_URL:?set REGISTRY_URL to a host:port your agents can reach}
+      # "username:password". The control plane signs in before pushing, and
+      # hands the same credential to agents in their desired state so they can
+      # pull. Leave empty for a registry that needs none.
+      REGISTRY_CREDENTIALS: ${REGISTRY_CREDENTIALS:-}
       BUILDX_BUILDER: ${BUILDX_BUILDER:-}
       BUILD_WORKDIR: /var/lib/fleet-os/builds
       INSTALL_SCRIPT_PATH: /app/install/install.sh

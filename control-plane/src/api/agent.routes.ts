@@ -58,6 +58,30 @@ const heartbeat = z.object({
   logs: z.array(z.object({ service: z.string().max(128), text: z.string().max(32_000) })).max(50).default([]),
 })
 
+/**
+ * The credential a node needs to pull from the fleet registry.
+ *
+ * Docker's own X-Registry-Auth shape, which is what the agent base64-encodes
+ * onto the pull. Returns null when the registry needs no credentials, so an
+ * unauthenticated local registry keeps working with nothing configured.
+ */
+function registryAuth(config: {
+  REGISTRY_URL?: string
+  REGISTRY_CREDENTIALS?: string
+}): string | null {
+  const { REGISTRY_URL, REGISTRY_CREDENTIALS } = config
+  if (!REGISTRY_URL || !REGISTRY_CREDENTIALS) return null
+
+  const separator = REGISTRY_CREDENTIALS.indexOf(':')
+  if (separator < 1) return null
+
+  return JSON.stringify({
+    username: REGISTRY_CREDENTIALS.slice(0, separator),
+    password: REGISTRY_CREDENTIALS.slice(separator + 1),
+    serveraddress: REGISTRY_URL,
+  })
+}
+
 /** Slug a hostname into something usable and stable as a node name. */
 function slugify(input: string): string {
   return input.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'node'
@@ -404,6 +428,10 @@ export async function agentRoutes(app: FastifyInstance) {
     return {
       node_id: nodeId,
       generated_at: new Date().toISOString(),
+      // A registry that nodes reach from outside the LAN has to require
+      // credentials, and the node cannot pull without them. Sent on the same
+      // terms as a secret: over TLS, to a caller that proved it is this node.
+      registry_auth: registryAuth(app.ctx.config),
       services: withEnv.map(({ row: r, env }) => ({
         name: r.service,
         deployment_id: r.deploymentId,

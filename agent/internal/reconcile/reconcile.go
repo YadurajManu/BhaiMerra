@@ -104,7 +104,7 @@ func (e *Engine) Reconcile(ctx context.Context, desired *client.DesiredState) ([
 			removed[existing.ID] = struct{}{}
 		}
 
-		if err := e.start(ctx, svc); err != nil {
+		if err := e.start(ctx, svc, desired.RegistryAuth); err != nil {
 			actions = append(actions, Action{svc.Name, "failed", err.Error()})
 			continue
 		}
@@ -138,11 +138,14 @@ func (e *Engine) Reconcile(ctx context.Context, desired *client.DesiredState) ([
 	return actions, nil
 }
 
-func (e *Engine) start(ctx context.Context, svc client.DesiredService) error {
+func (e *Engine) start(ctx context.Context, svc client.DesiredService, registryAuth string) error {
 	pullCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 
-	if err := e.Docker.Pull(pullCtx, svc.Image, ""); err != nil {
+	// The credential is passed through, never logged. A registry the fleet
+	// reaches from outside the LAN requires one, and an empty string is the
+	// correct value for a local registry that does not.
+	if err := e.Docker.Pull(pullCtx, svc.Image, registryAuth); err != nil {
 		return fmt.Errorf("pull: %w", err)
 	}
 

@@ -29,6 +29,7 @@ export function createContext(config: Config): AppContext {
   )
   const builds = new BuildxRunner({
     registry: config.REGISTRY_URL,
+    credentials: config.REGISTRY_CREDENTIALS,
     builder: config.BUILDX_BUILDER,
     workdir: config.BUILD_WORKDIR,
     pushToRegistry: Boolean(config.REGISTRY_URL),
