@@ -40,6 +40,11 @@ const (
 const preferredAPI = "1.44"
 
 type Client struct {
+	// Image used to mount a volume for backup and restore. Any image already on
+	// the node will do — nothing is executed inside the container, it exists
+	// only to give the volume a mount point Docker can copy through.
+	RestoreImage string
+
 	http *http.Client
 	// Where the daemon was looked for, for diagnostics.
 	host      string

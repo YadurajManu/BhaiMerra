@@ -24,6 +24,7 @@ export const reliabilityTier = pgEnum('reliability_tier', ['opportunistic', 'sta
 export const placementPolicy = pgEnum('placement_policy', ['pinned', 'preferred', 'flexible'])
 export const reclaimPolicy = pgEnum('reclaim_policy', ['eager', 'idle', 'manual'])
 export const backupStatus = pgEnum('backup_status', ['pending', 'running', 'complete', 'failed'])
+export const restoreStatus = pgEnum('restore_status', ['pending', 'running', 'complete', 'failed'])
 
 export const deploymentStatus = pgEnum('deployment_status', [
   'queued',
@@ -508,3 +509,39 @@ export const serviceRelations = relations(services, ({ one, many }) => ({
   fleet: one(fleets, { fields: [services.fleetId], references: [fleets.id] }),
   deployments: many(deployments),
 }))
+
+/**
+ * Putting a backup back.
+ *
+ * Its own job rather than a field on the backup, because the same archive can
+ * legitimately be restored more than once — onto a rebuilt node, into a fresh
+ * volume, twice in an afternoon while something is being debugged. Recorded on
+ * the backup row it would keep only the last attempt and lose exactly the
+ * history that matters when a restore goes wrong.
+ */
+export const restores = pgTable(
+  'restores',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    backupId: uuid('backup_id')
+      .notNull()
+      .references(() => backups.id, { onDelete: 'cascade' }),
+    serviceId: uuid('service_id')
+      .notNull()
+      .references(() => services.id, { onDelete: 'cascade' }),
+    /** Not necessarily the node the backup came from — restoring onto a
+     *  replacement machine is the case this exists for. */
+    nodeId: uuid('node_id').references(() => nodes.id, { onDelete: 'set null' }),
+    volumeName: text('volume_name').notNull(),
+    status: restoreStatus('status').notNull().default('pending'),
+    failureReason: text('failure_reason'),
+    requestedByUserId: uuid('requested_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    startedAt: timestamp('started_at', { withTimezone: true }),
+    finishedAt: timestamp('finished_at', { withTimezone: true }),
+  },
+  (t) => [
+    index('restores_service_idx').on(t.serviceId, t.createdAt),
+    index('restores_pending_idx').on(t.nodeId, t.status),
+  ]
+)

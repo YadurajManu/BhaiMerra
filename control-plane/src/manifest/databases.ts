@@ -138,6 +138,8 @@ export type DatabaseDecl = {
   user: string
   ramMb?: number
   cpu?: number
+  /** How often to back its volume up: hourly, daily, weekly. */
+  backup?: string
 }
 
 /** `postgres@16` → engine and tag. A bare name takes the engine's default. */
@@ -253,5 +255,6 @@ export function expandDatabase(
     // The health prober speaks HTTP and a database does not. Its readiness
     // shows up as the services that depend on it becoming healthy.
     health: { disabled: true },
+    ...(db.backup ? { backup: db.backup } : {}),
   }
 }

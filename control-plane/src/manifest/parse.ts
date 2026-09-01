@@ -179,6 +179,13 @@ const serviceFields = z
     anti_affinity: z.array(z.string()).default([]),
     tags: z.array(z.string()).default([]),
     reclaim: z.enum(['eager', 'idle', 'manual']).optional(),
+    /**
+     * How often to back this service's volume up unasked.
+     *
+     * A backup you have to remember to take is one that gets taken twice and
+     * then forgotten, which is the same as none on the day it matters.
+     */
+    backup: z.enum(['hourly', 'daily', 'weekly']).optional(),
   })
 
 const serviceSchema = serviceFields
@@ -252,6 +259,8 @@ const databaseSchema = z.object({
   /** The database to create. Defaults to the declaration's own name. */
   database: z.string().min(1).optional(),
   user: z.string().min(1).optional(),
+  /** How often to copy its volume off the node. */
+  backup: z.enum(['hourly', 'daily', 'weekly']).optional(),
   /**
    * Deliberately not the service `resources` schema.
    *
@@ -395,6 +404,7 @@ export function parseManifest(source: string, project?: string): ParsedManifest 
       user: body.user ?? spec.defaultUser,
       ramMb: body.resources?.ram,
       cpu: body.resources?.cpu,
+      backup: body.backup,
     }
     declared.set(name, decl)
     // Volumes are global to a node, so the project scopes the name. Two
@@ -515,6 +525,12 @@ export function parseManifest(source: string, project?: string): ParsedManifest 
         `services.${svc.name}: ${svc.replicas} replicas would share one volume "${svc.volume}", so ` +
           `Fleet will not scale it — two processes writing one data directory corrupt it. ` +
           `It runs as a single copy.`
+      )
+    }
+    if (svc.backup && !svc.volume) {
+      warnings.push(
+        `services.${svc.name}: asks for ${svc.backup} backups but has no volume. ` +
+          `Its image and manifest already describe everything it holds, so nothing would be captured.`
       )
     }
     if (svc.placement === 'pinned' && svc.replicas > 1) {

@@ -2,14 +2,18 @@ import { createReadStream } from 'node:fs'
 import { and, desc, eq } from 'drizzle-orm'
 import { z } from 'zod'
 import type { FastifyInstance } from 'fastify'
-import { backups, services } from '../db/schema.js'
+import { backups, restores, services } from '../db/schema.js'
 import {
   artifactPath,
   completeBackup,
+  completeRestore,
   deleteBackup,
   failBackup,
+  failRestore,
+  markRestoreRunning,
   markRunning,
   requestBackup,
+  requestRestore,
 } from '../backup/store.js'
 import { recordAudit } from '../lib/audit.js'
 import { ApiError } from './errors.js'
@@ -195,6 +199,98 @@ export async function backupRoutes(app: FastifyInstance) {
 
     await failBackup(app.ctx, backupId, body.reason)
     req.log.warn({ backupId, reason: body.reason }, 'node reported a failed backup')
+    return { ok: true }
+  })
+
+  /* ── restore ─────────────────────────────────────────────────── */
+
+  app.post(
+    '/fleets/:fleetId/backups/:backupId/restore',
+    { preHandler: requireFleetPermission('service.deploy') },
+    async (req, reply) => {
+      const { fleetId, backupId } = req.params as { fleetId: string; backupId: string }
+      const [found] = await db
+        .select({ backup: backups, service: services })
+        .from(backups)
+        .innerJoin(services, eq(services.id, backups.serviceId))
+        .where(and(eq(backups.id, backupId), eq(services.fleetId, fleetId)))
+        .limit(1)
+      if (!found) throw ApiError.notFound('Backup')
+
+      const row = await requestRestore(app.ctx, found.backup, found.service, { userId: req.userId })
+
+      await recordAudit(db, {
+        orgId: req.orgId!,
+        actorUserId: req.userId,
+        action: 'backup.restored',
+        targetType: 'service',
+        targetId: found.service.id,
+        metadata: { restore: row.id, backup: backupId, volume: row.volumeName },
+      })
+
+      return reply.code(202).send({
+        restore: row,
+        note: 'Queued. The node writes the archive into the volume on its next poll.',
+      })
+    }
+  )
+
+  app.get(
+    '/fleets/:fleetId/services/:serviceId/restores',
+    { preHandler: requireFleetPermission('service.read') },
+    async (req) => {
+      const { fleetId, serviceId } = req.params as { fleetId: string; serviceId: string }
+      await loadService(serviceId, fleetId)
+      const rows = await db
+        .select()
+        .from(restores)
+        .where(eq(restores.serviceId, serviceId))
+        .orderBy(desc(restores.createdAt))
+        .limit(25)
+      return { restores: rows }
+    }
+  )
+
+  /** The archive, for the node that is restoring it. */
+  app.get('/agent/restores/:restoreId/archive', { preHandler: requireAgent }, async (req, reply) => {
+    const { restoreId } = req.params as { restoreId: string }
+    const [row] = await db
+      .select({ restore: restores, backup: backups })
+      .from(restores)
+      .innerJoin(backups, eq(backups.id, restores.backupId))
+      .where(and(eq(restores.id, restoreId), eq(restores.nodeId, req.agentNodeId!)))
+      .limit(1)
+    if (!row || !row.backup.storageLocation) throw ApiError.notFound('Restore')
+
+    await markRestoreRunning(app.ctx, restoreId)
+    const full = artifactPath(app.ctx.config.BACKUP_DIR, row.backup.storageLocation)
+    return reply.header('content-type', 'application/gzip').send(createReadStream(full))
+  })
+
+  app.post('/agent/restores/:restoreId/done', { preHandler: requireAgent }, async (req) => {
+    const { restoreId } = req.params as { restoreId: string }
+    const [row] = await db
+      .select({ id: restores.id })
+      .from(restores)
+      .where(and(eq(restores.id, restoreId), eq(restores.nodeId, req.agentNodeId!)))
+      .limit(1)
+    if (!row) throw ApiError.notFound('Restore')
+    await completeRestore(app.ctx, restoreId)
+    req.log.info({ restoreId }, 'restore complete')
+    return { ok: true }
+  })
+
+  app.post('/agent/restores/:restoreId/fail', { preHandler: requireAgent }, async (req) => {
+    const { restoreId } = req.params as { restoreId: string }
+    const body = z.object({ reason: z.string().max(4000) }).parse(req.body ?? {})
+    const [row] = await db
+      .select({ id: restores.id })
+      .from(restores)
+      .where(and(eq(restores.id, restoreId), eq(restores.nodeId, req.agentNodeId!)))
+      .limit(1)
+    if (!row) throw ApiError.notFound('Restore')
+    await failRestore(app.ctx, restoreId, body.reason)
+    req.log.warn({ restoreId, reason: body.reason }, 'node reported a failed restore')
     return { ok: true }
   })
 }

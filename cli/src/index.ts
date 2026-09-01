@@ -57,6 +57,7 @@ const GROUPS: Array<[string, Array<[string, string]>]> = [
       ['secrets rm <KEY>', 'Remove a stored credential'],
       ['backup <service>', "Copy a service's volume off the node holding it"],
       ['backups <service>', 'List backups, newest first'],
+      ['restore <service> [id]', 'Write a backup back into the volume; service must be stopped'],
       ['nodes cordon <name>', 'Stop scheduling new work onto a node'],
       ['nodes uncordon <name>', 'Allow scheduling again'],
       ['nodes rm <name>', 'Revoke and remove a node'],

@@ -257,6 +257,18 @@ func runReconciler(ctx context.Context, engine *reconcile.Engine, api *client.Cl
 			}
 			backups.Run(ctx, jobs)
 		}
+
+		// Restores last. The service is stopped for one — the control plane
+		// refuses to queue it otherwise — so there is nothing to keep serving
+		// while this runs, and doing it after reconciliation means the volume
+		// is not being recreated underneath the write.
+		if len(desired.Restores) > 0 {
+			jobs := make([]backup.RestoreJob, 0, len(desired.Restores))
+			for _, r := range desired.Restores {
+				jobs = append(jobs, backup.RestoreJob{ID: r.ID, Volume: r.Volume, Service: r.Service})
+			}
+			backups.Restore(ctx, jobs)
+		}
 		logCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		reporter.CaptureLogs(logCtx, desired)
 		cancel()

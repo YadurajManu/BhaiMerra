@@ -107,6 +107,41 @@ removed — no shell, no tar binary, and nothing that can misbehave while a
 database is live on the other side of the same volume. The image used is the
 one the service already runs, so a backup never waits on a pull.
 
+### Restoring
+
+```bash
+fleet restore db            # the most recent backup
+fleet restore db a1b2c3d4   # a specific one, by id prefix
+```
+
+**The service must be stopped.** Writing a data directory underneath a process
+that is using it produces a volume that is neither the old state nor the new
+one, and the corruption surfaces much later as unreadable pages rather than as
+an error anyone connects to the restore. There is no way to do it safely while
+it runs, so the API refuses rather than trying.
+
+Extraction merges: files in the volume that are absent from the archive
+survive. Clearing first would need a shell running over a data directory, which
+is a far worse risk than a stale file — restore into a fresh volume when that
+matters, by giving it a new name in the manifest.
+
+### On a schedule
+
+```yaml
+databases:
+  main:
+    engine: postgres@16
+    node: kakashi
+    backup: daily          # hourly · daily · weekly
+```
+
+A backup you have to remember to take is one that gets taken twice and then
+forgotten, which is the same as none on the day it matters. Due is measured
+from the last *attempt*, not the last success — measuring from success retries
+a failing volume on every sweep, which turns one broken volume into a loop of
+tar processes on a machine that is also serving. The seven most recent complete
+backups are kept; failures never evict a good archive.
+
 A service with no volume has nothing to back up, and says so rather than
 producing an archive of an empty directory and implying a safety it does not
 provide.

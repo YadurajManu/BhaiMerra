@@ -23,7 +23,7 @@ import type { FastifyInstance } from 'fastify'
 import { loadConfig } from '../src/config.js'
 import { createContext, closeContext, type AppContext } from '../src/api/context.js'
 import { buildServer } from '../src/server.js'
-import { orgs, users, services, deployments, nodes, backups } from '../src/db/schema.js'
+import { orgs, users, services, deployments, nodes, backups, restores } from '../src/db/schema.js'
 import {
   artifactPath,
   assertBackable,
@@ -31,8 +31,11 @@ import {
   failStalledBackups,
   pendingForNode,
   requestBackup,
+  requestRestore,
+  restoresForNode,
   BACKUP_TIMEOUT_MS,
 } from '../src/backup/store.js'
+import { intervalFor } from '../src/backup/schedule.js'
 import { ApiError } from '../src/api/errors.js'
 
 describe('backing up a volume', () => {
@@ -219,5 +222,138 @@ describe('artifact paths', () => {
     // "/var/lib/fleet-os/backups-evil" begins with the root but is a sibling
     // directory, and a plain startsWith would have accepted it.
     assert.throws(() => artifactPath('/var/lib/fleet-os/backups', '../backups-evil/x'), ApiError)
+  })
+})
+
+describe('putting a backup back', () => {
+  let ctx: AppContext
+  let app: FastifyInstance
+  let root: string
+  let fleetId: string
+  let orgId: string
+  let userId: string
+  let nodeId: string
+  let service: typeof services.$inferSelect
+  let backup: typeof backups.$inferSelect
+
+  before(async () => {
+    root = await mkdtemp(join(tmpdir(), 'fleet-restore-test-'))
+    ctx = createContext(loadConfig({ ...process.env, BACKUP_DIR: root }))
+    app = await buildServer(ctx)
+
+    const signup = await app.inject({
+      method: 'POST',
+      url: '/auth/signup',
+      payload: { email: `restore-${Date.now()}@example.test`, password: 'a-long-enough-password' },
+    })
+    const body = signup.json()
+    fleetId = body.fleet.id
+    orgId = body.org.id
+    userId = body.user.id
+
+    const [n] = await ctx.db
+      .insert(nodes)
+      .values({
+        fleetId, name: 'holder', arch: 'amd64', os: 'linux',
+        cpuCores: 4, ramMb: 8192, diskMb: 100_000, status: 'online',
+        agentTokenHash: `rh-${Date.now()}`, advertiseAddr: '10.0.0.9', lastHeartbeatAt: new Date(),
+      })
+      .returning()
+    nodeId = n!.id
+
+    const [svc] = await ctx.db
+      .insert(services)
+      .values({
+        fleetId, name: 'db', project: 'test', image: 'postgres:16-alpine',
+        requestRamMb: 256, requestCpu: '0.25', containerPort: 5432,
+        hostname: 'db-r.example', persistentVolume: true, volumeName: 'db-data',
+      })
+      .returning()
+    service = svc!
+
+    // A completed backup, and a deployment that has since been superseded —
+    // which is the state a service is in when you actually want a restore.
+    await ctx.db.insert(deployments).values({
+      serviceId: service.id, nodeId, status: 'superseded',
+      imageTags: ['postgres:16-alpine'],
+    })
+    const [b] = await ctx.db
+      .insert(backups)
+      .values({
+        serviceId: service.id, nodeId, volumeRef: 'db-data',
+        status: 'complete', storageLocation: 'x.tar.gz', sizeBytes: 10, checksum: 'abc',
+      })
+      .returning()
+    backup = b!
+  })
+
+  after(async () => {
+    await app.close()
+    await ctx.db.delete(orgs).where(eq(orgs.id, orgId))
+    await ctx.db.delete(users).where(eq(users.id, userId))
+    await closeContext(ctx)
+    await rm(root, { recursive: true, force: true })
+  })
+
+  test('a stopped service can be restored', async () => {
+    const row = await requestRestore(ctx, backup, service, { userId })
+    assert.equal(row.status, 'pending')
+    assert.equal(row.volumeName, 'db-data')
+    assert.equal(row.nodeId, nodeId, 'onto the node holding the volume')
+  })
+
+  test('the node is handed the job', async () => {
+    const jobs = await restoresForNode(ctx, nodeId)
+    assert.equal(jobs.length, 1)
+    assert.equal(jobs[0]!.volume, 'db-data')
+  })
+
+  test('one restore at a time', async () => {
+    await assert.rejects(
+      () => requestRestore(ctx, backup, service, { userId }),
+      (err: unknown) => err instanceof ApiError && /already in progress/.test(err.message)
+    )
+  })
+
+  test('a running service is refused, and told why', async () => {
+    // The whole safety story. Extracting a data directory underneath a process
+    // that is using it produces a volume that is neither the old state nor the
+    // new one, and the damage surfaces long afterwards as unreadable pages.
+    await ctx.db.delete(restores).where(eq(restores.serviceId, service.id))
+    await ctx.db.insert(deployments).values({
+      serviceId: service.id, nodeId, status: 'running', imageTags: ['postgres:16-alpine'],
+    })
+
+    await assert.rejects(
+      () => requestRestore(ctx, backup, service, { userId }),
+      (err: unknown) => {
+        assert.ok(err instanceof ApiError)
+        assert.match(err.message, /Stop it first/)
+        assert.match(err.message, /corrupts the volume/)
+        return true
+      }
+    )
+  })
+
+  test('an incomplete backup cannot be restored', async () => {
+    const [pending] = await ctx.db
+      .insert(backups)
+      .values({ serviceId: service.id, nodeId, volumeRef: 'db-data', status: 'pending' })
+      .returning()
+    await assert.rejects(
+      () => requestRestore(ctx, pending!, service, { userId }),
+      (err: unknown) => err instanceof ApiError && /no archive to restore/.test(err.message)
+    )
+  })
+})
+
+describe('scheduled backups', () => {
+  test('only the known cadences are accepted', () => {
+    assert.equal(intervalFor('daily'), 24 * 60 * 60_000)
+    assert.equal(intervalFor('HOURLY'), 60 * 60_000)
+    assert.equal(intervalFor('weekly'), 7 * 24 * 60 * 60_000)
+    // A cadence Fleet does not implement must not silently mean "never".
+    assert.equal(intervalFor('fortnightly'), null)
+    assert.equal(intervalFor(''), null)
   })
 })

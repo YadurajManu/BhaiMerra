@@ -127,6 +127,18 @@ type DesiredState struct {
 	// volume is, and the control plane never reaches into a node — so the work
 	// travels with the desired state and the node collects it.
 	Backups []BackupJob `json:"backups,omitempty"`
+	// Volumes to write back. At most one at a time, and only for a service the
+	// control plane has confirmed is stopped — extracting a data directory
+	// underneath a running database corrupts it.
+	Restores []RestoreJob `json:"restores,omitempty"`
+}
+
+// RestoreJob is one archive to write back into a volume.
+type RestoreJob struct {
+	ID       string `json:"id"`
+	Volume   string `json:"volume"`
+	Service  string `json:"service"`
+	BackupID string `json:"backupId"`
 }
 
 // BackupJob is one volume the control plane is waiting for a copy of.
@@ -275,4 +287,34 @@ func (c *Client) UploadBackup(ctx context.Context, id string, archive []byte) er
 		return &APIError{StatusCode: resp.StatusCode, Message: strings.TrimSpace(string(payload))}
 	}
 	return nil
+}
+
+// FetchRestore streams the archive for a restore. The caller closes it.
+func (c *Client) FetchRestore(ctx context.Context, id string) (io.ReadCloser, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/agent/restores/"+id+"/archive", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch restore: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		payload, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		return nil, &APIError{StatusCode: resp.StatusCode, Message: strings.TrimSpace(string(payload))}
+	}
+	return resp.Body, nil
+}
+
+// CompleteRestore reports that the volume now holds the archive's contents.
+func (c *Client) CompleteRestore(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodPost, "/agent/restores/"+id+"/done", nil, nil)
+}
+
+// FailRestore reports why a restore could not be completed.
+func (c *Client) FailRestore(ctx context.Context, id, reason string) error {
+	return c.do(ctx, http.MethodPost, "/agent/restores/"+id+"/fail", map[string]string{"reason": reason}, nil)
 }

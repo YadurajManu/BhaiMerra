@@ -6,7 +6,7 @@ import { hashToken, newAgentToken, isPairingToken } from '../lib/tokens.js'
 import { recordAudit } from '../lib/audit.js'
 import { ApiError } from './errors.js'
 import { requireAgent } from './guards.js'
-import { pendingForNode } from '../backup/store.js'
+import { pendingForNode, restoresForNode } from '../backup/store.js'
 import { reclaimToNode } from '../scheduler/reclaim.js'
 import { detectDrift } from '../heartbeat/drift.js'
 import { dispatchEvent } from '../alerting/dispatch.js'
@@ -437,6 +437,10 @@ export async function agentRoutes(app: FastifyInstance) {
         volume: b.volume,
         service: b.serviceName,
       })),
+      // At most one at a time, and only for a service that is stopped — the
+      // API refuses to queue a restore while anything is still writing to the
+      // volume.
+      restores: await restoresForNode(app.ctx, nodeId),
       // A registry that nodes reach from outside the LAN has to require
       // credentials, and the node cannot pull without them. Sent on the same
       // terms as a secret: over TLS, to a caller that proved it is this node.

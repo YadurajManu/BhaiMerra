@@ -118,6 +118,7 @@ export async function syncManifest(
         volumeName: svc.volume ?? null,
         volumePath: svc.volumePath ?? null,
         replicas: svc.replicas,
+        backupSchedule: svc.backup ?? null,
         healthCheckPath: svc.health.path,
         healthIntervalSec: svc.health.interval,
         healthTimeoutSec: svc.health.timeout,

@@ -3,7 +3,8 @@ import { deployments, fleets, nodes } from '../db/schema.js'
 import type { RescheduleOutcome } from '../scheduler/reschedule.js'
 import { rescheduleFromNode } from '../scheduler/reschedule.js'
 import { reconcileReplicas, type ScaleOutcome } from '../scheduler/replicas.js'
-import { failStalledBackups } from '../backup/store.js'
+import { failStalledBackups, failStalledRestores } from '../backup/store.js'
+import { pruneOldBackups, runDueBackups } from '../backup/schedule.js'
 import { invalidateRoutesForService } from '../ingress/routes.js'
 import type { AppContext } from '../api/context.js'
 import type { FleetEventPayload } from '../lib/events.js'
@@ -295,6 +296,18 @@ export async function sweepOnce(ctx: AppContext, opts: SweepOptions = {}): Promi
             opts.log?.error({ err, nodeId: node.id }, 'reschedule failed after node went down')
           }
         }
+        // Scheduled backups. Due is measured from the last attempt rather
+        // than the last success: measuring from success retries a failing
+        // volume on every sweep, which turns one broken volume into a tight
+        // loop of tar processes on a machine that is also serving.
+        try {
+          const queued = await runDueBackups(ctx, { log: opts.log })
+          for (const id of queued) opts.log?.info({ backupId: id }, 'scheduled backup queued')
+          await pruneOldBackups(ctx)
+        } catch (err) {
+          opts.log?.error({ err, fleetId: fleet.id }, 'scheduled backup pass failed')
+        }
+
         // A backup whose node died mid-archive leaves its row `running`
         // forever, and the one-at-a-time rule then blocks every future backup
         // of that service — a stall that presents as "backups quietly stopped
@@ -302,6 +315,8 @@ export async function sweepOnce(ctx: AppContext, opts: SweepOptions = {}): Promi
         try {
           const stalled = await failStalledBackups(ctx)
           for (const id of stalled) opts.log?.info({ backupId: id }, 'failed an abandoned backup')
+          const stalledRestores = await failStalledRestores(ctx)
+          for (const id of stalledRestores) opts.log?.info({ restoreId: id }, 'failed an abandoned restore')
         } catch (err) {
           opts.log?.error({ err }, 'backup stall sweep failed')
         }

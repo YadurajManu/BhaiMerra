@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, rm, stat, writeFile } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
 import { and, desc, eq, inArray, lt } from 'drizzle-orm'
-import { backups, deployments, services } from '../db/schema.js'
+import { backups, deployments, restores, services } from '../db/schema.js'
 import { ApiError } from '../api/errors.js'
 import type { AppContext } from '../api/context.js'
 
@@ -219,3 +219,140 @@ export async function deleteBackup(ctx: AppContext, row: BackupRow): Promise<voi
 
 /** A stable id for an archive that has not been written yet. */
 export const newArtifactId = () => randomUUID()
+
+/* ── restore ─────────────────────────────────────────────────────── */
+
+export type RestoreRow = typeof restores.$inferSelect
+
+/**
+ * Put a backup back.
+ *
+ * The service must not be running, and that is the whole safety story rather
+ * than a convenience check. Extracting a data directory underneath a database
+ * that is currently writing to it produces a volume that is neither the old
+ * state nor the new one, and the corruption surfaces later as unreadable
+ * pages rather than as an error anyone can connect to this action. Refusing is
+ * the only honest option: there is no way to do it safely while it runs, so
+ * the API says so instead of trying.
+ */
+export async function requestRestore(
+  ctx: AppContext,
+  backup: BackupRow,
+  service: { id: string; name: string },
+  opts: { userId?: string } = {}
+): Promise<RestoreRow> {
+  if (backup.status !== 'complete' || !backup.storageLocation) {
+    throw ApiError.unprocessable(
+      'not_restorable',
+      `That backup is ${backup.status} — there is no archive to restore.`
+    )
+  }
+
+  const live = await ctx.db
+    .select({ id: deployments.id, nodeId: deployments.nodeId })
+    .from(deployments)
+    .where(
+      and(eq(deployments.serviceId, service.id), inArray(deployments.status, ['running', 'deploying']))
+    )
+
+  if (live.length) {
+    throw ApiError.unprocessable(
+      'still_running',
+      `"${service.name}" is still running. Stop it first — writing a data directory underneath a ` +
+        `process that is using it corrupts the volume, and the damage shows up long after the restore.`
+    )
+  }
+
+  // The node that last ran it holds the volume this will be written into.
+  const [last] = await ctx.db
+    .select({ nodeId: deployments.nodeId })
+    .from(deployments)
+    .where(eq(deployments.serviceId, service.id))
+    .orderBy(desc(deployments.startedAt))
+    .limit(1)
+
+  if (!last?.nodeId) {
+    throw ApiError.unprocessable(
+      'no_node',
+      `"${service.name}" has never been deployed, so there is no volume to restore into. ` +
+        `Deploy it once, stop it, then restore.`
+    )
+  }
+
+  const [existing] = await ctx.db
+    .select({ id: restores.id })
+    .from(restores)
+    .where(and(eq(restores.serviceId, service.id), inArray(restores.status, ['pending', 'running'])))
+    .limit(1)
+  if (existing) {
+    throw ApiError.unprocessable('already_running', `A restore of "${service.name}" is already in progress.`)
+  }
+
+  const [row] = await ctx.db
+    .insert(restores)
+    .values({
+      backupId: backup.id,
+      serviceId: service.id,
+      nodeId: last.nodeId,
+      volumeName: backup.volumeRef,
+      requestedByUserId: opts.userId ?? null,
+    })
+    .returning()
+  return row!
+}
+
+/** Restores a node should be getting on with, with a URL to fetch from. */
+export async function restoresForNode(
+  ctx: AppContext,
+  nodeId: string
+): Promise<Array<{ id: string; volume: string; service: string; backupId: string }>> {
+  const rows = await ctx.db
+    .select({
+      id: restores.id,
+      volume: restores.volumeName,
+      service: services.name,
+      backupId: restores.backupId,
+    })
+    .from(restores)
+    .innerJoin(services, eq(services.id, restores.serviceId))
+    .where(and(eq(restores.nodeId, nodeId), eq(restores.status, 'pending')))
+    .orderBy(restores.createdAt)
+    .limit(1)
+  return rows
+}
+
+export async function markRestoreRunning(ctx: AppContext, id: string): Promise<void> {
+  await ctx.db
+    .update(restores)
+    .set({ status: 'running', startedAt: new Date() })
+    .where(and(eq(restores.id, id), eq(restores.status, 'pending')))
+}
+
+export async function completeRestore(ctx: AppContext, id: string): Promise<void> {
+  await ctx.db
+    .update(restores)
+    .set({ status: 'complete', finishedAt: new Date(), failureReason: null })
+    .where(eq(restores.id, id))
+}
+
+export async function failRestore(ctx: AppContext, id: string, reason: string): Promise<void> {
+  await ctx.db
+    .update(restores)
+    .set({ status: 'failed', failureReason: reason.slice(0, 2000), finishedAt: new Date() })
+    .where(eq(restores.id, id))
+}
+
+/** A restore whose node stopped reporting, on the same terms as a backup. */
+export async function failStalledRestores(ctx: AppContext): Promise<string[]> {
+  const cutoff = new Date(Date.now() - BACKUP_TIMEOUT_MS)
+  const stalled = await ctx.db
+    .update(restores)
+    .set({
+      status: 'failed',
+      failureReason: 'the node stopped reporting before the restore finished',
+      finishedAt: new Date(),
+    })
+    .where(and(eq(restores.status, 'running'), lt(restores.startedAt, cutoff)))
+    .returning({ id: restores.id })
+  return stalled.map((r) => r.id)
+}

@@ -144,3 +144,67 @@ export const backupsCommand = {
     }
   },
 }
+
+export const restoreCommand = {
+  async run(args: string[], flags: Flags) {
+    const [name, which] = args
+    if (!name) throw new CliError('usage: fleet restore <service> [backup-id]', EXIT.usage)
+
+    const fleetId = await requireFleet(typeof flags.fleet === 'string' ? flags.fleet : undefined)
+    const service = await resolveService(fleetId, name)
+
+    const { body } = await request<{ backups: Backup[] }>(
+      'GET',
+      `/fleets/${fleetId}/services/${service.id}/backups`
+    )
+    const complete = body.backups.filter((b) => b.status === 'complete')
+    if (!complete.length) {
+      throw new CliError(
+        `No completed backup of "${service.name}" to restore. \`fleet backups ${service.name}\` shows what exists.`,
+        EXIT.usage
+      )
+    }
+
+    // Named by prefix, or the most recent — which is what "restore it" almost
+    // always means, and typing a uuid from a table is nobody's idea of a good
+    // recovery experience.
+    const target = which
+      ? complete.find((b) => b.id === which || b.id.startsWith(which))
+      : complete[0]
+    if (!target) {
+      throw new CliError(
+        `No completed backup of "${service.name}" starting with "${which}".`,
+        EXIT.usage
+      )
+    }
+
+    console.log(
+      `\n  Restoring ${c.bold(service.name)} from ${c.bold(target.id.slice(0, 8))}` +
+        ` ${c.dim(`(${relativeTime(target.createdAt)}, ${target.sizeBytes ? humanBytes(target.sizeBytes) : 'unknown size'})`)}`
+    )
+    console.log(
+      c.dim(
+        '  The archive is written into the volume, over whatever is there now.\n' +
+          '  The service must be stopped: writing a data directory underneath a\n' +
+          '  running process corrupts it, so this is refused while it serves.\n'
+      )
+    )
+
+    const started = await task(
+      'queueing the restore',
+      async () =>
+        (
+          await request<{ restore: { id: string } }>(
+            'POST',
+            `/fleets/${fleetId}/backups/${target.id}/restore`,
+            { body: {} }
+          )
+        ).body.restore,
+      { done: () => 'queued' }
+    )
+
+    console.log(`\n${glyph.ok} ${c.green('queued')}  ${c.bold(started.id.slice(0, 8))}`)
+    console.log(c.dim('  The node writes it into the volume on its next poll.'))
+    console.log(c.dim(`\n  fleet deploy ${service.name}   bring it back up once the restore lands`))
+  },
+}

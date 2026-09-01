@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/fleet-os/fleet-os/agent/internal/docker"
@@ -33,6 +34,16 @@ type Reporter interface {
 	ClaimBackup(ctx context.Context, id string) error
 	UploadBackup(ctx context.Context, id string, archive []byte) error
 	FailBackup(ctx context.Context, id string, reason string) error
+	FetchRestore(ctx context.Context, id string) (io.ReadCloser, error)
+	CompleteRestore(ctx context.Context, id string) error
+	FailRestore(ctx context.Context, id string, reason string) error
+}
+
+// RestoreJob is one archive to write back into a volume.
+type RestoreJob struct {
+	ID      string
+	Volume  string
+	Service string
 }
 
 // Runner performs backup jobs against a Docker daemon.
@@ -131,3 +142,50 @@ func (r *Runner) logWarn(msg string, args ...any) {
 
 // Compile-time proof that a bytes.Buffer is not accidentally required.
 var _ = bytes.MinRead
+
+// Restore writes archives back into their volumes.
+//
+// Safe only because the control plane refuses to queue one while the service
+// is running: extracting a data directory underneath a process that is using
+// it produces a volume that is neither the old state nor the new one, and the
+// corruption surfaces much later as unreadable pages.
+func (r *Runner) Restore(ctx context.Context, jobs []RestoreJob) {
+	for _, job := range jobs {
+		if err := r.restoreOne(ctx, job); err != nil {
+			r.logWarn("restore failed", "service", job.Service, "volume", job.Volume, "err", err)
+			reportCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			_ = r.Report.FailRestore(reportCtx, job.ID, err.Error())
+			cancel()
+		}
+	}
+}
+
+func (r *Runner) restoreOne(ctx context.Context, job RestoreJob) error {
+	timeout := r.Timeout
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	// Fetching marks it running on the control plane, so a node that dies
+	// part-way through is distinguishable from one that never started.
+	body, err := r.Report.FetchRestore(runCtx, job.ID)
+	if err != nil {
+		return fmt.Errorf("fetch archive: %w", err)
+	}
+	defer body.Close()
+
+	started := time.Now()
+	if err := r.Docker.ExtractToVolume(runCtx, job.Volume, body); err != nil {
+		return fmt.Errorf("write volume %q: %w", job.Volume, err)
+	}
+
+	if err := r.Report.CompleteRestore(runCtx, job.ID); err != nil {
+		return fmt.Errorf("report completion: %w", err)
+	}
+	r.logInfo("volume restored",
+		"service", job.Service, "volume", job.Volume,
+		"took", time.Since(started).Round(time.Millisecond))
+	return nil
+}
