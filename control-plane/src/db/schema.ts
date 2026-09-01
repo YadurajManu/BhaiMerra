@@ -172,6 +172,36 @@ export const pairingTokens = pgTable(
  * service's repoUrl: it lets a first push create services from fleet.yaml,
  * and retains the selected GitHub account, branch and manifest location.
  */
+/**
+ * Which org owns which GitHub App installation.
+ *
+ * The App's installation list is global to the App, so without this every
+ * signed-up user could reach every other account's private repositories. An
+ * installation is claimed exactly once, by the org that completed the install
+ * flow, and every GitHub lookup is filtered through the claims of the caller's
+ * own org.
+ */
+export const githubInstallations = pgTable(
+  'github_installations',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => orgs.id, { onDelete: 'cascade' }),
+    installationId: text('installation_id').notNull(),
+    account: text('account').notNull(),
+    accountType: text('account_type').notNull().default('User'),
+    connectedByUserId: uuid('connected_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    /** Set while GitHub has suspended the installation; cleared on unsuspend. */
+    suspendedAt: timestamp('suspended_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('github_installations_installation_key').on(t.installationId),
+    index('github_installations_org_idx').on(t.orgId),
+  ]
+)
+
 export const githubRepositories = pgTable(
   'github_repositories',
   {

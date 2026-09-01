@@ -49,6 +49,18 @@ const schema = z.object({
   GITHUB_APP_CLIENT_ID: z.string().optional(),
   GITHUB_APP_CLIENT_SECRET: z.string().optional(),
   GITHUB_APP_PRIVATE_KEY_PATH: z.string().default('./github-app.pem'),
+  /**
+   * The App's URL slug, from https://github.com/apps/<slug>. Needed to send a
+   * user into the install flow; without it they must find the App themselves
+   * and the installation cannot be bound to their org automatically.
+   */
+  GITHUB_APP_SLUG: z.string().optional(),
+  /**
+   * Where to send a browser after GitHub redirects back from an install.
+   * Falls back to the request's own origin, which is right for a control plane
+   * serving the dashboard from the same host.
+   */
+  PUBLIC_DASHBOARD_URL: z.string().url().optional(),
   HOST: z.string().default('0.0.0.0'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),

@@ -14,6 +14,8 @@ export type GitHubConfig = {
   appId: string
   privateKeyPath: string
   clientId?: string
+  /** From https://github.com/apps/<slug> — the entry point to the install flow. */
+  slug?: string
 }
 
 export class GitHubError extends Error {
@@ -88,6 +90,33 @@ async function ghFetch<T>(url: string, token: string, init: RequestInit = {}): P
   return body as T
 }
 
+export type AppIdentity = { id: number; slug: string; name: string }
+
+let cachedIdentity: AppIdentity | null = null
+
+/**
+ * Who GitHub thinks we are.
+ *
+ * `GITHUB_APP_ID`, the private key, and `GITHUB_APP_SLUG` are three separate
+ * pieces of an operator's configuration, and nothing stops them naming two
+ * different Apps. When they do, every symptom appears somewhere else: the
+ * install link works, the install succeeds, and the callback then reports an
+ * installation the App has never heard of. Asking GitHub directly is the only
+ * way to say so plainly.
+ */
+export async function appIdentity(config: GitHubConfig): Promise<AppIdentity> {
+  if (cachedIdentity) return cachedIdentity
+  const app = await ghFetch<AppIdentity>('https://api.github.com/app', await appJwt(config))
+  cachedIdentity = { id: app.id, slug: app.slug, name: app.name }
+  return cachedIdentity
+}
+
+/** True when the configured slug names a different App than the key does. */
+export function slugMismatch(config: GitHubConfig, identity: Pick<AppIdentity, 'slug'>): boolean {
+  if (!config.slug) return false
+  return config.slug.toLowerCase() !== identity.slug.toLowerCase()
+}
+
 export type Installation = { id: number; account: { login: string; type: string } }
 
 export async function listInstallations(config: GitHubConfig): Promise<Installation[]> {
@@ -138,6 +167,55 @@ export async function listRepos(config: GitHubConfig, installationId: number): P
 }
 
 /**
+ * The commit a branch currently points at.
+ *
+ * Needed to deploy a repository the moment it is imported. Waiting for the
+ * next push to learn a sha would mean a freshly imported repo sits there doing
+ * nothing until somebody makes a commit they did not otherwise need.
+ */
+export async function branchHead(
+  config: GitHubConfig,
+  installationId: number,
+  fullName: string,
+  branch: string
+): Promise<string> {
+  const token = await installationToken(config, installationId)
+  const { commit } = await ghFetch<{ commit: { sha: string } }>(
+    `https://api.github.com/repos/${fullName}/branches/${encodeURIComponent(branch)}`,
+    token
+  )
+  return commit.sha
+}
+
+/**
+ * Whether a path exists in a repository at a ref.
+ *
+ * Used to tell "imported, deploying" apart from "imported, but there is no
+ * fleet.yaml here yet" at the moment of import — rather than letting the
+ * checkout fail minutes later and surface as a deploy failure alert, which
+ * describes a missing file as if something had broken.
+ */
+export async function repoFileExists(
+  config: GitHubConfig,
+  installationId: number,
+  fullName: string,
+  path: string,
+  ref: string
+): Promise<boolean> {
+  const token = await installationToken(config, installationId)
+  const url =
+    `https://api.github.com/repos/${fullName}/contents/${path.split('/').map(encodeURIComponent).join('/')}` +
+    `?ref=${encodeURIComponent(ref)}`
+  try {
+    await ghFetch(url, token)
+    return true
+  } catch (err) {
+    if (err instanceof GitHubError && err.status === 404) return false
+    throw err
+  }
+}
+
+/**
  * A clone URL carrying a short-lived installation token.
  *
  * The token is embedded in the URL because that is the only way `git fetch`
@@ -153,16 +231,12 @@ export async function authenticatedCloneUrl(
   return cloneUrl.replace('https://', `https://x-access-token:${token}@`)
 }
 
-/** Find which installation can reach a repository, if any. */
-export async function installationForRepo(
-  config: GitHubConfig,
-  repoFullName: string
-): Promise<number | null> {
-  for (const installation of await listInstallations(config)) {
-    const repos = await listRepos(config, installation.id)
-    if (repos.some((r) => r.full_name.toLowerCase() === repoFullName.toLowerCase())) {
-      return installation.id
-    }
-  }
-  return null
-}
+/**
+ * There is deliberately no `installationForRepo(config, repo)` here.
+ *
+ * Searching every installation for one that can reach a repository is how a
+ * control plane ends up minting a token against a stranger's installation and
+ * cloning their private source. Use `installationForRepoInOrg` in
+ * ./installations.ts, which only ever considers installations the calling org
+ * has claimed.
+ */

@@ -8,14 +8,47 @@ type GitHubStatus = {
   configured: boolean
   webhookBase: string
   clientId?: string | null
+  /** False when the control plane knows the App by id but not by slug. */
+  canInstall?: boolean
+  /** Set when GITHUB_APP_SLUG names a different App than the private key does. */
+  misconfiguredSlug?: { configured: string; actual: string }
+  /** Installs that exist on GitHub but were never bound to an organisation. */
+  unclaimedInstallations?: number
   error?: string
-  installations?: Array<{ id: number; account: string; type: string }>
+  installations?: Array<{
+    id: number
+    account: string
+    type: string
+    suspended: boolean
+    /** null when GitHub could not be reached to confirm. */
+    active: boolean | null
+  }>
 }
 
 type GitHubRepo = { fullName: string; cloneUrl: string; private: boolean; defaultBranch: string; updatedAt: string }
 type ConnectedRepo = {
   id: string; account: string; fullName: string; cloneUrl: string; defaultBranch: string; branch: string
   manifestPath: string; isPrivate: boolean; services: string[]; createdAt: string
+}
+
+/**
+ * What the setup callback's `reason` codes mean, in words. The redirect can
+ * only carry a short code, and a code in a URL bar helps nobody.
+ */
+const SETUP_REASONS: Record<string, string> = {
+  app_slug_mismatch:
+    'GITHUB_APP_SLUG names a different GitHub App than the configured App ID and private key, so the App you just installed is not the one this control plane can read. Point the slug at the App the key belongs to, then try again.',
+  expired_or_unrecognised_link:
+    'That install link had expired, or the install did not start from this page. Links are valid for ten minutes and can be used once.',
+  installation_not_visible_to_this_app:
+    'GitHub reported an installation this App cannot see. If you have more than one Fleet App, check that the one you installed matches the configured App ID.',
+  awaiting_owner_approval:
+    'You requested the App on an organisation you do not own. An owner has to approve it first, then come back and connect.',
+  installation_claimed: 'That GitHub account is already connected to a different Fleet organisation.',
+  github_unreachable: 'Could not reach GitHub to confirm the installation. Check the App private key, then try again.',
+  no_installation_id: 'GitHub returned from the install without an installation id.',
+  github_not_configured: 'This control plane has no GitHub App configured.',
+  malformed_callback: 'The callback from GitHub was malformed.',
 }
 
 function GitHubWorkspace({ fleet }: { fleet: NonNullable<ReturnType<typeof useAuth>['fleet']> }) {
@@ -25,6 +58,7 @@ function GitHubWorkspace({ fleet }: { fleet: NonNullable<ReturnType<typeof useAu
   const [branch, setBranch] = useState('')
   const [manifestPath, setManifestPath] = useState('fleet.yaml')
   const [busy, setBusy] = useState(false)
+  const [importNote, setImportNote] = useState<{ tone: 'ok' | 'warn'; text: string } | null>(null)
   const [actionError, setActionError] = useState<unknown>(null)
   const [revision, setRevision] = useState(0)
 
@@ -52,15 +86,39 @@ function GitHubWorkspace({ fleet }: { fleet: NonNullable<ReturnType<typeof useAu
 
   async function connect() {
     if (!selected || !activeInstallation) return
-    setBusy(true); setActionError(null)
+    setBusy(true); setActionError(null); setImportNote(null)
     try {
-      await api(`/fleets/${fleet.id}/github/repositories`, {
-        method: 'POST',
-        body: { installationId: activeInstallation, fullName: selected.fullName, branch, manifestPath },
-      })
+      const result = await api<{ deploying?: { sha: string }; notDeployed?: string }>(
+        `/fleets/${fleet.id}/github/repositories`,
+        {
+          method: 'POST',
+          body: { installationId: activeInstallation, fullName: selected.fullName, branch, manifestPath },
+        }
+      )
+      // Importing starts a deploy. Say which, because the alternative is a
+      // screen that looks identical whether anything happened or not.
+      setImportNote(
+        result.deploying
+          ? { tone: 'ok', text: `${selected.fullName} is deploying at ${result.deploying.sha.slice(0, 7)}. Follow it on the Services page.` }
+          : { tone: 'warn', text: `${selected.fullName} is connected, but nothing was deployed: ${result.notDeployed ?? 'no reason given'}.` }
+      )
       setRevision((value) => value + 1)
       setSelected(null)
     } catch (err) { setActionError(err) } finally { setBusy(false) }
+  }
+
+  /**
+   * Hand off to GitHub's install flow. The URL is minted per click because it
+   * carries a single-use state that binds whatever gets installed back to this
+   * org — a static link to the App page would install fine and belong to
+   * nobody.
+   */
+  async function connectAccount() {
+    setBusy(true); setActionError(null)
+    try {
+      const { url } = await api<{ url: string }>(`/fleets/${fleet.id}/github/install-url`, { method: 'POST' })
+      window.location.href = url
+    } catch (err) { setActionError(err); setBusy(false) }
   }
 
   async function disconnect(repository: ConnectedRepo) {
@@ -74,10 +132,72 @@ function GitHubWorkspace({ fleet }: { fleet: NonNullable<ReturnType<typeof useAu
   const webhookUrl = status.data ? `${status.data.webhookBase}/webhooks/git/${fleet.id}` : null
   const installations = status.data?.installations ?? []
 
+  // The setup callback lands back here with the outcome in the query string.
+  // Read once on mount: it describes that redirect, not the current state.
+  const [returned, setReturned] = useState(() => {
+    const params = new URLSearchParams(window.location.search)
+    const outcome = params.get('github')
+    return outcome ? { outcome, reason: params.get('reason') } : null
+  })
+  const slugProblem = status.data?.misconfiguredSlug
+
   return (
-    <Panel title="GitHub workspace" right={<span className="normal-case">accounts · repositories · deploy policy</span>}>
+    <Panel title="GitHub" right={<span className="normal-case">import · deploy on push</span>}>
       <div className="p-5">
         <ErrorNote error={status.error ?? actionError} />
+
+        {returned && (
+          <div
+            className={`mb-4 flex items-start gap-3 border-l-2 p-4 ${
+              returned.outcome === 'connected'
+                ? 'border-[var(--color-signal)] bg-[color-mix(in_oklab,var(--color-signal)_5%,transparent)]'
+                : 'border-[var(--color-warn)] bg-[color-mix(in_oklab,var(--color-warn)_5%,transparent)]'
+            }`}
+          >
+            <div className="min-w-0 flex-1">
+              <p className={`font-mono text-[12px] ${returned.outcome === 'connected' ? 'text-[var(--color-signal)]' : 'text-[var(--color-warn)]'}`}>
+                {returned.outcome === 'connected' ? 'GitHub account connected' : 'GitHub could not be connected'}
+              </p>
+              {returned.outcome !== 'connected' && (
+                <p className="mt-2 max-w-[80ch] text-[12.5px] leading-relaxed text-[var(--color-fg-muted)]">
+                  {(returned.reason && SETUP_REASONS[returned.reason]) ?? `GitHub returned "${returned.reason ?? 'an unknown error'}".`}
+                </p>
+              )}
+            </div>
+            <Button
+              onClick={() => {
+                setReturned(null)
+                window.history.replaceState({}, '', window.location.pathname)
+              }}
+            >
+              Dismiss
+            </Button>
+          </div>
+        )}
+
+        {importNote && (
+          <div
+            className={`mb-4 flex items-start gap-3 border-l-2 p-4 ${
+              importNote.tone === 'ok'
+                ? 'border-[var(--color-signal)] bg-[color-mix(in_oklab,var(--color-signal)_5%,transparent)]'
+                : 'border-[var(--color-warn)] bg-[color-mix(in_oklab,var(--color-warn)_5%,transparent)]'
+            }`}
+          >
+            <p className="min-w-0 flex-1 text-[12.5px] leading-relaxed text-[var(--color-fg-muted)]">{importNote.text}</p>
+            <Button onClick={() => setImportNote(null)}>Dismiss</Button>
+          </div>
+        )}
+
+        {slugProblem && (
+          <div className="mb-4 border-l-2 border-[var(--color-warn)] bg-[color-mix(in_oklab,var(--color-warn)_5%,transparent)] p-4">
+            <p className="font-mono text-[12px] text-[var(--color-warn)]">GitHub App misconfigured</p>
+            <p className="mt-2 max-w-[80ch] text-[12.5px] leading-relaxed text-[var(--color-fg-muted)]">
+              GITHUB_APP_SLUG is <span className="font-mono text-[var(--color-fg)]">{slugProblem.configured}</span>, but the configured App ID and private key belong to{' '}
+              <span className="font-mono text-[var(--color-fg)]">{slugProblem.actual}</span>. Anyone following the connect button would install the wrong App, and it would connect nothing. Set the slug to{' '}
+              <span className="font-mono text-[var(--color-fg)]">{slugProblem.actual}</span> and restart the control plane.
+            </p>
+          </div>
+        )}
 
         {!status.data?.configured ? (
           <div className="border-l-2 border-[var(--color-warn)] bg-[color-mix(in_oklab,var(--color-warn)_5%,transparent)] p-4">
@@ -86,85 +206,125 @@ function GitHubWorkspace({ fleet }: { fleet: NonNullable<ReturnType<typeof useAu
               Configure the control plane with a GitHub App private key, then install that App on only the accounts and repositories Fleet may read. The App needs Contents: read-only and Repository webhooks: read &amp; write. Fleet never stores a personal access token.
             </p>
           </div>
+        ) : !installations.length ? (
+          /* One decision, one button. Everything else on this screen is
+             meaningless until an account is connected, so none of it is shown. */
+          <div className="flex flex-col items-center border border-[var(--color-line)] bg-[var(--color-ink-950)] px-6 py-14 text-center">
+            <svg viewBox="0 0 16 16" width="32" height="32" aria-hidden="true" className="fill-[var(--color-fg-muted)]">
+              <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z" />
+            </svg>
+            <p className="mt-4 font-mono text-[13px] text-[var(--color-fg)]">Connect your GitHub</p>
+            <p className="mt-2 max-w-[54ch] text-[12.5px] leading-relaxed text-[var(--color-fg-muted)]">
+              Deploy straight from your repositories. You choose which ones Fleet may see, and the account is bound to this organisation alone.
+            </p>
+            {status.data?.canInstall ? (
+              <div className="mt-5">
+                <Button variant="primary" onClick={() => void connectAccount()} disabled={busy}>
+                  {busy ? 'opening GitHub…' : 'Continue with GitHub'}
+                </Button>
+              </div>
+            ) : (
+              <p className="mt-5 max-w-[54ch] text-[12px] leading-relaxed text-[var(--color-warn)]">
+                This control plane knows the App by id but not by name, so it cannot link to the install page. Set GITHUB_APP_SLUG to the value in https://github.com/apps/&lt;slug&gt;.
+              </p>
+            )}
+
+            {/* The install worked on GitHub's side and never came back here.
+                Practically always a missing Setup URL on the App. */}
+            {Boolean(status.data?.unclaimedInstallations) && (
+              <div className="mt-6 w-full max-w-[62ch] border-l-2 border-[var(--color-warn)] bg-[color-mix(in_oklab,var(--color-warn)_5%,transparent)] p-4 text-left">
+                <p className="font-mono text-[12px] text-[var(--color-warn)]">
+                  {status.data!.unclaimedInstallations} installation{status.data!.unclaimedInstallations === 1 ? '' : 's'} of this App exist on GitHub but are not connected to any organisation
+                </p>
+                <p className="mt-2 text-[12.5px] leading-relaxed text-[var(--color-fg-muted)]">
+                  That means the App has no <span className="font-mono text-[var(--color-fg)]">Setup URL</span>, so GitHub finishes an install and never returns here to record who it belongs to. Set it on the App — the exact value is under <span className="text-[var(--color-fg)]">Operator setup</span> below — then press Continue with GitHub again.
+                </p>
+              </div>
+            )}
+          </div>
         ) : (
           <>
-            <div className="grid gap-3 md:grid-cols-3">
-              <div className="border border-[var(--color-line)] p-3.5">
-                <p className="mono-label">GitHub App</p>
-                <p className="mt-2 font-mono text-[12px] text-[var(--color-signal)]">connected</p>
-                <p className="mt-1 text-[11.5px] text-[var(--color-fg-dim)]">short-lived installation tokens</p>
+            <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
+              <div>
+                <p className="font-mono text-[12.5px] text-[var(--color-fg)]">Import a repository</p>
+                <p className="mt-1 text-[12px] text-[var(--color-fg-dim)]">Its fleet.yaml becomes services on the first push.</p>
               </div>
-              <div className="border border-[var(--color-line)] p-3.5">
-                <p className="mono-label">accounts available</p>
-                <p className="mt-2 font-mono text-[12px] text-[var(--color-fg)]">{installations.length}</p>
-                <p className="mt-1 text-[11.5px] text-[var(--color-fg-dim)]">only App installations are listed</p>
-              </div>
-              <div className="border border-[var(--color-line)] p-3.5">
-                <p className="mono-label">connected to this fleet</p>
-                <p className="mt-2 font-mono text-[12px] text-[var(--color-fg)]">{connected.data?.repositories.length ?? 0}</p>
-                <p className="mt-1 text-[11.5px] text-[var(--color-fg-dim)]">each has an explicit branch policy</p>
+              <div className="flex flex-wrap items-center gap-2">
+                {installations.map((installation) => (
+                  <Button
+                    key={installation.id}
+                    onClick={() => { setInstallationId(installation.id); setSelected(null) }}
+                    variant={activeInstallation === installation.id ? 'primary' : 'ghost'}
+                  >
+                    {installation.account}
+                    {installation.suspended && <span className="ml-1.5 text-[var(--color-warn)]">suspended</span>}
+                    {installation.active === false && <span className="ml-1.5 text-[var(--color-warn)]">uninstalled</span>}
+                  </Button>
+                ))}
+                <input
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder="Search repositories…"
+                  className="w-56 border border-[var(--color-line)] bg-[var(--color-ink-950)] px-3 py-2 font-mono text-[11.5px] outline-none focus:border-[var(--color-line-2)]"
+                />
               </div>
             </div>
 
-            <div className="mt-6 border-t border-[var(--color-line)] pt-5">
-              <div className="flex flex-wrap items-end justify-between gap-3">
-                <div>
-                  <p className="font-mono text-[11.5px] text-[var(--color-fg)]">1. Choose a GitHub account</p>
-                  <p className="mt-1 text-[12px] text-[var(--color-fg-dim)]">Fleet can only see repositories the App was installed on.</p>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {installations.map((installation) => (
-                    <Button
-                      key={installation.id}
-                      onClick={() => { setInstallationId(installation.id); setSelected(null) }}
-                      variant={activeInstallation === installation.id ? 'primary' : 'ghost'}
-                    >
-                      {installation.account} <span className="opacity-65">{installation.type === 'Organization' ? 'org' : 'user'}</span>
-                    </Button>
-                  ))}
-                </div>
-              </div>
-
-              {!installations.length ? (
-                <p className="mt-4 text-[12.5px] text-[var(--color-fg-muted)]">The App is configured but not installed on a GitHub account yet.</p>
-              ) : (
-                <>
-                  <div className="mt-5 flex flex-wrap items-end justify-between gap-3">
-                    <div>
-                      <p className="font-mono text-[11.5px] text-[var(--color-fg)]">2. Choose a repository</p>
-                      <p className="mt-1 text-[12px] text-[var(--color-fg-dim)]">A connected repository can create its services from its own fleet.yaml on the first push.</p>
-                    </div>
-                    <label className="block">
-                      <span className="mono-label">filter repositories</span>
-                      <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="owner/repository" className="mt-1.5 w-56 border border-[var(--color-line)] bg-[var(--color-ink-950)] px-3 py-2 font-mono text-[11.5px] outline-none focus:border-[var(--color-line-2)]" />
-                    </label>
+            <div className="mt-4 max-h-[22rem] divide-y divide-[var(--color-line)] overflow-y-auto border border-[var(--color-line)]">
+              {catalog.loading ? (
+                <p className="p-4 font-mono text-[11px] text-[var(--color-fg-dim)]">loading repositories…</p>
+              ) : visibleRepos.map((repo) => {
+                const alreadyConnected = connected.data?.repositories.some((entry) => entry.fullName === repo.fullName)
+                return (
+                  <div
+                    key={repo.fullName}
+                    className={`flex items-center gap-3 px-4 py-2.5 transition-colors ${selected?.fullName === repo.fullName ? 'bg-[var(--color-ink-800)]' : ''}`}
+                  >
+                    <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${repo.private ? 'bg-[var(--color-warn)]' : 'bg-[var(--color-signal)]'}`} />
+                    <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{repo.fullName}</span>
+                    <span className="hidden font-mono text-[10px] text-[var(--color-fg-dim)] sm:inline">
+                      {repo.private ? 'private' : 'public'} · {repo.defaultBranch}
+                    </span>
+                    {alreadyConnected ? (
+                      <span className="font-mono text-[10.5px] text-[var(--color-signal)]">connected</span>
+                    ) : (
+                      <Button onClick={() => setSelected(repo)} variant={selected?.fullName === repo.fullName ? 'primary' : 'ghost'}>
+                        Import
+                      </Button>
+                    )}
                   </div>
-                  <div className="mt-3 max-h-64 divide-y divide-[var(--color-line)] overflow-y-auto border border-[var(--color-line)]">
-                    {catalog.loading ? <p className="p-4 font-mono text-[11px] text-[var(--color-fg-dim)]">loading repositories…</p> : visibleRepos.map((repo) => {
-                      const alreadyConnected = connected.data?.repositories.some((entry) => entry.fullName === repo.fullName)
-                      return (
-                        <button key={repo.fullName} onClick={() => setSelected(repo)} className={`flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-[var(--color-ink-800)] ${selected?.fullName === repo.fullName ? 'bg-[var(--color-ink-800)]' : ''}`}>
-                          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${repo.private ? 'bg-[var(--color-warn)]' : 'bg-[var(--color-signal)]'}`} />
-                          <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{repo.fullName}</span>
-                          <span className="font-mono text-[10px] text-[var(--color-fg-dim)]">{repo.private ? 'private' : 'public'} · {repo.defaultBranch}</span>
-                          {alreadyConnected && <span className="font-mono text-[10px] text-[var(--color-signal)]">connected</span>}
-                        </button>
-                      )
-                    })}
-                    {!catalog.loading && !visibleRepos.length && <p className="p-4 text-[12px] text-[var(--color-fg-dim)]">No repositories match this filter.</p>}
-                  </div>
-                </>
-              )}
+                )
+              })}
+              {!catalog.loading && !visibleRepos.length && <p className="p-4 text-[12px] text-[var(--color-fg-dim)]">No repositories match this search.</p>}
             </div>
+
+            {status.data?.canInstall && (
+              <p className="mt-2.5 text-[12px] text-[var(--color-fg-dim)]">
+                Missing a repository?{' '}
+                <button
+                  onClick={() => void connectAccount()}
+                  disabled={busy}
+                  className="underline underline-offset-2 hover:text-[var(--color-fg)] disabled:opacity-50"
+                >
+                  Adjust what Fleet can see, or add another account
+                </button>
+              </p>
+            )}
 
             {selected && (
               <div className="mt-5 border border-[var(--color-line-2)] bg-[var(--color-ink-900)] p-4 fade-up">
-                <div className="flex flex-wrap items-baseline justify-between gap-3"><p className="font-mono text-[12px] text-[var(--color-fg)]">3. Set deploy policy for {selected.fullName}</p><span className="font-mono text-[10px] text-[var(--color-fg-dim)]">{selected.private ? 'private — App token required' : 'public repository'}</span></div>
+                <div className="flex flex-wrap items-baseline justify-between gap-3">
+                  <p className="font-mono text-[12px] text-[var(--color-fg)]">Import {selected.fullName}</p>
+                  <span className="font-mono text-[10px] text-[var(--color-fg-dim)]">{selected.private ? 'private — App token required' : 'public repository'}</span>
+                </div>
                 <div className="mt-4 grid gap-4 md:grid-cols-2">
                   <Field label="watch branch" value={branch} onChange={(event) => setBranch(event.target.value)} hint="Only pushes to this branch trigger Fleet." />
                   <Field label="manifest path" value={manifestPath} onChange={(event) => setManifestPath(event.target.value)} hint="Relative path, normally fleet.yaml." />
                 </div>
-                <div className="mt-4 flex flex-wrap items-center gap-3"><Button variant="primary" onClick={() => void connect()} disabled={busy || !branch.trim() || !manifestPath.trim()}>{busy ? 'connecting…' : 'Connect repository'}</Button><Button onClick={() => setSelected(null)} disabled={busy}>Cancel</Button><span className="text-[11.5px] text-[var(--color-fg-dim)]">Fleet verifies this repo belongs to the selected App installation before saving.</span></div>
+                <div className="mt-4 flex flex-wrap items-center gap-3">
+                  <Button variant="primary" onClick={() => void connect()} disabled={busy || !branch.trim() || !manifestPath.trim()}>{busy ? 'importing…' : 'Import repository'}</Button>
+                  <Button onClick={() => setSelected(null)} disabled={busy}>Cancel</Button>
+                </div>
               </div>
             )}
           </>
@@ -186,7 +346,28 @@ function GitHubWorkspace({ fleet }: { fleet: NonNullable<ReturnType<typeof useAu
           </div>
         </div>
 
-        {webhookUrl && <div className="mt-6 border-t border-[var(--color-line)] pt-5"><p className="font-mono text-[11.5px] text-[var(--color-fg)]">Webhook delivery</p><div className="mt-2"><Copyable text={webhookUrl} /></div><p className="mt-2 text-[12px] leading-relaxed text-[var(--color-fg-dim)]">GitHub repository Settings → Webhooks → Add webhook. Use JSON, “Just the push event”, and the same secret as WEBHOOK_SECRET on this control plane. The webhook is signed before Fleet fetches code.</p></div>}
+        {/* Operator-only, and a one-time job. Collapsed so the everyday screen
+            is a repository list and nothing else. */}
+        {webhookUrl && (
+          <details className="mt-6 border-t border-[var(--color-line)] pt-5">
+            <summary className="cursor-pointer font-mono text-[11.5px] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]">
+              Operator setup — App URLs and webhook delivery
+            </summary>
+            <div className="mt-4">
+              <p className="font-mono text-[11.5px] text-[var(--color-fg)]">GitHub App settings</p>
+              <p className="mt-2 max-w-[80ch] text-[12px] leading-relaxed text-[var(--color-fg-dim)]">
+                Set these two on the App itself, once. <span className="text-[var(--color-fg-muted)]">Setup URL</span> is where GitHub returns a browser after an install — it is what binds the installation to this organisation, and without it “Continue with GitHub” installs the App but connects nothing. <span className="text-[var(--color-fg-muted)]">Webhook URL</span> receives installation events, so uninstalling the App revokes Fleet&rsquo;s access immediately.
+              </p>
+              <div className="mt-2 grid gap-2"><Copyable text={`${status.data!.webhookBase}/github/setup`} /><Copyable text={`${status.data!.webhookBase}/webhooks/github`} /></div>
+
+              <p className="mt-5 font-mono text-[11.5px] text-[var(--color-fg)]">Per-repository push webhook</p>
+              <p className="mt-2 max-w-[80ch] text-[12px] leading-relaxed text-[var(--color-fg-dim)]">
+                Not needed for repositories imported above — pushes for those arrive at the App&rsquo;s own webhook already. This is for a repository Fleet reaches some other way, such as one hosted outside GitHub. Repository Settings → Webhooks → Add webhook, JSON, “Just the push event”, same secret as WEBHOOK_SECRET.
+              </p>
+              <div className="mt-2"><Copyable text={webhookUrl} /></div>
+            </div>
+          </details>
+        )}
       </div>
     </Panel>
   )

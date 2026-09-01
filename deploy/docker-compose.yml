@@ -96,6 +96,12 @@ services:
       GITHUB_APP_CLIENT_ID: ${GITHUB_APP_CLIENT_ID:-}
       GITHUB_APP_CLIENT_SECRET: ${GITHUB_APP_CLIENT_SECRET:-}
       GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github-app.pem
+      # From https://github.com/apps/<slug>. Without it the dashboard cannot
+      # send anyone into the install flow, which is the only thing that binds
+      # a new installation to their organisation.
+      GITHUB_APP_SLUG: ${GITHUB_APP_SLUG:-}
+      # Where GitHub returns the browser after an install completes.
+      PUBLIC_DASHBOARD_URL: ${PUBLIC_DASHBOARD_URL:-}
       # Agents pull by this address, so it must be what *they* can reach —
       # not "registry", which only resolves inside this compose network.
       REGISTRY_URL: ${REGISTRY_URL:?set REGISTRY_URL to a host:port your agents can reach}

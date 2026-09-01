@@ -57,6 +57,13 @@
       "when": 1787307000000,
       "tag": "0007_projects",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1787308000000,
+      "tag": "0008_github_installations",
+      "breakpoints": true
     }
   ]
 }

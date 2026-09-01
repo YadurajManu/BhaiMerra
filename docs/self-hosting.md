@@ -228,14 +228,37 @@ GitHub deploys** to that GitHub repository. Select **Just the push event** and
 use JSON payloads.
 
 For private repositories, create a GitHub App with **Contents: Read-only** and
-**Webhooks: Read & write**, install it on the repositories Fleet may read, and
-set these in `deploy/.env` before restarting the control plane:
+**Webhooks: Read & write**, and set these in `deploy/.env` before restarting
+the control plane:
 
 ```dotenv
 WEBHOOK_SECRET=a-long-random-shared-secret
 GITHUB_APP_ID=123456
+GITHUB_APP_SLUG=your-app-slug
 GITHUB_APP_PRIVATE_KEY=/absolute/path/to/github-app.pem
+PUBLIC_DASHBOARD_URL=https://dashboard.example.com
 ```
+
+Then set two URLs on the App itself. Both are shown ready to copy in
+**Settings → GitHub workspace**:
+
+| Field in the App's settings | Value |
+| --- | --- |
+| Setup URL | `https://<your-api>/github/setup` |
+| Webhook URL | `https://<your-api>/webhooks/github` |
+
+The Setup URL is what records **which organisation** installed the App. A
+GitHub App has a single installation list shared by every tenant of the
+control plane that runs it, so an installation that arrives without going
+through this flow belongs to nobody, and Fleet refuses to use it rather than
+guessing. The Webhook URL is the other half: it delivers installation events,
+so uninstalling the App from a GitHub account revokes Fleet's access to it
+immediately and deletes the repository connections that depended on it.
+
+An installation is claimed by exactly one organisation. If a second
+organisation on the same control plane tries to connect an account that is
+already connected, it is refused — it cannot list that account's repositories,
+cannot connect one, and cannot cause a build to clone with its token.
 
 The dashboard reports whether Fleet can reach the App and exposes the exact
 webhook endpoint. A push then fetches that commit, applies its root
@@ -243,8 +266,9 @@ webhook endpoint. A push then fetches that commit, applies its root
 the private key or webhook secret.
 
 Once configured, **Settings → GitHub workspace** provides the day-to-day
-connection flow: select one of the App's installed GitHub accounts, filter the
-repositories it can access, then explicitly connect a repository to a fleet.
+connection flow: **connect account** installs the App and binds it to your
+organisation, then you filter the repositories it can access and explicitly
+connect a repository to a fleet.
 For each connection you choose a watched branch and the manifest path. The
 first push can create services from that manifest; later pushes apply the
 exact pushed configuration before building and deploying. Disconnecting a

@@ -1,17 +1,22 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
 import { and, eq } from 'drizzle-orm'
 import { z } from 'zod'
-import type { FastifyInstance } from 'fastify'
+import type { FastifyInstance, FastifyRequest } from 'fastify'
 import { fleets, githubRepositories, services } from '../db/schema.js'
-import { parseManifest } from '../manifest/parse.js'
-import { syncManifest } from '../manifest/sync.js'
-import { checkoutRepo } from '../git/checkout.js'
-import { authenticatedCloneUrl, installationForRepo } from '../github/app.js'
-import { deployFromPush } from './deploy.js'
-import { dispatchEvent } from '../alerting/dispatch.js'
+import {
+  orgForInstallation,
+  orgRepositories,
+  releaseInstallation,
+  setInstallationSuspended,
+  pruneRepositories,
+} from '../github/installations.js'
+import { normaliseRepo, repoCandidates } from '../github/repo-url.js'
+import { deployRepository } from './repo-deploy.js'
 import { ApiError } from './errors.js'
+
+// Re-exported: this module was the original home, and callers (and tests)
+// still reach for it here.
+export { normaliseRepo }
 
 /**
  * Verify a GitHub-style HMAC over the *raw* body.
@@ -36,20 +41,45 @@ const pushEvent = z.object({
     ssh_url: z.string().optional(),
     html_url: z.string().optional(),
   }),
+  /** Present on every event delivered to a GitHub App, absent on a plain
+   *  repository webhook — which is exactly how the two paths tell apart. */
+  installation: z.object({ id: z.number() }).optional(),
 })
 
-/** Repos are written many ways; compare them on the part that identifies them. */
-export function normaliseRepo(url: string): string {
-  return url
-    .trim()
-    .toLowerCase()
-    .replace(/^git\+/, '')
-    .replace(/^https?:\/\//, '')
-    .replace(/^git@/, '')
-    .replace(/:/g, '/')
-    .replace(/\.git$/, '')
-    .replace(/\/+$/, '')
+/**
+ * Which connected repositories a push should deploy.
+ *
+ * Two filters, and both are load-bearing: the repository has to be one of
+ * them (a push arrives for every repo the App can see, most of which are not
+ * connected here), and the ref has to be the branch that connection watches
+ * (otherwise every feature branch deploys to production).
+ */
+export function pushTargets<T extends { cloneUrl: string; branch: string }>(
+  connections: T[],
+  candidates: string[],
+  ref: string
+): T[] {
+  return connections.filter(
+    (repo) => candidates.includes(normaliseRepo(repo.cloneUrl)) && ref === `refs/heads/${repo.branch}`
+  )
 }
+
+/** The sha a push event is about, or null when it deleted a branch. */
+function pushedSha(push: z.infer<typeof pushEvent>): string | null {
+  const sha = push.head_commit?.id ?? push.after
+  // A branch deletion pushes an all-zero sha; there is nothing to build.
+  if (!sha || /^0+$/.test(sha)) return null
+  return sha
+}
+
+const installationEvent = z.object({
+  action: z.string(),
+  installation: z.object({
+    id: z.number(),
+    account: z.object({ login: z.string(), type: z.string().optional() }).optional(),
+  }),
+  repositories_removed: z.array(z.object({ full_name: z.string() })).optional(),
+})
 
 export async function webhookRoutes(app: FastifyInstance) {
   const { db } = app.ctx
@@ -68,6 +98,164 @@ export async function webhookRoutes(app: FastifyInstance) {
     }
   )
 
+  /** Shared by both webhook endpoints; unset secret means verification is off. */
+  const verified = (req: FastifyRequest): boolean => {
+    const secret = app.ctx.config.WEBHOOK_SECRET
+    if (!secret) return true
+    const signature = req.headers['x-hub-signature-256']
+    if (typeof signature !== 'string') return false
+    return verifyGithubSignature((req as { rawBody?: string }).rawBody ?? '', secret, signature)
+  }
+
+  /**
+   * A push delivered to the App itself.
+   *
+   * The installation id identifies the account, the claim identifies the org,
+   * and the org's connected repositories say which fleets care. One repository
+   * may be connected to several fleets; each gets its own deploy.
+   */
+  async function handleAppPush(req: FastifyRequest, reply: import('fastify').FastifyReply) {
+    const parsed = pushEvent.safeParse(req.body)
+    if (!parsed.success) {
+      throw ApiError.unprocessable('unrecognised_payload', 'This does not look like a push event')
+    }
+    const push = parsed.data
+
+    if (!push.installation) {
+      // Delivered to the App's URL but without an installation — nothing here
+      // can say whose it is, and guessing is how tenancy holes are made.
+      return { ok: true, ignored: 'no installation on the event' }
+    }
+
+    const gitSha = pushedSha(push)
+    if (!gitSha) return { ok: true, ignored: 'branch deleted' }
+
+    const installationId = String(push.installation.id)
+    const claim = await orgForInstallation(app.ctx, installationId)
+    if (!claim) {
+      // Installed on GitHub but never bound to an org. Reported in the
+      // dashboard as an unclaimed installation; ignoring it is correct.
+      return { ok: true, ignored: 'installation is not connected to an organisation' }
+    }
+    if (claim.suspendedAt) return { ok: true, ignored: 'installation suspended' }
+
+    const candidates = repoCandidates(push.repository)
+    // Scoped to the claiming org: two orgs may each have connected the same
+    // public repository, and a push carrying one org's installation must not
+    // deploy into the other's fleets.
+    const connections = (await orgRepositories(app.ctx, claim.orgId)).filter((repo) =>
+      candidates.includes(normaliseRepo(repo.cloneUrl))
+    )
+    if (!connections.length) {
+      return { ok: true, ignored: 'repository is not connected to any fleet', repository: candidates[0] }
+    }
+
+    const onBranch = pushTargets(connections, candidates, push.ref)
+    if (!onBranch.length) {
+      return {
+        ok: true,
+        ignored: `watching ${[...new Set(connections.map((r) => r.branch))].join(', ')}, received ${push.ref}`,
+      }
+    }
+
+    // Ack now; build after. See the note above the per-fleet handler.
+    void reply.send({
+      ok: true,
+      ref: push.ref,
+      sha: gitSha.slice(0, 12),
+      fleets: onBranch.map((repo) => repo.fleetId),
+    })
+
+    setImmediate(() => {
+      for (const repo of onBranch) {
+        void deployRepository(
+          app,
+          {
+            fleetId: repo.fleetId,
+            orgId: claim.orgId,
+            gitSha,
+            sourceUrl: repo.cloneUrl,
+            candidates,
+            connected: repo,
+            ref: push.ref,
+            subject: repo.fullName,
+          },
+          req.log
+        )
+      }
+    })
+
+    return reply
+  }
+
+  /**
+   * Installation lifecycle, app-wide.
+   *
+   * Unlike the push endpoint there is no fleet in the path: these events are
+   * about the App itself, and the installation id is what identifies the
+   * account. This is the half of the connection that keeps access *revocable* —
+   * without it, uninstalling Fleet from a GitHub account leaves rows here that
+   * still look connected in the dashboard.
+   *
+   * `created` is deliberately ignored. An installation only becomes an org's
+   * when somebody completes the install flow from inside Fleet and the setup
+   * callback redeems their nonce; a webhook alone cannot say whose it is.
+   */
+  app.post('/webhooks/github', async (req, reply) => {
+    if (!verified(req)) throw ApiError.unauthorized('Invalid webhook signature')
+
+    const event = req.headers['x-github-event']
+    if (event === 'ping') return { ok: true, pong: true }
+
+    // A push delivered to the App covers every repository the App is
+    // installed on, so connecting a repository in the dashboard is the whole
+    // setup — nobody adds a webhook to a repository by hand again.
+    if (event === 'push') return handleAppPush(req, reply)
+
+    if (event !== 'installation' && event !== 'installation_repositories') {
+      return { ok: true, ignored: `event "${String(event ?? 'none')}"` }
+    }
+
+    const parsed = installationEvent.safeParse(req.body)
+    if (!parsed.success) {
+      throw ApiError.unprocessable('unrecognised_payload', 'This does not look like an installation event')
+    }
+    const { action, installation, repositories_removed: removed } = parsed.data
+    const installationId = String(installation.id)
+
+    if (event === 'installation') {
+      switch (action) {
+        case 'deleted': {
+          const result = await releaseInstallation(app.ctx, installationId)
+          req.log.info({ installationId, ...result }, 'GitHub installation removed')
+          return { ok: true, released: result }
+        }
+        case 'suspend':
+        case 'unsuspend': {
+          const found = await setInstallationSuspended(app.ctx, installationId, action === 'suspend')
+          return { ok: true, [action === 'suspend' ? 'suspended' : 'unsuspended']: found }
+        }
+        default:
+          return { ok: true, ignored: `installation action "${action}"` }
+      }
+    }
+
+    // Keyed on the payload rather than the action: GitHub may report removals
+    // alongside additions, and a revocation must not be missed because the
+    // event happened to be labelled "added".
+    if (removed?.length) {
+      const pruned = await pruneRepositories(
+        app.ctx,
+        installationId,
+        removed.map((r) => r.full_name)
+      )
+      req.log.info({ installationId, pruned }, 'GitHub repositories removed from installation')
+      return { ok: true, pruned }
+    }
+
+    return { ok: true, ignored: `installation_repositories action "${action}"` }
+  })
+
   /**
    * The "push" half of git-push deploys (PRD 7.2).
    *
@@ -81,15 +269,8 @@ export async function webhookRoutes(app: FastifyInstance) {
     const [fleet] = await db.select().from(fleets).where(eq(fleets.id, fleetId)).limit(1)
     if (!fleet) throw ApiError.notFound('Fleet')
 
-    const secret = app.ctx.config.WEBHOOK_SECRET
-    if (secret) {
-      const signature = req.headers['x-hub-signature-256']
-      const raw = (req as { rawBody?: string }).rawBody ?? ''
-      if (typeof signature !== 'string' || !verifyGithubSignature(raw, secret, signature)) {
-        // Anyone who can reach this endpoint could otherwise trigger builds.
-        throw ApiError.unauthorized('Invalid webhook signature')
-      }
-    }
+    // Anyone who can reach this endpoint could otherwise trigger builds.
+    if (!verified(req)) throw ApiError.unauthorized('Invalid webhook signature')
 
     const event = req.headers['x-github-event']
     if (event === 'ping') return { ok: true, pong: true }
@@ -101,20 +282,10 @@ export async function webhookRoutes(app: FastifyInstance) {
     }
     const push = parsed.data
 
-    const gitSha = push.head_commit?.id ?? push.after
-    if (!gitSha || /^0+$/.test(gitSha)) {
-      // A branch deletion pushes an all-zero sha; there is nothing to build.
-      return { ok: true, ignored: 'branch deleted' }
-    }
+    const gitSha = pushedSha(push)
+    if (!gitSha) return { ok: true, ignored: 'branch deleted' }
 
-    const candidates = [
-      push.repository.clone_url,
-      push.repository.ssh_url,
-      push.repository.html_url,
-      push.repository.full_name,
-    ]
-      .filter(Boolean)
-      .map((u) => normaliseRepo(u as string))
+    const candidates = repoCandidates(push.repository)
 
     const fleetServices = await db
       .select()
@@ -153,93 +324,28 @@ export async function webhookRoutes(app: FastifyInstance) {
       manifest: connected?.manifestPath ?? 'fleet.yaml',
     })
 
-    setImmediate(async () => {
-      // All matched services share one repository and commit. Fetch once so
-      // the exact fleet.yaml and all builds are guaranteed to come from the
-      // same tree rather than from whatever happens to be on the default
-      // branch when the webhook arrives.
-      const source = matched[0]
-      const sourceUrl = connected?.cloneUrl ?? source?.repoUrl
-      if (!sourceUrl) return
-      let checkout: Awaited<ReturnType<typeof checkoutRepo>> | undefined
-      try {
-        let remote = sourceUrl
-        if (app.ctx.github) {
-          try {
-            const fullName = normaliseRepo(remote).split('/').slice(-2).join('/')
-            const installation = await installationForRepo(app.ctx.github, fullName)
-            if (installation) remote = await authenticatedCloneUrl(app.ctx.github, installation, remote)
-          } catch (err) {
-            req.log.warn({ err, repository: sourceUrl }, 'could not obtain a GitHub installation token')
-          }
-        }
+    // All matched services share one repository and commit. Fetch once so the
+    // exact fleet.yaml and all builds come from the same tree, not from
+    // whatever happens to be on the default branch when the webhook arrives.
+    const source = matched[0]
+    const sourceUrl = connected?.cloneUrl ?? source?.repoUrl
+    if (!sourceUrl) return reply
 
-        checkout = await checkoutRepo({
-          repoUrl: remote,
-          gitSha,
-          workdir: app.ctx.config.BUILD_WORKDIR,
-        })
-
-        // The manifest travels with the code. Applying it before the build
-        // lets a single push change resources, routes, or services without a
-        // second manual dashboard step.
-        const parsedManifest = parseManifest(
-          await readFile(join(checkout.path, connected?.manifestPath ?? 'fleet.yaml'), 'utf8')
-        )
-        // A connected repository is enough to bootstrap: services in its
-        // manifest inherit its safe, App-authorised clone URL unless they
-        // explicitly point at another repository.
-        const manifest = connected
-          ? {
-              ...parsedManifest,
-              services: parsedManifest.services.map((service) => ({ ...service, repo: service.repo ?? connected.cloneUrl })),
-            }
-          : parsedManifest
-        // A push deploy names its project after the repository, which is the
-        // grouping a person already has in their head for these services.
-        const repoProject = normaliseRepo(connected?.fullName ?? sourceUrl)
-          .split('/')
-          .pop()
-          ?.replace(/[^a-z0-9-]+/g, '-')
-          .replace(/^-+|-+$/g, '')
-        const synced = await syncManifest(
-          app.ctx,
+    setImmediate(() => {
+      void deployRepository(
+        app,
+        {
           fleetId,
-          fleet.orgId,
-          manifest,
-          undefined,
-          repoProject || undefined
-        )
-        const refreshed = await db.select().from(services).where(eq(services.fleetId, fleetId))
-        const toDeploy = refreshed.filter(
-          (service) => service.repoUrl && candidates.includes(normaliseRepo(service.repoUrl))
-        )
-
-        for (const service of toDeploy) {
-          await deployFromPush(app, service, gitSha, checkout.path)
-          req.log.info({ service: service.name, sha: gitSha.slice(0, 12) }, 'push deploy succeeded')
-        }
-        req.log.info(
-          { repository: normaliseRepo(sourceUrl), sha: gitSha.slice(0, 12), ...synced },
-          'fleet.yaml applied from push'
-        )
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        req.log.error({ err, repository: sourceUrl }, 'push deploy failed')
-        await dispatchEvent(
-          app.ctx,
-          {
-            type: 'deploy.failed',
-            fleetId,
-            at: new Date().toISOString(),
-            subject: source?.name ?? connected?.fullName ?? 'repository',
-            detail: { sha: gitSha.slice(0, 12), ref: push.ref, reason: message },
-          },
-          { log: req.log }
-        )
-      } finally {
-        await checkout?.dispose().catch(() => {})
-      }
+          orgId: fleet.orgId,
+          gitSha,
+          sourceUrl,
+          candidates,
+          connected,
+          ref: push.ref,
+          subject: source?.name ?? connected?.fullName ?? 'repository',
+        },
+        req.log
+      )
     })
 
     return reply

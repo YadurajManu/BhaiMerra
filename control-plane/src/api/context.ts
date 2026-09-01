@@ -41,6 +41,7 @@ export function createContext(config: Config): AppContext {
         appId: config.GITHUB_APP_ID,
         privateKeyPath: config.GITHUB_APP_PRIVATE_KEY_PATH,
         clientId: config.GITHUB_APP_CLIENT_ID,
+        slug: config.GITHUB_APP_SLUG,
       }
     : null
 
