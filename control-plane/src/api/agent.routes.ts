@@ -6,6 +6,7 @@ import { hashToken, newAgentToken, isPairingToken } from '../lib/tokens.js'
 import { recordAudit } from '../lib/audit.js'
 import { ApiError } from './errors.js'
 import { requireAgent } from './guards.js'
+import { pendingForNode } from '../backup/store.js'
 import { reclaimToNode } from '../scheduler/reclaim.js'
 import { detectDrift } from '../heartbeat/drift.js'
 import { dispatchEvent } from '../alerting/dispatch.js'
@@ -428,6 +429,14 @@ export async function agentRoutes(app: FastifyInstance) {
     return {
       node_id: nodeId,
       generated_at: new Date().toISOString(),
+      // Volume backups waiting on this node. A backup can only be taken where
+      // the volume is, and the control plane never reaches into a node — so it
+      // travels with the desired state and the node collects it.
+      backups: (await pendingForNode(app.ctx, nodeId)).map((b) => ({
+        id: b.id,
+        volume: b.volume,
+        service: b.serviceName,
+      })),
       // A registry that nodes reach from outside the LAN has to require
       // credentials, and the node cannot pull without them. Sent on the same
       // terms as a secret: over TLS, to a caller that proved it is this node.

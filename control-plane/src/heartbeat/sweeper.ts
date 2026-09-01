@@ -3,6 +3,7 @@ import { deployments, fleets, nodes } from '../db/schema.js'
 import type { RescheduleOutcome } from '../scheduler/reschedule.js'
 import { rescheduleFromNode } from '../scheduler/reschedule.js'
 import { reconcileReplicas, type ScaleOutcome } from '../scheduler/replicas.js'
+import { failStalledBackups } from '../backup/store.js'
 import { invalidateRoutesForService } from '../ingress/routes.js'
 import type { AppContext } from '../api/context.js'
 import type { FleetEventPayload } from '../lib/events.js'
@@ -294,6 +295,17 @@ export async function sweepOnce(ctx: AppContext, opts: SweepOptions = {}): Promi
             opts.log?.error({ err, nodeId: node.id }, 'reschedule failed after node went down')
           }
         }
+        // A backup whose node died mid-archive leaves its row `running`
+        // forever, and the one-at-a-time rule then blocks every future backup
+        // of that service — a stall that presents as "backups quietly stopped
+        // working".
+        try {
+          const stalled = await failStalledBackups(ctx)
+          for (const id of stalled) opts.log?.info({ backupId: id }, 'failed an abandoned backup')
+        } catch (err) {
+          opts.log?.error({ err }, 'backup stall sweep failed')
+        }
+
         // Replica counts are desired state, so they are reconciled on the
         // same tick that notices a node has gone. A replica lost with its
         // node is replaced here rather than staying one short until somebody

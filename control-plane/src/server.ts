@@ -10,6 +10,7 @@ import { githubRoutes } from './api/github.routes.js'
 import { installRoutes } from './api/install.routes.js'
 import { serviceRoutes } from './api/services.routes.js'
 import { secretRoutes } from './api/secrets.routes.js'
+import { backupRoutes } from './api/backups.routes.js'
 import { setupTunnelServer } from './tunnel/registry.js'
 import type { AppContext } from './api/context.js'
 
@@ -89,6 +90,7 @@ export async function buildServer(ctx: AppContext): Promise<FastifyInstance> {
   await app.register(installRoutes)
   await app.register(serviceRoutes)
   await app.register(secretRoutes)
+  await app.register(backupRoutes)
 
   setupTunnelServer(app, ctx, ctx.tunnels)
 

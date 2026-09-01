@@ -166,6 +166,9 @@ type mount struct {
 	Type   string `json:"Type"`
 	Source string `json:"Source"`
 	Target string `json:"Target"`
+	// Used by the backup reader, which mounts a live volume while the service
+	// is still writing to it and must not be able to alter what it copies.
+	ReadOnly bool `json:"ReadOnly,omitempty"`
 }
 
 type hostConfig struct {

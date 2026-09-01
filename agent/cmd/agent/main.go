@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fleet-os/fleet-os/agent/internal/backup"
 	"github.com/fleet-os/fleet-os/agent/internal/capability"
 	"github.com/fleet-os/fleet-os/agent/internal/client"
 	"github.com/fleet-os/fleet-os/agent/internal/diagnostics"
@@ -106,6 +107,10 @@ func run() error {
 		Log:    log,
 	}
 
+	// Volume backups. The control plane hands them over with the desired
+	// state; this performs them and reports each outcome.
+	backups := &backup.Runner{Docker: dockerClient, Report: api, Log: log}
+
 	// A node whose Docker is down is still a live node: it reports health and
 	// stays in the fleet, it just cannot run workloads. Say so once at startup
 	// rather than failing every reconcile in silence.
@@ -131,7 +136,7 @@ func run() error {
 
 	// Reconciliation runs alongside the heartbeat rather than inside it, so a
 	// slow image pull never delays liveness and get the node marked down.
-	go runReconciler(ctx, engine, api, reporter, interval, log)
+	go runReconciler(ctx, engine, api, backups, reporter, interval, log)
 
 	// Reverse tunnel connects to the control plane and multiplexes incoming
 	// HTTP ingress requests directly to local containers behind NAT/firewalls.
@@ -211,7 +216,7 @@ func register(ctx context.Context, log *slog.Logger, controlPlane, token, stateP
 // Losing the control plane is not fatal (PRD §9): already-running containers
 // keep serving, and the agent simply retries. It never stops workloads because
 // it cannot reach the control plane.
-func runReconciler(ctx context.Context, engine *reconcile.Engine, api *client.Client, reporter *diagnostics.Reporter, interval time.Duration, log *slog.Logger) {
+func runReconciler(ctx context.Context, engine *reconcile.Engine, api *client.Client, backups *backup.Runner, reporter *diagnostics.Reporter, interval time.Duration, log *slog.Logger) {
 	period := interval * 2
 	if period < 5*time.Second {
 		period = 5 * time.Second
@@ -239,6 +244,18 @@ func runReconciler(ctx context.Context, engine *reconcile.Engine, api *client.Cl
 		if err != nil {
 			log.Warn("reconcile failed", "err", err)
 			continue
+		}
+
+		// Backups run after reconciliation, never instead of it. Copying a few
+		// gigabytes takes minutes, and a node that stopped keeping its
+		// containers correct for the length of a backup would be trading the
+		// live service for a copy of it.
+		if len(desired.Backups) > 0 {
+			jobs := make([]backup.Job, 0, len(desired.Backups))
+			for _, b := range desired.Backups {
+				jobs = append(jobs, backup.Job{ID: b.ID, Volume: b.Volume, Service: b.Service})
+			}
+			backups.Run(ctx, jobs)
 		}
 		logCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		reporter.CaptureLogs(logCtx, desired)

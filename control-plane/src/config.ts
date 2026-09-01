@@ -31,6 +31,12 @@ const schema = z.object({
   BUILDX_CACHE_MODE: z.enum(['max', 'min', 'off']).default('max'),
   /** Root the build runner checks out repositories into. */
   BUILD_WORKDIR: z.string().default('/tmp/fleet-os/builds'),
+  /**
+   * Where volume backups are stored. Deliberately not under BUILD_WORKDIR:
+   * that is scratch space and gets cleaned, and a backup is the one thing here
+   * that cannot be regenerated.
+   */
+  BACKUP_DIR: z.string().default('/var/lib/fleet-os/backups'),
   BUILD_TIMEOUT_MS: z.coerce.number().int().default(20 * 60_000),
   /** Differs between source (src/db/migrations) and the built image. */
   MIGRATIONS_DIR: z.string().default('src/db/migrations'),

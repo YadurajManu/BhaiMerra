@@ -10,6 +10,7 @@ import { openCommand } from './open.js'
 import { downCommand } from './down.js'
 import { unpairCommand, agentCommand } from './unpair.js'
 import { secretsCommand } from './secrets.js'
+import { backupCommand, backupsCommand } from './backups.js'
 import {
   applyCommand,
   deployCommand,
@@ -52,6 +53,8 @@ export const commands: Record<string, Command> = {
   events: eventsCommand,
   alerts: alertsCommand,
   secrets: secretsCommand,
+  backup: backupCommand,
+  backups: backupsCommand,
   unpair: unpairCommand,
   agent: agentCommand,
 }

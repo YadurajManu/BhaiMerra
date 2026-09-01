@@ -82,6 +82,40 @@ pass show db/url | fleet secrets set DATABASE_URL   # or pipe it
 fleet secrets ls
 ```
 
+## Backups
+
+A volume is the one thing Fleet cannot reproduce. An image rebuilds from a
+commit and a container recreates from a manifest; the bytes in a database's
+data directory exist on exactly one disk, in one machine.
+
+```bash
+fleet backup db          # copy its volume off the node holding it
+fleet backups db         # what exists, newest first
+```
+
+The copy is made *by the node*, because only the node can read its own disk —
+agents make outbound connections only, and the control plane never reaches into
+one. So a backup is a job: the row is created immediately, the node performs it
+on its next poll, and the archive is uploaded afterwards. Attempts that failed
+stay in the list, because "the last three backups failed" is what you need to
+know when you come looking.
+
+Nothing runs inside the container that reads the volume. Docker will copy a
+path out of a container that was only ever *created*, so the volume is mounted
+read-only into a created container, its contents are read out, and it is
+removed — no shell, no tar binary, and nothing that can misbehave while a
+database is live on the other side of the same volume. The image used is the
+one the service already runs, so a backup never waits on a pull.
+
+A service with no volume has nothing to back up, and says so rather than
+producing an archive of an empty directory and implying a safety it does not
+provide.
+
+One backup of a service runs at a time. A backup whose node stops reporting is
+failed after thirty minutes rather than left `running` forever — that would
+block every later backup of the same service, which presents as backups
+quietly ceasing to work.
+
 ## Replicas
 
 ```yaml

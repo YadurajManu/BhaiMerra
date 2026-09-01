@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/fleet-os/fleet-os/agent/internal/capability"
@@ -122,6 +123,17 @@ type DesiredState struct {
 	// require them, and without this the pull fails with a 401 the node cannot
 	// do anything about.
 	RegistryAuth string `json:"registry_auth,omitempty"`
+	// Volume backups waiting on this node. A backup can only be taken where the
+	// volume is, and the control plane never reaches into a node — so the work
+	// travels with the desired state and the node collects it.
+	Backups []BackupJob `json:"backups,omitempty"`
+}
+
+// BackupJob is one volume the control plane is waiting for a copy of.
+type BackupJob struct {
+	ID      string `json:"id"`
+	Volume  string `json:"volume"`
+	Service string `json:"service"`
 }
 
 // APIError carries the control plane's machine-readable code so the agent can
@@ -221,4 +233,46 @@ func (c *Client) DesiredState(ctx context.Context) (*DesiredState, error) {
 		return nil, err
 	}
 	return &out, nil
+}
+
+// ClaimBackup tells the control plane this node has started reading a volume.
+//
+// Claimed rather than assumed: without it a backup whose node died mid-archive
+// is indistinguishable from one nothing ever picked up, and the control plane
+// has nothing to time out.
+func (c *Client) ClaimBackup(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodPost, "/agent/backups/"+id+"/claim", nil, nil)
+}
+
+// FailBackup reports why a backup could not be made.
+func (c *Client) FailBackup(ctx context.Context, id, reason string) error {
+	return c.do(ctx, http.MethodPost, "/agent/backups/"+id+"/fail", map[string]string{"reason": reason}, nil)
+}
+
+// UploadBackup sends the archive.
+//
+// Not routed through `do`, which encodes JSON and caps the response it reads —
+// this body is measured in gigabytes and is already compressed.
+func (c *Client) UploadBackup(ctx context.Context, id string, archive []byte) error {
+	req, err := http.NewRequestWithContext(
+		ctx, http.MethodPost, c.baseURL+"/agent/backups/"+id, bytes.NewReader(archive),
+	)
+	if err != nil {
+		return fmt.Errorf("build upload: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.ContentLength = int64(len(archive))
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("upload backup: %w", err)
+	}
+	defer resp.Body.Close()
+
+	payload, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		return &APIError{StatusCode: resp.StatusCode, Message: strings.TrimSpace(string(payload))}
+	}
+	return nil
 }

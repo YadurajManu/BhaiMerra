@@ -3,6 +3,7 @@ import {
   uuid,
   text,
   integer,
+  bigint,
   boolean,
   timestamp,
   jsonb,
@@ -22,6 +23,8 @@ export const nodeStatus = pgEnum('node_status', ['online', 'offline', 'cordoned'
 export const reliabilityTier = pgEnum('reliability_tier', ['opportunistic', 'standard', 'high'])
 export const placementPolicy = pgEnum('placement_policy', ['pinned', 'preferred', 'flexible'])
 export const reclaimPolicy = pgEnum('reclaim_policy', ['eager', 'idle', 'manual'])
+export const backupStatus = pgEnum('backup_status', ['pending', 'running', 'complete', 'failed'])
+
 export const deploymentStatus = pgEnum('deployment_status', [
   'queued',
   'building',
@@ -272,6 +275,12 @@ export const services = pgTable(
      */
     volumePath: text('volume_path'),
     replicas: integer('replicas').notNull().default(1),
+    /**
+     * How often to back this service's volume up unasked, e.g. "daily".
+     * Null means never, which is what every service meant before backups
+     * existed.
+     */
+    backupSchedule: text('backup_schedule'),
 
     healthCheckPath: text('health_check_path').default('/'),
     healthIntervalSec: integer('health_interval_sec').notNull().default(15),
@@ -438,17 +447,45 @@ export const secrets = pgTable(
   ]
 )
 
-export const backups = pgTable('backups', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  serviceId: uuid('service_id')
-    .notNull()
-    .references(() => services.id, { onDelete: 'cascade' }),
-  volumeRef: text('volume_ref').notNull(),
-  storageLocation: text('storage_location').notNull(),
-  sizeBytes: integer('size_bytes'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  retentionExpiresAt: timestamp('retention_expires_at', { withTimezone: true }),
-})
+/**
+ * A copy of a volume, taken by the node that holds it.
+ *
+ * A job before it is an artifact: the row exists from the moment a backup is
+ * asked for, the node performs it on its next poll, and the archive arrives
+ * afterwards. Attempts that failed stay here, because "the last three backups
+ * failed" is the half people actually need when they come looking — which the
+ * original shape, describing only a finished file, had nowhere to put.
+ */
+export const backups = pgTable(
+  'backups',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    serviceId: uuid('service_id')
+      .notNull()
+      .references(() => services.id, { onDelete: 'cascade' }),
+    /** Kept when the node goes: a backup from a machine that no longer exists
+     *  is exactly when its origin matters. */
+    nodeId: uuid('node_id').references(() => nodes.id, { onDelete: 'set null' }),
+    volumeRef: text('volume_ref').notNull(),
+    status: backupStatus('status').notNull().default('pending'),
+    /** Relative to the control plane's backup root; null until it lands. */
+    storageLocation: text('storage_location'),
+    sizeBytes: bigint('size_bytes', { mode: 'number' }),
+    /** sha256, so a restore can prove it got what was stored. */
+    checksum: text('checksum'),
+    failureReason: text('failure_reason'),
+    scheduled: boolean('scheduled').notNull().default(false),
+    requestedByUserId: uuid('requested_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    startedAt: timestamp('started_at', { withTimezone: true }),
+    finishedAt: timestamp('finished_at', { withTimezone: true }),
+    retentionExpiresAt: timestamp('retention_expires_at', { withTimezone: true }),
+  },
+  (t) => [
+    index('backups_service_idx').on(t.serviceId, t.createdAt),
+    index('backups_pending_idx').on(t.nodeId, t.status),
+  ]
+)
 
 /* ── relations ─────────────────────────────────────────────────── */
 

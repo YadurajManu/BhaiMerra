@@ -115,6 +115,7 @@ services:
       # every intermediate build stage.
       BUILDX_CACHE_MODE: ${BUILDX_CACHE_MODE:-max}
       BUILD_WORKDIR: /var/lib/fleet-os/builds
+      BACKUP_DIR: /var/lib/fleet-os/backups
       INSTALL_SCRIPT_PATH: /app/install/install.sh
       AGENT_BIN_DIR: /app/install/bin
       # Agents call the root API, which differs from the dashboard's /api
@@ -130,6 +131,9 @@ services:
       - '${INGRESS_PORT:-8081}:8081'  # public edge
     volumes:
       - builds:/var/lib/fleet-os/builds
+      # Backups are the one thing here that cannot be regenerated, so they get
+      # their own volume rather than sharing scratch space that gets cleaned.
+      - backups:/var/lib/fleet-os/backups
       # The installer and the cross-compiled agents, served at /install so a
       # self-hosted control plane needs no CDN behind it.
       - ../scripts/install.sh:/app/install/install.sh:ro
@@ -186,3 +190,4 @@ volumes:
   pgdata:
   registrydata:
   builds:
+  backups:

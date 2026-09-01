@@ -55,6 +55,8 @@ const GROUPS: Array<[string, Array<[string, string]>]> = [
       ['secrets set <KEY>', 'Store a credential; the value is never echoed or logged'],
       ['secrets import [.env]', 'Store the secrets fleet.yaml declares, read from a .env file'],
       ['secrets rm <KEY>', 'Remove a stored credential'],
+      ['backup <service>', "Copy a service's volume off the node holding it"],
+      ['backups <service>', 'List backups, newest first'],
       ['nodes cordon <name>', 'Stop scheduling new work onto a node'],
       ['nodes uncordon <name>', 'Allow scheduling again'],
       ['nodes rm <name>', 'Revoke and remove a node'],
