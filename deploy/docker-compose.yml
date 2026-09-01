@@ -110,6 +110,10 @@ services:
       # pull. Leave empty for a registry that needs none.
       REGISTRY_CREDENTIALS: ${REGISTRY_CREDENTIALS:-}
       BUILDX_BUILDER: ${BUILDX_BUILDER:-}
+      # "min" when the registry is behind a proxy with a request size limit —
+      # Cloudflare's free plan rejects bodies over 100MB, and "max" exports
+      # every intermediate build stage.
+      BUILDX_CACHE_MODE: ${BUILDX_CACHE_MODE:-max}
       BUILD_WORKDIR: /var/lib/fleet-os/builds
       INSTALL_SCRIPT_PATH: /app/install/install.sh
       AGENT_BIN_DIR: /app/install/bin

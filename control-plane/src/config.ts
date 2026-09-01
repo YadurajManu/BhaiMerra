@@ -22,6 +22,13 @@ const schema = z.object({
   REGISTRY_URL: z.string().optional(),
   REGISTRY_CREDENTIALS: z.string().optional(),
   BUILDX_BUILDER: z.string().optional(),
+  /**
+   * How much build cache to push back to the registry. "max" reuses the most
+   * between builds; "min" uploads far less, which is what you want when the
+   * registry is behind a proxy that caps request bodies — Cloudflare's free
+   * plan rejects anything over 100MB. "off" disables the export.
+   */
+  BUILDX_CACHE_MODE: z.enum(['max', 'min', 'off']).default('max'),
   /** Root the build runner checks out repositories into. */
   BUILD_WORKDIR: z.string().default('/tmp/fleet-os/builds'),
   BUILD_TIMEOUT_MS: z.coerce.number().int().default(20 * 60_000),

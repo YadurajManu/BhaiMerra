@@ -25,6 +25,13 @@ export class BuildxRunner implements BuildRunner {
       /** Skip `--push` and load locally instead; used when no registry is set. */
       pushToRegistry?: boolean
       timeoutMs?: number
+      /**
+       * How much build cache to export. "max" caches intermediate stages and
+       * gives the best reuse; "min" caches only the final image's layers and
+       * uploads far less, which matters when the registry sits behind a proxy
+       * with a request size limit. "off" skips the export entirely.
+       */
+      cacheMode?: 'max' | 'min' | 'off'
       log?: (line: string) => void
     }
   ) {}
@@ -134,7 +141,24 @@ export class BuildxRunner implements BuildRunner {
     if (this.opts.builder) args.push('--builder', this.opts.builder)
 
     if (this.opts.pushToRegistry !== false && this.opts.registry) {
-      args.push('--push', '--cache-to', `type=registry,ref=${repositoryOf(tag)}:buildcache,mode=max`)
+      args.push('--push')
+
+      // Build cache is an optimisation, and it is exported *after* the image
+      // has already been pushed. Letting a failed cache upload fail the whole
+      // build throws away a perfectly good image — which is exactly what
+      // happened behind Cloudflare, whose free plan rejects request bodies
+      // over 100MB with a 413 and took the deploy down with it.
+      //
+      // ignore-error keeps that a slow build next time instead of a failed one
+      // now. mode is configurable because "max" exports every intermediate
+      // stage, which is the version most likely to exceed such a limit.
+      const cacheMode = this.opts.cacheMode ?? 'max'
+      if (cacheMode !== 'off') {
+        args.push(
+          '--cache-to',
+          `type=registry,ref=${repositoryOf(tag)}:buildcache,mode=${cacheMode},ignore-error=true`
+        )
+      }
     } else {
       // A multi-platform build cannot be --load into the local daemon, so
       // without a registry only a single-platform build is possible.

@@ -31,6 +31,7 @@ export function createContext(config: Config): AppContext {
     registry: config.REGISTRY_URL,
     credentials: config.REGISTRY_CREDENTIALS,
     builder: config.BUILDX_BUILDER,
+    cacheMode: config.BUILDX_CACHE_MODE,
     workdir: config.BUILD_WORKDIR,
     pushToRegistry: Boolean(config.REGISTRY_URL),
     timeoutMs: config.BUILD_TIMEOUT_MS,

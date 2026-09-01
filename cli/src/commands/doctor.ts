@@ -13,12 +13,51 @@ type Deployment = { status: string; failureReason: string | null; startedAt: str
 const icon = (state: CheckState) =>
   state === 'ok' ? glyph.ok : state === 'warn' ? glyph.warn : glyph.fail
 
+/**
+ * A build failure carries the whole buildx transcript. One summary line
+ * belongs in a health report; `fleet deployments` is where the rest lives.
+ */
+function firstLine(text: string): string {
+  const line = text.split('\n').find((l) => l.trim()) ?? text
+  return line.length > 160 ? `${line.slice(0, 157)}…` : line
+}
+
+/**
+ * Statuses an edge returns when it could not reach the origin at all.
+ * Cloudflare's 52x range and 530 mean the tunnel is down; 502/503/504 mean the
+ * same thing from any reverse proxy.
+ */
+const ORIGIN_UNREACHABLE = new Set([502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527, 530])
+
+/**
+ * Is the service reachable through the ingress?
+ *
+ * That question is not "did it return 200". An API with no route at `/` answers
+ * 404, and a 404 from the *application* is proof the whole chain works —
+ * ingress, tunnel, agent, container. Reporting that as a failure sends people
+ * to check DNS and node health when nothing is wrong, which is exactly what it
+ * did for an API whose /health returned 200 the whole time.
+ *
+ * What does indicate a broken path is the edge answering on the origin's
+ * behalf, or nothing answering at all.
+ */
 async function reach(url: string): Promise<{ ok: boolean; detail: string }> {
   try {
     const response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(8_000) })
-    return response.status >= 200 && response.status < 400
-      ? { ok: true, detail: `HTTPS answered ${response.status}` }
-      : { ok: false, detail: `HTTPS answered ${response.status}` }
+    const status = response.status
+
+    if (ORIGIN_UNREACHABLE.has(status)) {
+      return { ok: false, detail: `HTTPS answered ${status} — the edge could not reach the container` }
+    }
+    if (status >= 200 && status < 400) {
+      return { ok: true, detail: `HTTPS answered ${status}` }
+    }
+    if (status < 500) {
+      // The application answered. It has an opinion about the request, which
+      // means everything in front of it is working.
+      return { ok: true, detail: `HTTPS answered ${status} — reachable; the app has no route there` }
+    }
+    return { ok: false, detail: `HTTPS answered ${status} — reachable, but the app is erroring` }
   } catch (error) {
     return { ok: false, detail: error instanceof Error ? error.message : String(error) }
   }
@@ -108,15 +147,24 @@ export const doctorCommand = {
       }
     }
 
-    const failed = result.deploymentHistory.flatMap(({ service, deployments }) =>
-      deployments.filter((deployment) => deployment.status === 'failed' || deployment.failureReason).slice(0, 1).map((deployment) => ({ service: service.name, deployment }))
-    )
+    // Only the *current* deployment of each service can be a current problem.
+    // Scanning the whole history meant a service that failed once and then
+    // deployed successfully still reported the old failure, so a healthy fleet
+    // showed a wall of buildx output from a build that had since been redone.
+    const failed = result.deploymentHistory.flatMap(({ service, deployments }) => {
+      const latest = deployments[0]
+      if (!latest) return []
+      const isFailure = latest.status === 'failed' || Boolean(latest.failureReason)
+      return isFailure ? [{ service: service.name, deployment: latest }] : []
+    })
     checks.push(
       failed.length
         ? {
             state: 'fail',
             label: 'deployments',
-            detail: failed.map(({ service, deployment }) => `${service}: ${deployment.failureReason ?? deployment.status}`).join('; '),
+            detail: failed
+              .map(({ service, deployment }) => `${service}: ${firstLine(deployment.failureReason ?? deployment.status)}`)
+              .join('; '),
             remedy: 'Run `fleet deployments <service>` for history and `fleet logs <service> --follow` for the current container tail.',
           }
         : { state: 'ok', label: 'deployments', detail: result.services.length ? 'No recorded deployment failures.' : 'No services declared yet.' }
