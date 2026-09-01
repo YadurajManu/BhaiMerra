@@ -8,6 +8,7 @@ import Failover from './components/Failover'
 import Comparison from './components/Comparison'
 import Terminal from './components/Terminal'
 import Pricing from './components/Pricing'
+import Builder from './components/Builder'
 import FinalCTA from './components/FinalCTA'
 import Footer from './components/Footer'
 import PageShell from './components/PageShell'
@@ -26,6 +27,7 @@ function Landing() {
       <Comparison />
       <Terminal />
       <Pricing />
+      <Builder />
       <FinalCTA />
     </>
   )

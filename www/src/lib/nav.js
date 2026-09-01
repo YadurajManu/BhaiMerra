@@ -9,6 +9,7 @@ export const SITE_MAP = [
       ['Compare', '#compare'],
       ['CLI and API', '#cli'],
       ['Pricing', '#pricing'],
+      ['Who built this', '#builder'],
       ['Changelog', '#/changelog'],
     ],
   },
