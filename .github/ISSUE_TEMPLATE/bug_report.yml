@@ -1,0 +1,82 @@
+name: Bug report
+description: Something behaved differently from how it is documented or how it obviously should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. The fastest fixes come from reports I can
+        reproduce, so the fields below are mostly about that.
+
+        **Never paste secrets, access tokens, or `flp_` pairing tokens here.**
+        Issues are public.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you expect, and what did you get instead?
+      placeholder: |
+        I ran `fleet up web`. I expected it to print a URL.
+        It waited 47s on the health check and then rolled back.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: The commands you ran, in order. A minimal `fleet.yaml` helps enormously.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Error output
+      description: >
+        The full output, not just the last line. Fleet's errors are written to
+        say what to do next — if one did not, mention that, because it is its
+        own bug.
+      render: shell
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Which part
+      multiple: true
+      options:
+        - CLI (`fleet`)
+        - Control plane / API
+        - Agent (on a node)
+        - Dashboard
+        - Scheduling / placement
+        - Build / registry
+        - Ingress / networking
+        - Databases, volumes or backups
+        - GitHub integration
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Output of `fleet --version`, plus the control-plane commit if you self-host.
+      placeholder: "cli 0.3.0, control plane self-hosted @ b67d22f"
+
+  - type: input
+    id: node-platform
+    attributes:
+      label: Node OS and architecture
+      description: The machine running the workload, not your laptop — unless they are the same.
+      placeholder: "Raspberry Pi OS 12, arm64 / Ubuntu 24.04, amd64 / Windows 11"
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`fleet doctor` output"
+      description: Optional, but it answers most of the questions I would otherwise have to ask.
+      render: shell

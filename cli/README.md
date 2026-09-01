@@ -16,7 +16,7 @@ npx @yadurajfleetos/cli --help
 
 ### Build and Install from Source
 ```bash
-git clone https://github.com/YadurajManu/BhaiMerra.git fleet-os
+git clone https://github.com/YadurajManu/fleet-os.git fleet-os
 cd fleet-os/cli
 npm install
 npm run build

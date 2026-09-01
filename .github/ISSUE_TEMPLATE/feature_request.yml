@@ -1,0 +1,54 @@
+name: Feature request
+description: Something Fleet OS should be able to do and cannot.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The most useful requests describe the situation you are stuck in rather
+        than the feature you have in mind — the problem usually survives longer
+        than any particular solution to it.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: The actual situation. What are you working around today?
+      placeholder: |
+        I have two nodes in different places and want a service to prefer the
+        one on the same LAN as its database, without pinning it there
+        permanently.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you think should happen
+      description: If you have a shape in mind — a `fleet.yaml` field, a flag, a screen — sketch it.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you have already tried
+      description: Existing features that nearly work, and where they stop.
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Which part
+      multiple: true
+      options:
+        - CLI (`fleet`)
+        - Control plane / API
+        - Agent (on a node)
+        - Dashboard
+        - Scheduling / placement
+        - Build / registry
+        - Ingress / networking
+        - Databases, volumes or backups
+        - GitHub integration
+        - Documentation
+        - Not sure
+    validations:
+      required: true

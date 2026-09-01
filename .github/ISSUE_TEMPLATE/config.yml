@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/YadurajManu/fleet-os/security/advisories/new
+    about: Report privately. Please do not open a public issue for anything exploitable.
+  - name: Documentation
+    url: https://fleet.plastikworld.xyz/#/docs
+    about: Setup, the fleet.yaml spec, the scheduler, self-hosting, and the REST API.
+  - name: Who maintains this
+    url: https://fleet.plastikworld.xyz/#/founder
+    about: One person. What that can and cannot promise you, said plainly.

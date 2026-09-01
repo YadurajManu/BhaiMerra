@@ -325,7 +325,7 @@ export const PAGES = {
         '$ npm install -g @yadurajfleetos/cli',
         '',
         '# or build from source',
-        '$ git clone https://github.com/YadurajManu/BhaiMerra.git fleet-os',
+        '$ git clone https://github.com/YadurajManu/fleet-os.git fleet-os',
         '$ cd fleet-os/cli && npm install && npm run build && npm link',
         '',
         '# sign in',
@@ -580,7 +580,7 @@ export const PAGES = {
 
       H('Start the stack'),
       { t: 'code', lang: 'sh', lines: [
-        '$ git clone https://github.com/YadurajManu/BhaiMerra.git fleet-os',
+        '$ git clone https://github.com/YadurajManu/fleet-os.git fleet-os',
         '$ cd fleet-os/deploy',
         '$ cp .env.example .env    # fill the required secrets',
         '$ cd .. && ./fleet-up.sh',

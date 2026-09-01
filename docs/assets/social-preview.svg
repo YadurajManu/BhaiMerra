@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" font-family="ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace">
+  <defs>
+    <linearGradient id="glow" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#3fe08b" stop-opacity="0.14"/>
+      <stop offset="55%" stop-color="#3fe08b" stop-opacity="0.02"/>
+      <stop offset="100%" stop-color="#3fe08b" stop-opacity="0"/>
+    </linearGradient>
+    <pattern id="dots" width="26" height="26" patternUnits="userSpaceOnUse">
+      <circle cx="1.5" cy="1.5" r="1.05" fill="#1b212a"/>
+    </pattern>
+  </defs>
+
+  <rect width="1280" height="640" fill="#08090b"/>
+  <rect width="1280" height="640" fill="url(#dots)"/>
+  <rect width="1280" height="640" fill="url(#glow)"/>
+  <rect x="0" y="0" width="1280" height="3" fill="#3fe08b" opacity="0.55"/>
+
+  <!-- wordmark -->
+  <g transform="translate(84, 92)">
+    <circle cx="7" cy="7" r="7" fill="#3fe08b"/>
+    <text x="30" y="14" font-size="21" fill="#939ba7" letter-spacing="4.5">FLEET·OS</text>
+  </g>
+
+  <!-- headline -->
+  <text x="84" y="228" font-size="72" font-weight="700" fill="#e8ebef" letter-spacing="-2.6" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Inter, sans-serif">Git push to hardware</text>
+  <text x="84" y="308" font-size="72" font-weight="700" fill="#e8ebef" letter-spacing="-2.6" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Inter, sans-serif">you already own.</text>
+
+  <text x="84" y="366" font-size="23" fill="#939ba7" letter-spacing="-0.2" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Inter, sans-serif">A Raspberry Pi, an old laptop and a spare VPS — as one deploy target.</text>
+
+  <!-- terminal -->
+  <g transform="translate(84, 418)">
+    <rect x="0" y="0" width="700" height="130" fill="#07080a" stroke="#1b212a" stroke-width="1"/>
+    <line x1="0" y1="34" x2="700" y2="34" stroke="#1b212a" stroke-width="1"/>
+    <text x="18" y="23" font-size="12" fill="#5d6672" letter-spacing="2.6">FLEET · UP</text>
+    <circle cx="678" cy="18" r="4" fill="#3fe08b"/>
+    <text x="18" y="66" font-size="17"><tspan fill="#3fe08b">$</tspan><tspan fill="#e8ebef" xml:space="preserve">  fleet up web</tspan></text>
+    <text x="18" y="94" font-size="17"><tspan fill="#5d6672">→</tspan><tspan fill="#939ba7" xml:space="preserve">  built arm64 · placed on kakashi · healthy</tspan></text>
+    <text x="18" y="118" font-size="17"><tspan fill="#3fe08b">✓</tspan><tspan fill="#939ba7" xml:space="preserve">  https://web.homelab.fleet-os.dev</tspan></text>
+  </g>
+
+  <!-- capability strip -->
+  <g transform="translate(830, 418)" font-size="15" fill="#939ba7">
+    <rect x="0" y="0" width="1" height="130" fill="#1b212a"/>
+    <text x="28" y="22">Outbound-only agents</text>
+    <text x="28" y="58">Multi-arch builds</text>
+    <text x="28" y="94">Health-gated rollouts</text>
+    <text x="28" y="130">Automatic failover</text>
+  </g>
+
+  <!-- footer -->
+  <line x1="84" y1="588" x2="1196" y2="588" stroke="#1b212a" stroke-width="1"/>
+  <text x="84" y="616" font-size="16" fill="#5d6672">github.com/YadurajManu/fleet-os</text>
+  <text x="1196" y="616" font-size="16" fill="#5d6672" text-anchor="end">MIT · Go + TypeScript</text>
+</svg>

@@ -1,12 +1,36 @@
-# Fleet OS
+<h1 align="center">Fleet OS</h1>
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Build](https://github.com/YadurajManu/BhaiMerra/actions/workflows/ci.yml/badge.svg)](https://github.com/YadurajManu/BhaiMerra/actions)
-[![Latest release](https://img.shields.io/github/v/release/YadurajManu/BhaiMerra)](https://github.com/YadurajManu/BhaiMerra/releases)
-[![Go 1.24+](https://img.shields.io/badge/go-1.24%2B-00ADD8.svg)](https://go.dev/)
-[![Node 20+](https://img.shields.io/badge/node-20%2B-339933.svg)](https://nodejs.org/)
+<p align="center">
+  <strong>Git push to the hardware you already own.</strong><br>
+  A Raspberry Pi, an old laptop and a spare VPS, treated as one deploy target.
+</p>
+
+<p align="center">
+  <a href="https://fleet.plastikworld.xyz"><b>Website</b></a> ·
+  <a href="docs/ARCHITECTURE.md"><b>Architecture</b></a> ·
+  <a href="docs/fleet-yaml-spec.md"><b>fleet.yaml</b></a> ·
+  <a href="docs/self-hosting.md"><b>Self-hosting</b></a>
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+  <a href="https://github.com/YadurajManu/fleet-os/actions"><img alt="Build" src="https://github.com/YadurajManu/fleet-os/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://www.npmjs.com/package/@yadurajfleetos/cli"><img alt="npm" src="https://img.shields.io/npm/v/@yadurajfleetos/cli?label=cli&color=cb3837"></a>
+  <a href="https://go.dev/"><img alt="Go 1.24+" src="https://img.shields.io/badge/go-1.24%2B-00ADD8.svg"></a>
+  <a href="https://nodejs.org/"><img alt="Node 20+" src="https://img.shields.io/badge/node-20%2B-339933.svg"></a>
+</p>
+
+---
+
+```console
+$ fleet nodes pair                 # prints a single-use command to run on the machine
+$ fleet init                       # writes a fleet.yaml, scaffolds a Dockerfile if needed
+$ fleet up web                     # apply → build for that node's arch → deploy → wait → URL
+```
 
 Fleet OS turns the computers you already own into one deploy target. Push a repository and it builds the declared services, places each one on a node that can run it, exposes a stable HTTPS hostname, and reschedules flexible workloads when a Raspberry Pi, laptop, or spare VPS disappears. It is for homelabs, small teams, and operators who need useful orchestration without replacing their hardware or pretending that every node is identical.
+
+Agents are **outbound-only**. There is no inbound Docker socket, no SSH key on your machines, and no port to forward — a node behind a home router with no static IP is a first-class member of a fleet.
 
 ## Why Fleet OS
 
@@ -29,7 +53,40 @@ Coolify, Dokploy, and CapRover are excellent single-server deployment tools, but
 
 ## Architecture
 
-The control plane owns identity, fleet state, scheduling, builds, ingress routes, and deployment history. A small Go agent runs on each node, reports capabilities and heartbeats over outbound HTTPS, and reconciles the desired container state locally; it never requires an inbound Docker or SSH port. See [Architecture](docs/ARCHITECTURE.md) for the data flow and failure model.
+The control plane owns identity, fleet state, scheduling, builds, ingress routes, and deployment history. A small Go agent runs on each node, reports capabilities and heartbeats over outbound HTTPS, and reconciles the desired container state locally; it never requires an inbound Docker or SSH port.
+
+```mermaid
+flowchart TB
+    push["git push"]
+    cli["fleet CLI"]
+    visitor(["visitor"])
+
+    subgraph cp["Control plane — your server, or hosted"]
+        direction LR
+        api["API · scheduler · ingress"]
+        reg["registry"]
+        db[("Postgres + Redis")]
+        api --- reg
+        api --- db
+    end
+
+    subgraph nodes["Your hardware — anywhere, behind any NAT"]
+        direction LR
+        n1["agent<br/>Raspberry Pi · arm64"]
+        n2["agent<br/>old laptop · amd64"]
+        n3["agent<br/>spare VPS · amd64"]
+    end
+
+    push --> api
+    cli --> api
+    visitor --> api
+    api == "reverse tunnel" ==> n2
+    n1 -. "outbound only" .-> api
+    n2 -.-> api
+    n3 -.-> api
+```
+
+Every arrow from a node points *outward*. The control plane never opens a connection to your hardware — it answers polls and holds a reverse tunnel for ingress, which is what lets a machine on a college LAN or a home router serve traffic without a port forward. See [Architecture](docs/ARCHITECTURE.md) for the data flow and failure model.
 
 ## Quickstart
 
@@ -94,7 +151,7 @@ For a self-hosted control plane, follow [Self-hosting](docs/self-hosting.md).
 Bug reports, design discussions, and pull requests are welcome.
 
 ```bash
-git clone https://github.com/YadurajManu/BhaiMerra.git && cd BhaiMerra
+git clone https://github.com/YadurajManu/fleet-os.git && cd fleet-os
 cd control-plane && npm ci && npm run typecheck && npm test   # needs Postgres + Redis
 cd ../cli && npm ci && npm test
 cd ../dashboard && npm ci && npm run build
@@ -103,8 +160,23 @@ cd ../agent && go test ./...
 
 The control-plane tests need a Postgres and a Redis to talk to; `.github/workflows/ci.yml` shows the exact environment they expect, and copying `control-plane/.env.example` to `.env.test` is the local equivalent.
 
-Commits describe the behaviour that changed and why it was wrong before — see `git log` for the house style.
+Commits describe the behaviour that changed and why it was wrong before — see `git log` for the house style. [CONTRIBUTING.md](CONTRIBUTING.md) has the rest: repository layout, what makes a bug report actionable, and what a pull request should contain.
+
+## Security
+
+Please do not open a public issue for anything exploitable. Email
+**security@fleet-os.dev** or use [private vulnerability reporting](https://github.com/YadurajManu/fleet-os/security/advisories/new).
+[SECURITY.md](SECURITY.md) sets out response times, safe harbour for good-faith
+research, and the design boundaries — outbound-only agents, per-organisation
+GitHub installations, envelope-encrypted secrets — that are meant to hold.
+
+## Who maintains this
+
+Fleet OS is built and maintained by [Yaduraj Singh](https://fleet.plastikworld.xyz/#/founder),
+alone, in the open. That page says what a one-person project can promise you and
+what it cannot — including the parts that might make you decide against it.
 
 ## License
 
-Fleet OS is released under the [MIT License](LICENSE).
+Fleet OS is released under the [MIT License](LICENSE). No open-core split, no
+enterprise fork holding the good parts: what is here is the product.
