@@ -214,13 +214,86 @@ services:
     assert.ok(route, 'the site went down because a replacement failed')
   })
 
+  test('a container the node reports running is promoted, never failed', async () => {
+    // The outage this prevents: promotion only happens on a heartbeat carrying
+    // the container, so anything that stops one arriving — a failed `docker ps`
+    // on the node, a control plane that was down while the window elapsed —
+    // leaves a container that is serving traffic sitting in `deploying`. The
+    // sweeper then timed it out and tore it down. Four healthy services went
+    // off the internet that way.
+    const res = await app.inject({
+      method: 'POST',
+      url: `/services/${serviceId}/deploy`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: {},
+    })
+    const fresh = res.json().deployment?.id ?? res.json().deploymentId
+    assert.ok(fresh, `expected a deployment id, got ${res.body}`)
+
+    // The node says it is up. The control plane has simply not acted on it.
+    await beat([{ deployment_id: fresh, state: 'running' }])
+    await ctx.db
+      .update(deployments)
+      .set({ status: 'deploying', startedAt: new Date(Date.now() - ROLLOUT_TIMEOUT_MS - 60_000) })
+      .where(eq(deployments.id, fresh))
+    // Re-report after the backdating, so the heartbeat the sweeper reads is
+    // the current one rather than whatever the deploy left behind.
+    await beat([{ deployment_id: fresh, state: 'running' }])
+
+    const failed = await failStalledRollouts(ctx)
+    assert.ok(!failed.includes(fresh), 'a running container must never be failed for timing out')
+
+    const [row] = await ctx.db
+      .select({ status: deployments.status })
+      .from(deployments)
+      .where(eq(deployments.id, fresh))
+      .limit(1)
+    assert.equal(row!.status, 'running', 'it was up; the timeout should promote it, not kill it')
+  })
+
+  test('a container the node reports as not running is still failed', async () => {
+    // The rescue must not become a blanket amnesty: a container that is
+    // genuinely dead has to fail, or a broken release sits in `deploying`
+    // forever and nothing ever says why.
+    const res = await app.inject({
+      method: 'POST',
+      url: `/services/${serviceId}/deploy`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: {},
+    })
+    const dead = res.json().deployment?.id ?? res.json().deploymentId
+    assert.ok(dead)
+
+    await ctx.db
+      .update(deployments)
+      .set({ status: 'deploying', startedAt: new Date(Date.now() - ROLLOUT_TIMEOUT_MS - 60_000) })
+      .where(eq(deployments.id, dead))
+    await beat([{ deployment_id: dead, state: 'exited' }])
+
+    const failed = await failStalledRollouts(ctx)
+    assert.ok(failed.includes(dead))
+
+    const [row] = await ctx.db
+      .select({ status: deployments.status, reason: deployments.failureReason })
+      .from(deployments)
+      .where(eq(deployments.id, dead))
+      .limit(1)
+    assert.equal(row!.status, 'failed')
+    // And it names the state, rather than claiming a health check timed out.
+    assert.match(row!.reason!, /exited/)
+  })
+
   test('the failure says what happened', async () => {
     const [row] = await ctx.db
       .select({ reason: deployments.failureReason })
       .from(deployments)
       .where(and(eq(deployments.serviceId, serviceId), eq(deployments.status, 'failed')))
       .limit(1)
-    assert.match(row!.reason!, /never reported healthy/)
+    // The reason distinguishes "the node never told us about this container"
+    // from "the node told us, and it was not healthy". They call for different
+    // things — one is a broken release, the other is a node that has stopped
+    // reporting — and one sentence for both sent people to debug the wrong one.
+    assert.match(row!.reason!, /never reported (this container|healthy)/)
     assert.match(row!.reason!, /previous release was left running/)
   })
 })

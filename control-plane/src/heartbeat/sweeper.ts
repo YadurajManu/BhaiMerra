@@ -2,6 +2,7 @@ import { and, eq, inArray, lt, ne } from 'drizzle-orm'
 import { deployments, fleets, nodes } from '../db/schema.js'
 import type { RescheduleOutcome } from '../scheduler/reschedule.js'
 import { rescheduleFromNode } from '../scheduler/reschedule.js'
+import { invalidateRoutesForService } from '../ingress/routes.js'
 import type { AppContext } from '../api/context.js'
 import type { FleetEventPayload } from '../lib/events.js'
 
@@ -9,7 +10,11 @@ export type Sweeper = { stop: () => void }
 
 export type SweepOptions = {
   onEvent?: (event: FleetEventPayload) => void | Promise<void>
-  log?: { info: (o: unknown, m: string) => void; error: (o: unknown, m: string) => void }
+  log?: {
+    info: (o: unknown, m: string) => void
+    warn?: (o: unknown, m: string) => void
+    error: (o: unknown, m: string) => void
+  }
 }
 
 export type SweepResult = {
@@ -88,21 +93,79 @@ export async function failStalledRollouts(
 ): Promise<string[]> {
   const cutoff = new Date(Date.now() - ROLLOUT_TIMEOUT_MS)
 
-  const stalled = await ctx.db
-    .update(deployments)
-    .set({
-      status: 'failed',
-      failureReason:
-        'the container never reported healthy within the rollout window; the previous release was left running',
-      finishedAt: new Date(),
+  // Candidates first, so each one can be checked against what its node is
+  // reporting *right now* before anything is written.
+  //
+  // This used to be a single UPDATE, and it tore down services that were
+  // serving traffic. A deployment is only promoted out of `deploying` on a
+  // heartbeat carrying its container, so anything that stops that heartbeat
+  // arriving — a failed `docker ps` on the node, a control plane that was
+  // down while the window elapsed — leaves a perfectly healthy container in
+  // `deploying` until this ran and killed it. Timing out is a claim about the
+  // container, and the node is the only thing that can support it.
+  const candidates = await ctx.db
+    .select({
+      id: deployments.id,
+      serviceId: deployments.serviceId,
+      nodeId: deployments.nodeId,
     })
+    .from(deployments)
     .where(and(eq(deployments.status, 'deploying'), lt(deployments.startedAt, cutoff)))
-    .returning({ id: deployments.id, serviceId: deployments.serviceId })
 
-  for (const row of stalled) {
+  if (!candidates.length) return []
+
+  // One heartbeat read per node, not per deployment.
+  const nodeIds = [...new Set(candidates.map((c) => c.nodeId).filter((id): id is string => Boolean(id)))]
+  const beats = new Map(
+    await Promise.all(
+      nodeIds.map(async (id) => [id, await ctx.heartbeats.last(id).catch(() => null)] as const)
+    )
+  )
+
+  const failed: string[] = []
+  const rescued: string[] = []
+
+  for (const row of candidates) {
+    const beat = row.nodeId ? beats.get(row.nodeId) : null
+    const container = beat?.containers?.find((c) => c.deployment_id === row.id)
+
+    if (container && container.state === 'running') {
+      // It is up. The rollout did not stall, the promotion signal did — so
+      // promote it here rather than destroying what is already working.
+      await ctx.db
+        .update(deployments)
+        .set({ status: 'running', finishedAt: new Date() })
+        .where(eq(deployments.id, row.id))
+      rescued.push(row.id)
+      ;(opts.log?.warn ?? opts.log?.info)?.(
+        { deploymentId: row.id, nodeId: row.nodeId },
+        'rollout window elapsed but the node reports this container running; promoted instead of failed'
+      )
+      continue
+    }
+
+    await ctx.db
+      .update(deployments)
+      .set({
+        status: 'failed',
+        failureReason: container
+          ? `the container is ${container.state} and never reported healthy within the rollout window`
+          : 'the node never reported this container within the rollout window; the previous release was left running',
+        finishedAt: new Date(),
+      })
+      .where(eq(deployments.id, row.id))
+    failed.push(row.id)
     opts.log?.info({ deploymentId: row.id }, 'failed a rollout that never became healthy')
   }
-  return stalled.map((row) => row.id)
+
+  // Routes are keyed on the live deployment; a rescued one has to become
+  // reachable rather than merely look correct in the database.
+  for (const id of rescued) {
+    const row = candidates.find((c) => c.id === id)
+    if (row) await invalidateRoutesForService(ctx, row.serviceId).catch(() => {})
+  }
+
+  return failed
 }
 
 /**

@@ -124,7 +124,17 @@ export async function serviceRoutes(app: FastifyInstance) {
             inArray(deployments.status, ['deploying', 'running', 'pinned_unavailable'])
           )
         )
-      const byService = new Map(live.map((d) => [d.serviceId, d]))
+        // A service can briefly have two live deployments — the one being
+        // rolled out and the one still serving. Without an order the Map kept
+        // whichever row the database happened to return last, so the same
+        // request could report "running" or "deploying" for the same service
+        // from one poll to the next. `fleet up` believed one of those and
+        // declared a rollout finished that had not started.
+        .orderBy(desc(deployments.startedAt))
+
+      // Newest wins: later entries overwrite earlier ones, so iterate oldest
+      // first and let the most recent deployment land last.
+      const byService = new Map([...live].reverse().map((d) => [d.serviceId, d]))
 
       // The most recent deployment whatever its outcome.
       //

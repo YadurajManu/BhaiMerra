@@ -204,6 +204,46 @@ func isUp(state string) bool {
 	return strings.EqualFold(state, "running")
 }
 
+// healthFromStatus reads Docker's health verdict out of a container's Status
+// line, and only that.
+//
+// Docker puts several unrelated things in the same parentheses:
+//
+//	"Up 2 minutes (healthy)"          -> healthy
+//	"Up 40 seconds (health: starting)" -> starting
+//	"Up 2 minutes (unhealthy)"        -> unhealthy
+//	"Up 3 hours"                      -> "" (no check configured)
+//	"Restarting (1) 5 seconds ago"    -> "" — that 1 is an exit code
+//	"Exited (0) 3 minutes ago"        -> "" — so is that 0
+//
+// Taking whatever sat between the first parentheses reported an exit code as a
+// health verdict. The control plane reads a non-empty value as "this service
+// has a health check", and then waits for it to say exactly "healthy" — so a
+// crash-looping container did not merely fail to be promoted, it made itself
+// permanently unpromotable while looking like a health problem rather than a
+// restart loop.
+func healthFromStatus(status string) string {
+	open := strings.Index(status, "(")
+	if open < 0 {
+		return ""
+	}
+	end := strings.Index(status[open:], ")")
+	if end <= 0 {
+		return ""
+	}
+	inner := strings.TrimSpace(status[open+1 : open+end])
+
+	// Docker's own vocabulary, and nothing else.
+	switch strings.ToLower(inner) {
+	case "healthy", "unhealthy":
+		return strings.ToLower(inner)
+	case "health: starting":
+		return "starting"
+	default:
+		return ""
+	}
+}
+
 // Containers implements the sampler's ContainerLister so heartbeats carry the
 // real container states back to the control plane.
 func (e *Engine) List(ctx context.Context) ([]client.Container, error) {
@@ -222,12 +262,7 @@ func (e *Engine) List(ctx context.Context) ([]client.Container, error) {
 			State:        c.State,
 			DeploymentID: c.Labels[docker.LabelDeployment],
 		}
-		// Docker reports health inside Status as "Up 2 minutes (healthy)".
-		if open := strings.Index(c.Status, "("); open >= 0 {
-			if close := strings.Index(c.Status[open:], ")"); close > 0 {
-				container.Health = c.Status[open+1 : open+close]
-			}
-		}
+		container.Health = healthFromStatus(c.Status)
 		out = append(out, container)
 	}
 	return out, nil

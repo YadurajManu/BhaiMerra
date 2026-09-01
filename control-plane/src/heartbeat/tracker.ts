@@ -6,7 +6,13 @@ export type HeartbeatPayload = {
   cpuPct: number
   ramUsedMb: number
   diskUsedMb: number
-  containers: Array<{ name: string; state: string; health?: string }>
+  /**
+   * `deployment_id` is what ties a running container back to the row that
+   * asked for it. It was already being stored and simply not declared, so
+   * anything reading a heartbeat could not match a container to its
+   * deployment without casting.
+   */
+  containers: Array<{ name: string; state: string; health?: string; deployment_id?: string }>
   meshConnected: boolean
   agentVersion?: string
   runtime?: {
