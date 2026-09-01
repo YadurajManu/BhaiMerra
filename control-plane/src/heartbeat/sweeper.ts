@@ -2,6 +2,7 @@ import { and, eq, inArray, lt, ne } from 'drizzle-orm'
 import { deployments, fleets, nodes } from '../db/schema.js'
 import type { RescheduleOutcome } from '../scheduler/reschedule.js'
 import { rescheduleFromNode } from '../scheduler/reschedule.js'
+import { reconcileReplicas, type ScaleOutcome } from '../scheduler/replicas.js'
 import { invalidateRoutesForService } from '../ingress/routes.js'
 import type { AppContext } from '../api/context.js'
 import type { FleetEventPayload } from '../lib/events.js'
@@ -23,6 +24,8 @@ export type SweepResult = {
   rescheduled: Array<{ nodeId: string; outcomes: RescheduleOutcome[] }>
   /** Builds whose control plane died underneath them (see failStaleBuilds). */
   abandonedBuilds: string[]
+  /** Replica counts brought back in line with what the manifest asked for. */
+  scaled: ScaleOutcome[]
 }
 
 /** Phases a deployment only passes through, never rests in. */
@@ -182,6 +185,7 @@ export async function failStalledRollouts(
  */
 export async function sweepOnce(ctx: AppContext, opts: SweepOptions = {}): Promise<SweepResult> {
   const markedDown: SweepResult['markedDown'] = []
+  const scaled: ScaleOutcome[] = []
   const rescheduled: SweepResult['rescheduled'] = []
 
   // Independent of node health, and cheap: one indexed update. Runs first so a
@@ -290,10 +294,23 @@ export async function sweepOnce(ctx: AppContext, opts: SweepOptions = {}): Promi
             opts.log?.error({ err, nodeId: node.id }, 'reschedule failed after node went down')
           }
         }
+        // Replica counts are desired state, so they are reconciled on the
+        // same tick that notices a node has gone. A replica lost with its
+        // node is replaced here rather than staying one short until somebody
+        // deploys again.
+        try {
+          const scale = await reconcileReplicas(ctx, fleet.id, { log: opts.log })
+          for (const outcome of scale) scaled.push(outcome)
+        } catch (err) {
+          // Scaling is an optimisation over a fleet that is already serving.
+          // Failing the whole sweep — which is also what marks nodes down —
+          // because a replica could not be placed would be a poor trade.
+          opts.log?.error({ err, fleetId: fleet.id }, 'replica reconciliation failed')
+        }
       }
     }
   }
-  return { markedDown, rescheduled, abandonedBuilds }
+  return { markedDown, rescheduled, abandonedBuilds, scaled }
 }
 
 export function startSweeper(

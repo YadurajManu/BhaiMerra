@@ -219,12 +219,21 @@ services:
     assert.deepEqual(m.warnings, [])
   })
 
-  test('replicas sharing one volume warns about concurrent writers', () => {
+  test('replicas sharing one volume are refused, and the file says so', () => {
+    // This used to warn that concurrent writers "will corrupt data" — a
+    // prediction about something that would then happen anyway, because
+    // nothing acted on replicas at all. The scaler now declines to scale a
+    // service holding a volume, so the manifest states that outcome instead
+    // of forecasting a disaster it is actually preventing.
     const m = parseManifest(`
 fleet: f
 services:
   db: { image: postgres:16, volume: pgdata, placement: pinned, node: n1, replicas: 3 }
 `)
-    assert.ok(m.warnings.some((w) => /corrupt data/.test(w)))
+    assert.ok(
+      m.warnings.some((w) => /will not scale it/.test(w)),
+      `expected a warning that it will not be scaled, got: ${m.warnings.join(' | ')}`
+    )
+    assert.ok(m.warnings.some((w) => /single copy/.test(w)))
   })
 })

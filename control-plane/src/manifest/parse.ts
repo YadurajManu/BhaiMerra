@@ -512,8 +512,15 @@ export function parseManifest(source: string, project?: string): ParsedManifest 
     }
     if (svc.volume && svc.replicas > 1) {
       warnings.push(
-        `services.${svc.name}: ${svc.replicas} replicas share one volume "${svc.volume}". ` +
-          `Unless the image handles concurrent writers, this will corrupt data.`
+        `services.${svc.name}: ${svc.replicas} replicas would share one volume "${svc.volume}", so ` +
+          `Fleet will not scale it — two processes writing one data directory corrupt it. ` +
+          `It runs as a single copy.`
+      )
+    }
+    if (svc.placement === 'pinned' && svc.replicas > 1) {
+      warnings.push(
+        `services.${svc.name}: "pinned" names one node, so ${svc.replicas} replicas have nowhere ` +
+          `to spread to. It runs as a single copy; use "flexible" or "preferred" to scale it.`
       )
     }
     // Service discovery is per node: a container resolves its neighbours by

@@ -33,7 +33,14 @@ export async function resolveRoute(ctx: AppContext, hostname: string): Promise<R
   // a stale entry cannot outlive the placement it describes; invalidateRoute
   // handles the common case immediately.
   const cached = await ctx.redis.get(ROUTE_KEY(host))
-  if (cached) return cached === 'none' ? null : (JSON.parse(cached) as Route)
+  if (cached) {
+    if (cached === 'none') return null
+    // The cache holds every replica that could serve this host, so the choice
+    // is still made per request. Caching the chosen one instead would pin the
+    // whole TTL to a single replica.
+    const routes = JSON.parse(cached) as Route[]
+    return pickRoute(routes)
+  }
 
   const rows = await ctx.db
     .select({
@@ -47,6 +54,7 @@ export async function resolveRoute(ctx: AppContext, hostname: string): Promise<R
       advertiseAddr: nodes.advertiseAddr,
       nodeStatus: nodes.status,
       hostPort: deployments.hostPort,
+      status: deployments.status,
     })
     .from(services)
     .innerJoin(
@@ -66,10 +74,9 @@ export async function resolveRoute(ctx: AppContext, hostname: string): Promise<R
     // until the heartbeat promotes the new one and supersedes this row.
     // Without the ordering this is a coin flip between them.
     .orderBy(sql`case ${deployments.status} when 'running' then 0 else 1 end`, desc(deployments.startedAt))
-    .limit(1)
 
-  let row = rows[0]
-  if (!row) {
+  let candidates = rows
+  if (!candidates.length) {
     const byDomain = await ctx.db
       .select({
         serviceId: services.id,
@@ -82,6 +89,7 @@ export async function resolveRoute(ctx: AppContext, hostname: string): Promise<R
         advertiseAddr: nodes.advertiseAddr,
         nodeStatus: nodes.status,
         hostPort: deployments.hostPort,
+        status: deployments.status,
       })
       .from(services)
       .innerJoin(
@@ -96,18 +104,35 @@ export async function resolveRoute(ctx: AppContext, hostname: string): Promise<R
         sql`case ${deployments.status} when 'running' then 0 else 1 end`,
         desc(deployments.startedAt)
       )
-      .limit(1)
-    row = byDomain[0]
+    candidates = byDomain
   }
 
-  if (!row || !row.advertiseAddr || !row.hostPort) {
+  /**
+   * Which replica serves this request.
+   *
+   * The ordering above already puts proven releases first, so the choice is
+   * made only among rows that are equally good: every `running` one, or every
+   * `deploying` one when nothing is running yet. Picking across that boundary
+   * would send traffic to a container still being checked while a healthy one
+   * was available.
+   *
+   * Rows missing an address or a published port are dropped rather than
+   * chosen — an internal service has no host port by design, and a node that
+   * has not reported its address cannot be reached.
+   */
+  const usable = candidates.filter((c) => c.advertiseAddr && c.hostPort)
+  // Only rows of the same status compete. The ordering above already put
+  // proven releases first, so this takes every equally-good one and no more.
+  const best = usable.filter((c) => c.status === usable[0]?.status)
+
+  if (!best.length) {
     // Cache the miss too, so an unknown host cannot turn into a database
     // query per request — that is a cheap denial of service otherwise.
     await ctx.redis.set(ROUTE_KEY(host), 'none', 'EX', 5)
     return null
   }
 
-  const route: Route = {
+  const routes: Route[] = best.map((row) => ({
     hostname: host,
     serviceId: row.serviceId,
     serviceName: row.serviceName,
@@ -116,10 +141,17 @@ export async function resolveRoute(ctx: AppContext, hostname: string): Promise<R
     nodeName: row.nodeName,
     upstream: `${row.advertiseAddr}:${row.hostPort}`,
     healthCheckPath: row.healthCheckPath ?? '/',
-  }
+  }))
 
-  await ctx.redis.set(ROUTE_KEY(host), JSON.stringify(route), 'EX', ROUTE_TTL_SEC)
-  return route
+  await ctx.redis.set(ROUTE_KEY(host), JSON.stringify(routes), 'EX', ROUTE_TTL_SEC)
+  return pickRoute(routes)
+}
+
+/** One of the equally-good replicas, chosen fresh for each request. */
+export function pickRoute(routes: Route[]): Route | null {
+  if (!routes.length) return null
+  if (routes.length === 1) return routes[0]!
+  return routes[Math.floor(Math.random() * routes.length)]!
 }
 
 /** Called whenever placement changes, so a URL points at the new node at once. */

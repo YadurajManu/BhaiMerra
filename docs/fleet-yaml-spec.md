@@ -82,6 +82,37 @@ pass show db/url | fleet secrets set DATABASE_URL   # or pipe it
 fleet secrets ls
 ```
 
+## Replicas
+
+```yaml
+services:
+  web:
+    build: .
+    replicas: 3
+```
+
+Fleet keeps three copies running, each on a different node, and the hostname
+load-balances across them. Losing a node costs you one copy rather than the
+service.
+
+The count is *reconciled*, not applied once at deploy time: if a replica dies
+or its node disappears, the next sweep places a replacement. A new copy runs
+the same image the others are running — never a fresh build, which could
+produce a different artifact from the one already serving.
+
+Two kinds of service are deliberately not scaled, and say so rather than
+failing later:
+
+- **A service with a `volume`.** Two processes writing one data directory
+  corrupt it. It runs as a single copy.
+- **A `pinned` service.** Pinning names one node, so there is nowhere to spread
+  to. Use `flexible` or `preferred`.
+
+Replicas are capped by the number of eligible nodes. Asking for more copies
+than the fleet has machines places what it can and reports the shortfall —
+three containers on one machine is not redundancy, because losing that machine
+still loses the service.
+
 ## Databases
 
 Declaring Postgres by hand means getting six things right at once: the image
