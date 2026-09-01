@@ -82,6 +82,26 @@ pass show db/url | fleet secrets set DATABASE_URL   # or pipe it
 fleet secrets ls
 ```
 
+When the values already exist in a `.env`, import them instead of retyping:
+
+```bash
+fleet secrets import PlasticWorld/.env --dry-run   # shows keys, never values
+fleet secrets import PlasticWorld/.env
+```
+
+By default it stores only the keys this `fleet.yaml` names in a `secrets:`
+list, and leaves the rest of the file alone — a `.env` is half configuration
+and half credentials, and the manifest already draws that line. `--all` sends
+every key, `--only A,B` names them explicitly, and a secret the manifest
+declares but the file does not contain is reported before the deploy fails for
+it later.
+
+The parser errs towards refusing rather than guessing: an unterminated quote is
+skipped with its line number, a duplicated key warns, and an unquoted value
+containing `" #"` is stored whole rather than truncated at what might be a
+comment — a password silently cut short fails authentication somewhere with
+nothing pointing back at the file.
+
 The value is never accepted as a command argument — that would put it in your
 shell history and in `ps` output — and there is no command that prints one
 back. Values are sealed with per-secret keys wrapped by the control plane's

@@ -56,6 +56,31 @@ export function planFromManifest(source: string): PlannedService[] {
 }
 
 /**
+ * Which secrets the manifest says it needs, and which services want each.
+ *
+ * A .env holds a mix — half configuration, half credentials — and only the
+ * credentials belong in the secret store. The manifest already draws that line
+ * by declaring `secrets:`, so importing can honour it rather than asking
+ * somebody to re-draw it at the command line.
+ */
+export function declaredSecrets(source: string): Map<string, string[]> {
+  const doc = parseYaml(source) as { services?: Record<string, unknown> } | null
+  const services = doc?.services
+  const declared = new Map<string, string[]>()
+  if (!services || typeof services !== 'object') return declared
+
+  for (const [name, raw] of Object.entries(services)) {
+    const body = (raw ?? {}) as { secrets?: unknown }
+    if (!Array.isArray(body.secrets)) continue
+    for (const key of body.secrets) {
+      if (typeof key !== 'string') continue
+      declared.set(key, [...(declared.get(key) ?? []), name])
+    }
+  }
+  return declared
+}
+
+/**
  * Order services so a dependency is deployed before whatever depends on it.
  *
  * `affinity` is the signal. It means "co-locate", not "depends on", but in

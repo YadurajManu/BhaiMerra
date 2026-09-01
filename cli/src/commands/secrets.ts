@@ -7,11 +7,23 @@
  * a supported spelling. The value comes from a pipe or from a prompt with the
  * echo off, and nothing here ever prints one back.
  */
+import { readFile } from 'node:fs/promises'
 import { request, requireFleet, CliError, EXIT } from '../api.js'
 import { c, table, relativeTime } from '../render.js'
 import { glyph } from '../ui.js'
 import { askSecret, canPrompt } from '../prompt.js'
+import { parseDotenv, type EnvEntry } from '../dotenv.js'
+import { declaredSecrets } from '../plan.js'
 import type { Flags } from '../args.js'
+
+/** The manifest in the working directory, if there is one to read. */
+async function declaredSecretsNearby(): Promise<Map<string, string[]> | null> {
+  try {
+    return declaredSecrets(await readFile('fleet.yaml', 'utf8'))
+  } catch {
+    return null
+  }
+}
 
 type SecretRow = {
   key: string
@@ -137,6 +149,119 @@ export const secretsCommand = {
       return
     }
 
+    /* ── import ────────────────────────────────────────────────── */
+    if (sub === 'import') {
+      // Reading and choosing happen before anything touches the network, so
+      // `--dry-run` works on a plane, and a typo in a filename is not reported
+      // only after a sign-in prompt.
+      const file = key ?? '.env'
+
+      let source: string
+      try {
+        source = await readFile(file, 'utf8')
+      } catch {
+        throw new CliError(
+          `Cannot read "${file}".\n` +
+            `  usage: fleet secrets import [file]   (defaults to .env)`,
+          EXIT.usage
+        )
+      }
+
+      const parsed = parseDotenv(source)
+      for (const skip of parsed.skipped) {
+        console.log(`${glyph.warn} ${c.yellow('skipped')}  line ${skip.line}: ${skip.reason}`)
+      }
+      for (const warning of parsed.warnings) {
+        console.log(`${glyph.warn} ${c.yellow('warning')}  ${warning}`)
+      }
+      if (!parsed.entries.length) {
+        throw new CliError(`No usable assignments in "${file}".`, EXIT.usage)
+      }
+
+      // Which of them to send. The default is what the manifest declares,
+      // because a .env is half configuration and the store is only for the
+      // other half.
+      const only = typeof flags.only === 'string' ? flags.only.split(',').map((k) => k.trim()) : null
+      let chosen: EnvEntry[]
+      let basis: string
+
+      if (only) {
+        const missing = only.filter((k) => !parsed.entries.some((e) => e.key === k))
+        if (missing.length) {
+          throw new CliError(`Not in ${file}: ${missing.join(', ')}`, EXIT.usage)
+        }
+        chosen = parsed.entries.filter((e) => only.includes(e.key))
+        basis = '--only'
+      } else if (flags.all) {
+        chosen = parsed.entries
+        basis = '--all'
+      } else {
+        const declared = await declaredSecretsNearby()
+        if (!declared) {
+          throw new CliError(
+            `No fleet.yaml here to say which keys are secrets.\n` +
+              `  Pick them:      fleet secrets import ${file} --only KEY,OTHER_KEY\n` +
+              `  Or send it all: fleet secrets import ${file} --all`,
+            EXIT.usage
+          )
+        }
+        chosen = parsed.entries.filter((e) => declared.has(e.key))
+        basis = 'fleet.yaml'
+
+        // Named in the manifest but absent from the file: the deploy will be
+        // refused for a missing secret later, so say it now.
+        for (const [name, wanted] of declared) {
+          if (!parsed.entries.some((e) => e.key === name)) {
+            console.log(
+              `${glyph.warn} ${c.yellow('missing')}  ${c.bold(name)} is declared by ${wanted.join(', ')} but is not in ${file}`
+            )
+          }
+        }
+      }
+
+      if (!chosen.length) {
+        throw new CliError(
+          `Nothing in "${file}" matches ${basis === 'fleet.yaml' ? 'the secrets fleet.yaml declares' : basis}.\n` +
+            `  Send everything with --all, or name keys with --only KEY,OTHER_KEY`,
+          EXIT.usage
+        )
+      }
+
+      if (flags['dry-run']) {
+        const scope = service ? ` for ${c.bold(service)}` : ''
+        console.log(`\n  ${c.dim(`would store from ${file}${scope}, chosen by ${basis}`)}\n`)
+        for (const entry of chosen) console.log(`  ${c.bold(entry.key)} ${c.dim(`(line ${entry.line})`)}`)
+        console.log(c.dim(`\n  ${chosen.length} key(s). No values are shown, here or ever.`))
+        return
+      }
+
+      const fleetId = await requireFleet(typeof flags.fleet === 'string' ? flags.fleet : undefined)
+      const target = service ? await resolveServiceId(fleetId, service) : null
+      const where = target ? ` for ${c.bold(target.name)}` : ''
+
+      let stored = 0
+      let replaced = 0
+      for (const entry of chosen) {
+        const path = target
+          ? `/services/${target.id}/secrets/${encodeURIComponent(entry.key)}`
+          : `/fleets/${fleetId}/secrets/${encodeURIComponent(entry.key)}`
+        const { body } = await request<{ created: boolean }>('PUT', path, { body: { value: entry.value } })
+        if (body.created) stored++
+        else replaced++
+        console.log(`${glyph.ok} ${c.green(body.created ? 'stored' : 'replaced')}  ${c.bold(entry.key)}${where}`)
+      }
+
+      const untouched = parsed.entries.length - chosen.length
+      console.log(
+        c.dim(
+          `\n  ${stored} stored, ${replaced} replaced` +
+            (untouched ? `; ${untouched} other key(s) in ${file} left alone` : '')
+        )
+      )
+      console.log(c.dim('  takes effect on the next deploy of any service that references them'))
+      return
+    }
+
     /* ── rm ────────────────────────────────────────────────────── */
     if (sub === 'rm' || sub === 'remove' || sub === 'delete') {
       if (!key) throw new CliError('usage: fleet secrets rm <KEY> [--service <name>]', EXIT.usage)
@@ -160,7 +285,11 @@ export const secretsCommand = {
     throw new CliError(
       'usage: fleet secrets [ls]\n' +
         '       fleet secrets set <KEY> [--service <name>]\n' +
-        '       fleet secrets rm  <KEY> [--service <name>]',
+        '       fleet secrets rm  <KEY> [--service <name>]\n' +
+        '       fleet secrets import [file] [--all | --only A,B] [--service <name>] [--dry-run]\n' +
+        '\n' +
+        '  import reads a .env (default: ./.env) and stores the keys fleet.yaml\n' +
+        '  declares as secrets. --all sends every key in the file instead.',
       EXIT.usage
     )
   },
