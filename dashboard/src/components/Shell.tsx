@@ -1,5 +1,6 @@
 import { NavLink, Outlet } from 'react-router-dom'
-import { useAuth } from '../lib/auth'
+import { api, type Service } from '../lib/api'
+import { useAuth, usePoll } from '../lib/auth'
 import { Logo, Dot } from './ui'
 
 const NAV = [
@@ -15,6 +16,18 @@ const NAV = [
 
 export default function Shell() {
   const { email, fleets, fleet, selectFleet, signOut } = useAuth()
+
+  // A count in the nav, so a service going down reaches you on whatever page
+  // you happen to be on. Four were down for hours and the only way to find
+  // out was to open Services and look.
+  const services = usePoll(
+    () => (fleet?.id ? api<{ services: Service[] }>(`/fleets/${fleet.id}/services`) : Promise.resolve({ services: [] })),
+    [fleet?.id],
+    10_000
+  )
+  const brokenCount = (services.data?.services ?? []).filter(
+    (s) => s.current?.status !== 'running' && s.current?.status !== 'online' && s.current?.status !== 'deploying'
+  ).length
 
   return (
     <div className="min-h-screen">
@@ -57,6 +70,14 @@ export default function Shell() {
                 }
               >
                 {label}
+                {label === 'Services' && brokenCount > 0 && (
+                  <span
+                    title={`${brokenCount} service${brokenCount === 1 ? '' : 's'} not running`}
+                    className="ml-1.5 inline-flex min-w-[15px] items-center justify-center rounded-full bg-[var(--color-down)] px-1 text-[9.5px] font-semibold text-[var(--color-ink-950)]"
+                  >
+                    {brokenCount}
+                  </span>
+                )}
               </NavLink>
             ))}
           </nav>
@@ -92,6 +113,11 @@ export default function Shell() {
               }
             >
               {label}
+              {label === 'Services' && brokenCount > 0 && (
+                <span className="ml-1.5 inline-flex min-w-[15px] items-center justify-center rounded-full bg-[var(--color-down)] px-1 text-[9.5px] font-semibold text-[var(--color-ink-950)]">
+                  {brokenCount}
+                </span>
+              )}
             </NavLink>
           ))}
         </nav>

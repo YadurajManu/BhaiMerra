@@ -87,6 +87,18 @@ export async function fleetRoutes(app: FastifyInstance) {
           return {
             ...safe,
             live: live.has(n.id),
+            /**
+             * Whether the node currently holds an open reverse tunnel.
+             *
+             * The dashboard was drawing this from the heartbeat's
+             * `mesh_connected`, which the agent declares and never assigns —
+             * so every node rendered "No Tunnel" while its tunnel was up and
+             * carrying ingress traffic. The two are different subsystems: the
+             * mesh is WireGuard between nodes, the tunnel is the socket this
+             * process is holding right now, and only the registry knows about
+             * the latter.
+             */
+            tunnelConnected: app.ctx.tunnels.has(n.id),
             telemetry: hb
               ? {
                   cpuPct: hb.cpuPct,

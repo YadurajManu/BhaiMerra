@@ -122,6 +122,14 @@ export type Node = {
   reliabilityTier: 'opportunistic' | 'standard' | 'high'
   tags: string[]
   live: boolean
+  /**
+   * An open reverse tunnel, as the control plane sees it right now.
+   *
+   * Not `telemetry.meshConnected`, which is the WireGuard mesh between nodes
+   * and which the agent never actually sets — reading that is why every node
+   * displayed "No Tunnel" while its tunnel was up.
+   */
+  tunnelConnected: boolean
   lastHeartbeatAt: string | null
   advertiseAddr: string | null
   agentVersion: string | null

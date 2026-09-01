@@ -66,6 +66,7 @@ function summarise(reason: string): { head: string; rest: string | null } {
   return { head: head.length > 200 ? `${head.slice(0, 197)}…` : head, rest }
 }
 import { Button, ConfirmDialog, Copyable, Dot, Empty, ErrorNote, Panel, StatusPill } from '../components/ui'
+import DeployProgress from '../components/DeployProgress'
 
 const TEMPLATES: Record<string, string> = {
   nginx: `fleet: homelab
@@ -146,6 +147,8 @@ export default function Services() {
   const [copiedId, setCopiedId] = useState<string | null>(null)
   /** Which service has its failure reason expanded. One at a time. */
   const [openReason, setOpenReason] = useState<string | null>(null)
+  /** Services with a deploy in flight, showing the live phase ladder. */
+  const [watching, setWatching] = useState<string[]>([])
   const [confirmDelete, setConfirmDelete] = useState<Service | null>(null)
 
   const services = useMemo(() => data?.services ?? [], [data])
@@ -261,8 +264,9 @@ export default function Services() {
     setActionSuccess(null)
     try {
       await api(`/services/${service.id}/deploy`, { method: 'POST', body: {} })
-      setActionSuccess(`Deployment initiated for ${service.name}`)
-      setTimeout(() => setActionSuccess(null), 4000)
+      // Watch it instead of announcing it and walking away. A deploy takes
+      // minutes and "initiated" tells you nothing about whether it is moving.
+      setWatching((w) => [...new Set([...w, service.id])])
     } catch (err) {
       setActionError(err)
     } finally {
@@ -712,6 +716,20 @@ export default function Services() {
                     )}
                   </div>
                 </div>
+
+                {/* A deploy in flight, phase by phase. */}
+                {watching.includes(s.id) && (
+                  <DeployProgress
+                    serviceId={s.id}
+                    onSettled={(status) => {
+                      // Leave a failed ladder on screen — it is the record of
+                      // what went wrong. Clear a successful one after a beat.
+                      if (status === 'running') {
+                        setTimeout(() => setWatching((w) => w.filter((id) => id !== s.id)), 2500)
+                      }
+                    }}
+                  />
+                )}
 
                 {/* The reason, in the place a person is already looking. */}
                 {state.detail && (

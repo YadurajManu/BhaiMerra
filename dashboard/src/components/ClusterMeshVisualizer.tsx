@@ -8,18 +8,66 @@ export interface ClusterMeshVisualizerProps {
   nodes: Node[]
   fleetName?: string
   className?: string
+  /** Clicking a node. Without these the graph is a picture, not a control. */
+  onSelectNode?: (nodeId: string) => void
+  /** Clicking one of a node's services. */
+  onSelectService?: (serviceName: string) => void
 }
 
 /* ── Geometry helpers ────────────────────────────────────────── */
 
-/** Places worker nodes in a circle around a centre control-plane node. */
+/**
+ * Places worker nodes around the control plane.
+ *
+ * One ellipse for every fleet size put two nodes directly above and below the
+ * centre — the tallest arrangement possible on a canvas that is wider than it
+ * is tall, leaving two thirds of it empty and pushing the top node's labels
+ * into the header. Small fleets are the common case and deserve a layout that
+ * fits them; the ellipse only earns its keep once there are enough nodes to
+ * need a full circle.
+ */
 function layoutNodes(count: number, cx: number, cy: number, rx: number, ry: number) {
+  if (count === 0) return []
+  // A single node sits beside the control plane, not orbiting it.
+  if (count === 1) return [{ x: cx + rx * 0.85, y: cy }]
+  // Two go left and right, along the axis there is actually room on.
+  if (count === 2) {
+    return [
+      { x: cx - rx, y: cy },
+      { x: cx + rx, y: cy },
+    ]
+  }
+  // Three or four fan across the horizontal, still avoiding dead centre-top.
+  if (count <= 4) {
+    return Array.from({ length: count }, (_, i) => {
+      const spread = Math.PI * 0.82
+      const angle = Math.PI / 2 + spread / 2 - (spread * i) / (count - 1)
+      return { x: cx + rx * Math.cos(angle), y: cy + ry * Math.sin(angle) * 0.75 }
+    })
+  }
+  // Enough nodes for the circle to read as a circle. Start at the left so the
+  // first node never lands under the panel header.
   return Array.from({ length: count }, (_, i) => {
-    const angle = (2 * Math.PI * i) / count - Math.PI / 2
-    return {
-      x: cx + rx * Math.cos(angle),
-      y: cy + ry * Math.sin(angle),
-    }
+    const angle = Math.PI + (2 * Math.PI * i) / count
+    return { x: cx + rx * Math.cos(angle), y: cy + ry * Math.sin(angle) }
+  })
+}
+
+/**
+ * Where a node's services sit relative to it.
+ *
+ * Fanned on the side facing away from the control plane, so a service never
+ * lands on top of the edge connecting its node to the centre.
+ */
+function layoutServices(count: number, nx: number, ny: number, cx: number, cy: number) {
+  if (count === 0) return []
+  const away = Math.atan2(ny - cy, nx - cx)
+  const ring = 40
+  // A single service sits straight out; several fan across a quarter turn.
+  const spread = Math.min(Math.PI * 0.62, 0.34 * count)
+  return Array.from({ length: count }, (_, i) => {
+    const angle = count === 1 ? away : away - spread / 2 + (spread * i) / (count - 1)
+    return { x: nx + ring * Math.cos(angle), y: ny + ring * Math.sin(angle) }
   })
 }
 
@@ -55,6 +103,47 @@ function Tooltip({ children, x, y, visible }: { children: ReactNode; x: number; 
   )
 }
 
+/**
+ * A key to what is on screen, and nothing else.
+ *
+ * The legend was a fixed list of six states. A fleet showing one of them got
+ * five lines describing colours that were not there, which is how a reader
+ * learns to stop looking at the legend at all.
+ */
+function Legend({ enriched }: { enriched: Array<{ status: string; tunnelConnected: boolean; services: Array<{ status: string }> }> }) {
+  const items: Array<{ swatch: string; label: string }> = []
+  const add = (swatch: string, label: string) => {
+    if (!items.some((i) => i.label === label)) items.push({ swatch, label })
+  }
+
+  for (const node of enriched) {
+    const tone = toneOf(node.status)
+    if (tone === 'ok') add('var(--color-signal)', 'node online')
+    else if (tone === 'down') add('var(--color-down)', 'node offline')
+    else if (tone === 'warn') add('var(--color-warn)', 'draining / cordoned')
+    if (node.tunnelConnected) add('var(--color-signal-dim)', 'tunnel connected')
+
+    for (const svc of node.services) {
+      const st = toneOf(svc.status)
+      if (st === 'ok') add('var(--color-signal)', 'service running')
+      else if (st === 'down') add('var(--color-down)', 'service down')
+      else if (st === 'warn') add('var(--color-warn)', 'service deploying')
+    }
+  }
+
+  if (!items.length) return null
+  return (
+    <div className="flex flex-wrap items-center gap-5 border-t border-[var(--color-line)] px-5 py-2.5 font-mono text-[9.5px] text-[var(--color-fg-dim)]">
+      {items.map((i) => (
+        <span key={i.label} className="flex items-center gap-1.5">
+          <span className="inline-block h-2 w-2 rounded-full" style={{ background: i.swatch }} />
+          {i.label}
+        </span>
+      ))}
+    </div>
+  )
+}
+
 /* ── Main Component ──────────────────────────────────────────── */
 
 export default function ClusterMeshVisualizer({
@@ -62,6 +151,8 @@ export default function ClusterMeshVisualizer({
   nodes,
   fleetName = 'Fleet',
   className = '',
+  onSelectNode,
+  onSelectService,
 }: ClusterMeshVisualizerProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [hovered, setHovered] = useState<string | null>(null)
@@ -92,6 +183,10 @@ export default function ClusterMeshVisualizer({
         arch: mn.arch,
         agentVersion: liveNode?.agentVersion ?? null,
         live: liveNode?.live ?? false,
+        // The tunnel the control plane is actually holding, not the WireGuard
+        // mesh flag the agent never sets — which is why every node used to
+        // read "No Tunnel" while its tunnel was up and serving ingress.
+        tunnelConnected: liveNode?.tunnelConnected ?? false,
         meshConnected: liveNode?.telemetry?.meshConnected ?? false,
       }
     })
@@ -103,6 +198,10 @@ export default function ClusterMeshVisualizer({
   const rx = Math.min(dims.w * 0.36, 300)
   const ry = Math.min(dims.h * 0.36, 200)
   const positions = layoutNodes(enriched.length, cx, cy, rx, ry)
+
+  /** Keyboard focus, which is separate from the mouse's idea of "hovered". */
+  const [focused, setFocused] = useState<string | null>(null)
+  const active = hovered ?? focused
 
   // Handle hover on a node
   const handleNodeHover = useCallback(
@@ -244,8 +343,9 @@ export default function ClusterMeshVisualizer({
             const node = enriched[i]!
             const isOnline = node.status === 'online'
             const tone = toneOf(node.status)
-            const isHovered = hovered === node.id
+            const isHovered = active === node.id
             const nodeRadius = isHovered ? 22 : 18
+            const servicePos = layoutServices(node.services.length, pos.x, pos.y, cx, cy)
 
             const fillColor =
               tone === 'ok'
@@ -271,7 +371,21 @@ export default function ClusterMeshVisualizer({
                 onMouseEnter={(e) => handleNodeHover(node.id, e)}
                 onMouseMove={(e) => handleNodeHover(node.id, e)}
                 onMouseLeave={() => handleNodeHover(null)}
-                className="cursor-pointer"
+                // The richest view in the product used to be something you
+                // could only look at. A node is a link to the node.
+                role="link"
+                tabIndex={0}
+                aria-label={`${node.name}, ${node.status}, ${node.services.length} service${node.services.length === 1 ? '' : 's'}`}
+                onFocus={() => setFocused(node.id)}
+                onBlur={() => setFocused(null)}
+                onClick={() => onSelectNode?.(node.id)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    onSelectNode?.(node.id)
+                  }
+                }}
+                className="cursor-pointer outline-none [&:focus-visible>circle:nth-of-type(1)]:stroke-[var(--color-signal)]"
                 style={{ transition: 'transform 0.2s ease' }}
               >
                 {/* Hover ring */}
@@ -336,48 +450,100 @@ export default function ClusterMeshVisualizer({
                       width={72}
                       height={14}
                       rx={3}
-                      fill={node.meshConnected ? 'color-mix(in oklab, var(--color-signal) 12%, var(--color-ink-900))' : 'var(--color-ink-900)'}
-                      stroke={node.meshConnected ? 'var(--color-signal-dim)' : 'var(--color-line)'}
+                      fill={node.tunnelConnected ? 'color-mix(in oklab, var(--color-signal) 12%, var(--color-ink-900))' : 'var(--color-ink-900)'}
+                      stroke={node.tunnelConnected ? 'var(--color-signal-dim)' : 'var(--color-line)'}
                       strokeWidth={0.8}
                     />
                     <text
                       x={pos.x}
                       y={pos.y - nodeRadius - 9}
                       textAnchor="middle"
-                      fill={node.meshConnected ? 'var(--color-signal)' : 'var(--color-fg-dim)'}
+                      fill={node.tunnelConnected ? 'var(--color-signal)' : 'var(--color-fg-dim)'}
                       fontSize="7.5"
                       fontFamily="var(--font-mono)"
                       letterSpacing="0.04em"
                     >
-                      {node.meshConnected ? '🟢 Tunnel Active' : '○ No Tunnel'}
+                      {node.tunnelConnected ? '🟢 Tunnel Active' : '○ No Tunnel'}
                     </text>
                   </g>
                 )}
 
-                {/* Container workload count pill */}
-                {node.services.length > 0 && (
-                  <g>
-                    <rect
-                      x={pos.x + nodeRadius - 2}
-                      y={pos.y - nodeRadius + 2}
-                      width={16}
-                      height={14}
-                      rx={7}
-                      fill="var(--color-signal-dim)"
-                    />
-                    <text
-                      x={pos.x + nodeRadius + 6}
-                      y={pos.y - nodeRadius + 12}
-                      textAnchor="middle"
-                      fill="var(--color-fg)"
-                      fontSize="8"
-                      fontFamily="var(--font-mono)"
-                      fontWeight="600"
+                {/* ── Services, as satellites of the node they run on ──
+                    A topology view that draws only the boxes is a list with
+                    extra steps. What runs where is the question the picture
+                    exists to answer. */}
+                {servicePos.map((sp, si) => {
+                  const svc = node.services[si]!
+                  const svcTone = toneOf(svc.status)
+                  const svcColor =
+                    svcTone === 'ok'
+                      ? 'var(--color-signal)'
+                      : svcTone === 'warn'
+                        ? 'var(--color-warn)'
+                        : svcTone === 'down'
+                          ? 'var(--color-down)'
+                          : 'var(--color-fg-dim)'
+                  return (
+                    <g
+                      key={`svc-${node.id}-${svc.name}`}
+                      role="link"
+                      tabIndex={0}
+                      aria-label={`service ${svc.name} on ${node.name}, ${svc.status}`}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onSelectService?.(svc.name)
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          e.stopPropagation()
+                          onSelectService?.(svc.name)
+                        }
+                      }}
+                      className="cursor-pointer outline-none"
                     >
-                      {node.services.length}
-                    </text>
-                  </g>
-                )}
+                      {/* Tether, so it reads as belonging to this node. */}
+                      <line
+                        x1={pos.x}
+                        y1={pos.y}
+                        x2={sp.x}
+                        y2={sp.y}
+                        stroke="var(--color-line-2)"
+                        strokeWidth={0.7}
+                        opacity={isHovered ? 0.9 : 0.45}
+                        style={{ transition: 'opacity 0.2s ease' }}
+                      />
+                      <circle
+                        cx={sp.x}
+                        cy={sp.y}
+                        r={isHovered ? 6 : 5}
+                        fill={`color-mix(in oklab, ${svcColor} 18%, var(--color-ink-900))`}
+                        stroke={svcColor}
+                        strokeWidth={1}
+                        style={{ transition: 'r 0.2s ease' }}
+                      >
+                        {/* Only a service still coming up should move. */}
+                        {svc.status === 'deploying' && (
+                          <animate attributeName="opacity" values="1;0.35;1" dur="1.6s" repeatCount="indefinite" />
+                        )}
+                      </circle>
+                      {/* Names only once the node is under attention, or a
+                          busy fleet becomes unreadable. */}
+                      {isHovered && (
+                        <text
+                          x={sp.x}
+                          y={sp.y - 9}
+                          textAnchor="middle"
+                          fill="var(--color-fg-muted)"
+                          fontSize="7.5"
+                          fontFamily="var(--font-mono)"
+                        >
+                          {svc.name}
+                        </text>
+                      )}
+                    </g>
+                  )
+                })}
               </g>
             )
           })}
@@ -448,45 +614,33 @@ export default function ClusterMeshVisualizer({
                 </div>
               )}
 
-              {/* Mesh status */}
+              {/* Two different subsystems, and they were sharing one label:
+                  the tunnel is the socket the control plane holds right now,
+                  the mesh is WireGuard between nodes. Reporting the mesh flag
+                  as "Reverse Tunnel" is how a working tunnel read as down. */}
               <div className="pt-1 border-t border-[var(--color-line)] flex items-center gap-2">
-                <span className={`h-1.5 w-1.5 rounded-full ${hoveredNode.meshConnected ? 'bg-[var(--color-signal)]' : 'bg-[var(--color-fg-dim)]'}`} />
+                <span className={`h-1.5 w-1.5 rounded-full ${hoveredNode.tunnelConnected ? 'bg-[var(--color-signal)]' : 'bg-[var(--color-fg-dim)]'}`} />
                 <span className="text-[9px] text-[var(--color-fg-muted)]">
-                  Reverse Tunnel: {hoveredNode.meshConnected ? 'Active' : 'Inactive'}
+                  Reverse tunnel: {hoveredNode.tunnelConnected ? 'connected' : 'not connected'}
                 </span>
+              </div>
+              <div className="text-[9px] text-[var(--color-fg-dim)]">
+                Enter opens this node · click a satellite for its service
               </div>
             </div>
           )}
         </Tooltip>
       </div>
 
-      {/* ── Legend ───────────────────────────────────────────── */}
-      <div className="flex flex-wrap items-center gap-5 border-t border-[var(--color-line)] px-5 py-2.5 font-mono text-[9.5px] text-[var(--color-fg-dim)]">
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block h-[2px] w-4 bg-[var(--color-signal)]" style={{ strokeDasharray: '8 12' }} />
-          Tunnel Active
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block h-[2px] w-4 bg-[var(--color-line-2)]" />
-          Connected
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block h-[2px] w-4 bg-[var(--color-down)] opacity-30" style={{ borderTop: '2px dashed' }} />
-          Offline
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block h-2 w-2 rounded-full bg-[var(--color-signal)]" />
-          Online
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block h-2 w-2 rounded-full bg-[var(--color-down)]" />
-          Offline
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block h-2 w-2 rounded-full bg-[var(--color-warn)]" />
-          Draining / Cordoned
-        </span>
-      </div>
+      {/* ── Legend ───────────────────────────────────────────────
+          Only what is actually on screen. A fixed list of six states on a
+          fleet showing one of them is a key to a map of somewhere else, and
+          it teaches the reader to ignore the legend entirely. */}
+      <Legend enriched={enriched} />
+
+      <p className="border-t border-[var(--color-line)] px-5 py-2 font-mono text-[9.5px] text-[var(--color-fg-dim)]">
+        Tab to move between nodes and services · Enter to open
+      </p>
     </div>
   )
 }
