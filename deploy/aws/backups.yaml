@@ -1,0 +1,114 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+# Off-box storage for control-plane database dumps.
+#
+#   aws cloudformation deploy \
+#     --region ap-south-1 \
+#     --template-file deploy/aws/backups.yaml \
+#     --stack-name fleet-os-backups \
+#     --capabilities CAPABILITY_NAMED_IAM
+#
+# Fleet backs up its users' service volumes. Nothing backed up the database
+# that holds every fleet, node identity, deployment history and encrypted
+# secret. Losing that disk orphans every fleet permanently: the agents keep
+# running their containers and nothing can ever manage them again.
+#
+# On the secrets in these dumps: the `secrets` table stores envelope-encrypted
+# values, and SECRETS_MASTER_KEY that decrypts them lives only in deploy/.env,
+# never in the database. A dump on its own therefore cannot be decrypted. That
+# property is the reason server-side encryption is sufficient here, and it is
+# also why the master key must never be stored alongside these objects - a
+# backup containing both is a backup that decrypts itself.
+
+Description: Fleet OS control plane - off-box database backups
+
+Parameters:
+  RetentionDays:
+    Type: Number
+    Default: 30
+    MinValue: 7
+    MaxValue: 365
+    Description: How long a nightly dump is kept before it expires.
+
+Resources:
+  BackupBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'fleet-os-backups-${AWS::AccountId}'
+
+      # Nothing in here is ever public. This is the control plane's database.
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+      # A backup you can overwrite is a backup ransomware can overwrite.
+      VersioningConfiguration:
+        Status: Enabled
+
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-dumps
+            Status: Enabled
+            Prefix: db/
+            ExpirationInDays: !Ref RetentionDays
+            NoncurrentVersionExpirationInDays: 7
+          - Id: abort-incomplete-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 3
+
+      Tags:
+        - Key: Project
+          Value: fleet-os
+
+  # Lightsail instances cannot carry an IAM instance profile the way EC2 does,
+  # so the box needs its own credential. Scoped to writing one prefix of one
+  # bucket and nothing else: if it leaks, the blast radius is that someone can
+  # add objects under db/.
+  BackupWriter:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: fleet-os-backup-writer
+      Policies:
+        - PolicyName: write-db-dumps
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: PutDumpsOnly
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:AbortMultipartUpload
+                Resource: !Sub '${BackupBucket.Arn}/db/*'
+              - Sid: ListForPruning
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt BackupBucket.Arn
+                Condition:
+                  StringLike:
+                    's3:prefix': 'db/*'
+      Tags:
+        - Key: Project
+          Value: fleet-os
+
+Outputs:
+  BucketName:
+    Description: Where nightly dumps land
+    Value: !Ref BackupBucket
+
+  BackupUser:
+    Description: IAM user the host authenticates as
+    Value: !Ref BackupWriter
+
+  RestoreHint:
+    Description: List what exists before restoring
+    Value: !Sub 'aws s3 ls s3://${BackupBucket}/db/ --region ${AWS::Region}'

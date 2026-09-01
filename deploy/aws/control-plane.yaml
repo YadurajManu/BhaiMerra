@@ -1,0 +1,185 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+# The Fleet OS control plane host, on Amazon Lightsail.
+#
+#   aws cloudformation deploy \
+#     --region ap-south-1 \
+#     --template-file deploy/aws/control-plane.yaml \
+#     --stack-name fleet-os-control-plane \
+#     --parameter-overrides SshCidr=<your-ip>/32
+#
+# Lightsail rather than EC2 on purpose. The control plane mounts the host's
+# Docker socket to run multi-arch builds, so it needs a real virtual machine —
+# which rules out every platform-as-a-service — but it needs nothing else EC2
+# offers. Lightsail is the same VM at a fixed monthly price with egress
+# included, and egress is the bill that grows: a registry spends its life
+# serving image layers to nodes that are not in this VPC.
+
+Description: Fleet OS control plane - Lightsail host, static IP, daily snapshots
+
+Parameters:
+  BundleId:
+    Type: String
+    Default: large_3_1
+    AllowedValues: [medium_3_1, large_3_1, xlarge_3_1]
+    Description: >
+      large_3_1 is 2 vCPU / 8 GB / 160 GB at $44/mo. Buildx running QEMU for
+      multi-arch is the memory-hungry step; medium_3_1 (4 GB) runs everything
+      else comfortably but will OOM on larger builds.
+
+  SshCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    Description: >
+      Who may reach port 22. Pass your own address as x.x.x.x/32. Leaving this
+      open to the world puts the box in every SSH scanner's queue within hours.
+
+  SnapshotHourUtc:
+    Type: String
+    Default: '20:00'
+    AllowedPattern: '^([01]\d|2[0-3]):00$'
+    Description: >
+      Daily automatic snapshot time, UTC, on the hour. 20:00 UTC is ~01:30 IST.
+
+  AltSshPort:
+    Type: Number
+    Default: 2222
+    MinValue: 1024
+    MaxValue: 65535
+    Description: >
+      A second port for sshd. Many campus, corporate and cafe networks block
+      outbound port 22 by number while allowing every other port, which locks
+      you out of a box that is otherwise perfectly healthy. This is the way
+      back in. It is scoped to the same CIDR as port 22, so it widens reach,
+      not exposure. sshd must also be told to listen on it - see
+      deploy/aws/README.md.
+
+Resources:
+  ControlPlane:
+    Type: AWS::Lightsail::Instance
+    Properties:
+      InstanceName: fleet-os-control-plane
+      BlueprintId: ubuntu_24_04
+      BundleId: !Ref BundleId
+      KeyPairName: fleet-os
+
+      AddOns:
+        # Disk-level snapshots. These are not a substitute for the Postgres
+        # dumps in phase 05 of the runbook — a snapshot of a running database
+        # is a crash-consistent image, not a backup you would want to restore
+        # a customer's fleet from. They cover the case where the whole machine
+        # is lost, which pg_dump alone does not.
+        - AddOnType: AutoSnapshot
+          Status: Enabled
+          AutoSnapshotAddOnRequest:
+            SnapshotTimeOfDay: !Ref SnapshotHourUtc
+
+      Networking:
+        Ports:
+          - FromPort: 22
+            ToPort: 22
+            Protocol: tcp
+            Cidrs: [!Ref SshCidr]
+
+          # Same access, different port number, for networks that filter 22.
+          - FromPort: !Ref AltSshPort
+            ToPort: !Ref AltSshPort
+            Protocol: tcp
+            Cidrs: [!Ref SshCidr]
+
+          # The registry, served directly over TLS by Caddy on the host.
+          # Deliberately NOT behind Cloudflare: the free plan rejects request
+          # bodies over 100 MB, and image layers routinely exceed that.
+          - FromPort: 443
+            ToPort: 443
+            Protocol: tcp
+            Cidrs: ['0.0.0.0/0']
+
+          # ACME http-01 only. Caddy redirects everything else to 443.
+          - FromPort: 80
+            ToPort: 80
+            Protocol: tcp
+            Cidrs: ['0.0.0.0/0']
+
+      # Everything the API, dashboard, marketing site and per-service ingress
+      # need arrives through the Cloudflare Tunnel, which dials outward. None
+      # of them appear here because none of them need an inbound port.
+
+      UserData: |
+        #!/bin/bash
+        # Plain redirection, not `exec > >(tee ...)`. Process substitution is a
+        # bashism, cloud-init does not reliably run this under bash, and when it
+        # does not the script is a syntax error that dies before writing a
+        # single line of log - which is exactly how it failed the first time.
+        set -euxo pipefail
+        exec >>/var/log/fleet-bootstrap.log 2>&1
+
+        export DEBIAN_FRONTEND=noninteractive
+
+        # Lightsail runs its own apt work at boot. Wait for the lock rather
+        # than racing it and dying on a dpkg frontend error.
+        for _ in $(seq 1 30); do
+          fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || break
+          sleep 5
+        done
+
+        apt-get update -y
+        apt-get install -y ca-certificates curl git unattended-upgrades fail2ban
+
+        # Docker, from Docker's own repository rather than Ubuntu's, which
+        # ships a version too old for the buildx features the control plane uses.
+        curl -fsSL https://get.docker.com | sh
+        usermod -aG docker ubuntu
+        systemctl enable --now docker
+
+        # Multi-arch builds hold several layers in memory at once and 8 GB is
+        # not generous for that. Swap turns an OOM-killed build into a slow one.
+        if [ ! -f /swapfile ]; then
+          fallocate -l 4G /swapfile
+          chmod 600 /swapfile
+          mkswap /swapfile
+          swapon /swapfile
+          echo '/swapfile none swap sw 0 0' >> /etc/fstab
+          echo 'vm.swappiness=10' > /etc/sysctl.d/99-fleet.conf
+          sysctl -p /etc/sysctl.d/99-fleet.conf
+        fi
+
+        # QEMU emulators, so this amd64 host can build arm64 and armv7 images.
+        docker run --privileged --rm tonistiigi/binfmt --install all
+
+        touch /var/lib/fleet-bootstrap-complete
+
+      Tags:
+        - Key: Project
+          Value: fleet-os
+        - Key: Role
+          Value: control-plane
+        - Key: ManagedBy
+          Value: cloudformation
+
+  # A static address, because agents, DNS and the GitHub App all hold it.
+  # Without this the address changes whenever the instance is stopped, and
+  # every node in every fleet silently loses its control plane.
+  ControlPlaneIp:
+    Type: AWS::Lightsail::StaticIp
+    Properties:
+      StaticIpName: fleet-os-control-plane-ip
+      AttachedTo: !Ref ControlPlane
+
+Outputs:
+  PublicIp:
+    Description: Static IP - point registry.<zone> here as a DNS-only A record
+    Value: !GetAtt ControlPlaneIp.IpAddress
+
+  SshCommand:
+    Description: Connect to the host
+    Value: !Sub 'ssh ubuntu@${ControlPlaneIp.IpAddress}'
+
+  BootstrapCheck:
+    Description: Confirm cloud-init finished before deploying onto it
+    Value: !Sub 'ssh ubuntu@${ControlPlaneIp.IpAddress} "ls /var/lib/fleet-bootstrap-complete"'
+
+  MonthlyCost:
+    Description: Recurring charge for this stack
+    Value: !Sub '${BundleId} - see Lightsail pricing; large_3_1 is USD 44/mo'
