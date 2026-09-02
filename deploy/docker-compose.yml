@@ -109,6 +109,11 @@ services:
       # hands the same credential to agents in their desired state so they can
       # pull. Leave empty for a registry that needs none.
       REGISTRY_CREDENTIALS: ${REGISTRY_CREDENTIALS:-}
+      # Email. Both are optional and only work together: without them alert
+      # rules with an email channel log what they would have sent instead of
+      # failing, so an unconfigured control plane still runs normally.
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      MAIL_FROM: ${MAIL_FROM:-}
       BUILDX_BUILDER: ${BUILDX_BUILDER:-}
       # "min" when the registry is behind a proxy with a request size limit —
       # Cloudflare's free plan rejects bodies over 100MB, and "max" exports
