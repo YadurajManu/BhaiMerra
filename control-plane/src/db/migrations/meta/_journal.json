@@ -92,6 +92,13 @@
       "when": 1787312000000,
       "tag": "0012_auth_sessions",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1787313000000,
+      "tag": "0013_account_deletion",
+      "breakpoints": true
     }
   ]
 }

@@ -63,6 +63,10 @@ export const users = pgTable(
     totpSecret: text('totp_secret'), // PRD 7.8 — optional 2FA
     /** Null until the address is confirmed. Accounts predating this are backfilled. */
     emailVerifiedAt: timestamp('email_verified_at', { withTimezone: true }),
+    /** When the owner asked. Kept separate so "requested but not confirmed" is visible. */
+    deletionRequestedAt: timestamp('deletion_requested_at', { withTimezone: true }),
+    /** Set once confirmed. Until this passes, the account works normally and can be reclaimed. */
+    deletionScheduledFor: timestamp('deletion_scheduled_for', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex('users_email_key').on(t.email)]
@@ -81,7 +85,7 @@ export const authTokens = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
     tokenHash: text('token_hash').notNull(),
-    purpose: text('purpose').$type<'password_reset' | 'email_verify'>().notNull(),
+    purpose: text('purpose').$type<'password_reset' | 'email_verify' | 'account_delete'>().notNull(),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
     usedAt: timestamp('used_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

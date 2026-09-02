@@ -137,18 +137,95 @@ export function toWebhook(event: FleetEventPayload) {
   }
 }
 
+const HTML_ESC: Record<string, string> = {
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+}
+const esc = (s: string) => String(s).replace(/[&<>"']/g, (c) => HTML_ESC[c]!)
+
+const HEX: Record<Severity, string> = {
+  info: '#0b8f4d',
+  warning: '#9a5b00',
+  critical: '#c0392b',
+}
+
+const SANS = "ui-sans-serif,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
+const MONO = 'ui-monospace,SFMono-Regular,Menlo,Consolas,monospace'
+
+/**
+ * The subject line is what decides whether an alert is read on a phone at
+ * midnight, so it leads with the thing that changed rather than the product
+ * name. Critical events say so; routine ones stay quiet.
+ */
+function subjectFor(event: FleetEventPayload): string {
+  const sev = severityOf(event.type)
+  const prefix = sev === 'critical' ? '[fleet-os] ACTION NEEDED' : '[fleet-os]'
+  return `${prefix} ${headline(event)}`
+}
+
+/**
+ * A real email rather than a wall of key: value lines.
+ *
+ * Every alert channel had a considered format except this one - Discord and
+ * Slack got embeds and colour, and email got a text dump. Deploy notifications
+ * are the ones people actually receive daily, so they are the ones worth
+ * making legible.
+ *
+ * Plain text is returned alongside, because the sender ships both parts and a
+ * text-only fallback is what several clients will render.
+ */
 export function toEmail(event: FleetEventPayload): { subject: string; body: string } {
-  const extra = fields(event)
-  return {
-    subject: `[fleet-os] ${headline(event)}`,
-    body: [
-      headline(event),
-      '',
-      ...extra.map(([k, v]) => `${k}: ${v}`),
-      '',
-      `Event: ${event.type}`,
-      `Fleet: ${event.fleetId}`,
-      `Time:  ${event.at}`,
-    ].join('\n'),
-  }
+  const rows = fields(event)
+  const sev = severityOf(event.type)
+  const colour = HEX[sev]
+
+  const table = rows.length
+    ? `<table cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:18px 0;width:100%">` +
+      rows
+        .map(
+          ([k, v]) =>
+            `<tr>` +
+            `<td style="padding:7px 16px 7px 0;border-bottom:1px solid #eef0f3;color:#838c98;` +
+            `font:11px/1.4 ${MONO};letter-spacing:.1em;text-transform:uppercase;white-space:nowrap;vertical-align:top">${esc(k)}</td>` +
+            `<td style="padding:7px 0;border-bottom:1px solid #eef0f3;color:#12161b;font:13.5px/1.5 ${MONO};word-break:break-word">${esc(v)}</td>` +
+            `</tr>`
+        )
+        .join('') +
+      `</table>`
+    : ''
+
+  const url = typeof event.detail?.url === 'string' ? event.detail.url : null
+  const link = url
+    ? `<p style="margin:0 0 14px"><a href="${esc(url.startsWith('http') ? url : `https://${url}`)}" ` +
+      `style="color:${colour};font:13.5px/1.5 ${MONO};word-break:break-all">${esc(url)}</a></p>`
+    : ''
+
+  const body =
+    `<div style="font:14px/1.65 ${SANS};color:#12161b;max-width:560px;padding:8px">` +
+    `<div style="font:600 12px/1 ${MONO};letter-spacing:.16em;text-transform:uppercase;color:${colour};margin-bottom:18px">` +
+    `fleet&middot;os &nbsp;/&nbsp; ${esc(sev)}</div>` +
+    // A left rule in the severity colour, so the seriousness reads before
+    // any of the words do.
+    `<div style="border-left:3px solid ${colour};padding-left:14px">` +
+    `<div style="font-size:17px;font-weight:600;letter-spacing:-.02em;line-height:1.35">${esc(headline(event))}</div>` +
+    `</div>` +
+    table +
+    link +
+    `<div style="margin-top:20px;padding-top:12px;border-top:1px solid #e3e6ea;color:#838c98;font:11.5px/1.6 ${MONO}">` +
+    `${esc(event.type)} &middot; fleet ${esc(event.fleetId)}<br>${esc(event.at)}</div>` +
+    `</div>`
+
+  return { subject: subjectFor(event), body }
+}
+
+/** The same content as plain text, for anywhere HTML is not wanted. */
+export function toEmailText(event: FleetEventPayload): string {
+  return [
+    headline(event),
+    '',
+    ...fields(event).map(([k, v]) => `${k}: ${v}`),
+    '',
+    `Event: ${event.type}`,
+    `Fleet: ${event.fleetId}`,
+    `Time:  ${event.at}`,
+  ].join('\n')
 }

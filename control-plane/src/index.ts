@@ -4,6 +4,9 @@ import { loadConfig } from './config.js'
 import { createContext, closeContext } from './api/context.js'
 import { buildServer } from './server.js'
 import { startSweeper } from './heartbeat/sweeper.js'
+import { runDueDeletions } from './auth/account-deletion.js'
+import { pruneExpiredTokens } from './auth/email-tokens.js'
+import { deletionCompleteEmail } from './email/templates.js'
 import { dispatchEvent } from './alerting/dispatch.js'
 import { startIngress } from './ingress/proxy.js'
 
@@ -34,6 +37,38 @@ const sweeper = startSweeper(ctx, {
   },
 })
 
+/**
+ * Slow housekeeping, on its own clock.
+ *
+ * The heartbeat sweeper ticks every few seconds because a dead node has to be
+ * noticed quickly. Nothing here is urgent — a seven-day grace period does not
+ * care about seconds — and running it at heartbeat frequency would be thousands
+ * of pointless queries a day.
+ */
+const JANITOR_MS = 60 * 60_000
+const janitor = setInterval(() => {
+  void (async () => {
+    try {
+      const deleted = await runDueDeletions(ctx, app.log)
+      for (const d of deleted) {
+        // Sent after the row is gone, which is deliberate: the address is in
+        // hand, and a "your account is closed" email that arrives while the
+        // account still exists would be a lie.
+        const { subject, body } = deletionCompleteEmail(d.orgsDeleted)
+        await ctx.email.send(d.email, subject, body).catch((err) => {
+          app.log.warn({ err }, 'account closed email failed to send')
+        })
+      }
+      const pruned = await pruneExpiredTokens(ctx)
+      if (pruned) app.log.info({ pruned }, 'expired auth tokens pruned')
+    } catch (err) {
+      app.log.error({ err }, 'janitor tick failed')
+    }
+  })()
+}, JANITOR_MS)
+// Housekeeping must never be the reason the process cannot exit.
+janitor.unref()
+
 // The public edge listens separately from the API: this port faces the
 // internet, and the control-plane API must not.
 const ingress = config.INGRESS_ENABLED
@@ -46,6 +81,7 @@ if (ingress) {
 const shutdown = async (signal: string) => {
   app.log.info({ signal }, 'shutting down')
   sweeper.stop()
+  clearInterval(janitor)
   await ingress?.close()
   await app.close()
   await closeContext(ctx)

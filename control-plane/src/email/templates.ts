@@ -186,3 +186,110 @@ export function newSignInEmail(opts: {
     }),
   }
 }
+
+/* ── closing an account ─────────────────────────────────────────────── */
+
+export type ImpactLine = { name: string; fate: 'deleted' | 'kept'; fleets: number; nodes: number; services: number }
+
+/**
+ * Spell out what disappears.
+ *
+ * "Your account will be deleted" is not informed consent when the actual
+ * consequence is four fleets and eleven services. Every message in this flow
+ * repeats the same inventory so nobody discovers the scope afterwards.
+ */
+function impactTable(rows: ImpactLine[]): string {
+  if (!rows.length) return ''
+  return (
+    `<table cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:18px 0;width:100%">` +
+    rows
+      .map((r) => {
+        const detail =
+          r.fate === 'kept'
+            ? 'kept - another owner remains'
+            : `${r.fleets} fleet${r.fleets === 1 ? '' : 's'}, ${r.nodes} node${r.nodes === 1 ? '' : 's'}, ${r.services} service${r.services === 1 ? '' : 's'}`
+        const colour = r.fate === 'kept' ? '#59616d' : '#c0392b'
+        return (
+          `<tr>` +
+          `<td style="padding:7px 16px 7px 0;border-bottom:1px solid #eef0f3;color:#12161b;` +
+          `font:13px/1.5 ${MONO};white-space:nowrap;vertical-align:top">${esc(r.name)}</td>` +
+          `<td style="padding:7px 0;border-bottom:1px solid #eef0f3;color:${colour};font:12.5px/1.5 ${MONO}">${esc(detail)}</td>` +
+          `</tr>`
+        )
+      })
+      .join('') +
+    `</table>`
+  )
+}
+
+/** Step one: confirm you meant it. The only message in the flow with a link. */
+export function deletionConfirmEmail(url: string, impact: ImpactLine[], graceDays: number) {
+  return {
+    subject: 'Confirm you want to close your Fleet OS account',
+    body: shell({
+      heading: 'Confirm closing your account',
+      lines: ['Closing your account would permanently remove:'],
+      table: impactTable(impact),
+      lines2: [
+        `Confirming does not delete anything straight away. Your account keeps working for ${graceDays} days, and you can call it off at any point in that window.`,
+        'If you did not ask for this, ignore this email and change your password - somebody else may have reached your account.',
+      ],
+      action: { label: 'Confirm and start the countdown', url },
+      footer: 'Sent by Fleet OS because closing this account was requested.',
+    }),
+  }
+}
+
+/** Step two: the clock is running, and here is how to stop it. */
+export function deletionScheduledEmail(at: Date, impact: ImpactLine[], dashboardUrl?: string) {
+  return {
+    subject: `Your Fleet OS account closes on ${at.toISOString().slice(0, 10)}`,
+    body: shell({
+      heading: 'Your account is scheduled to close',
+      lines: [
+        `Nothing has been deleted. On ${at.toISOString().replace('T', ' ').slice(0, 16)} UTC, this will be removed permanently:`,
+      ],
+      table: impactTable(impact),
+      lines2: [
+        dashboardUrl
+          ? `To keep your account, sign in at ${dashboardUrl} and cancel. Everything stays exactly as it is.`
+          : 'To keep your account, sign in and cancel. Everything stays exactly as it is.',
+        'Your nodes will keep running whatever they are running now. Fleet stops managing them, so run `fleet unpair` on each machine first if you want them cleaned up.',
+      ],
+      footer: 'Sent by Fleet OS because account closure was confirmed. You can cancel until the date above.',
+    }),
+  }
+}
+
+/** Called off. Sent unprompted, because a cancellation nobody confirms is unnerving. */
+export function deletionCancelledEmail() {
+  return {
+    subject: 'Your Fleet OS account will not be closed',
+    body: shell({
+      heading: 'Closure cancelled',
+      lines: [
+        'Your account is staying. Nothing was deleted and nothing changed.',
+        'If you did not cancel this yourself, someone else has access to your account. Change your password now.',
+      ],
+      footer: 'Sent by Fleet OS because a scheduled account closure was cancelled.',
+    }),
+  }
+}
+
+/** The last message this address receives. Sent before the row disappears. */
+export function deletionCompleteEmail(orgsDeleted: number) {
+  return {
+    subject: 'Your Fleet OS account has been closed',
+    body: shell({
+      heading: 'Your account is closed',
+      lines: [
+        orgsDeleted > 0
+          ? `Your account and ${orgsDeleted} organisation${orgsDeleted === 1 ? '' : 's'}, with their fleets, services, deployment history and secrets, have been deleted. This cannot be undone.`
+          : 'Your account has been deleted. Organisations with another owner were left in place.',
+        'Any machines you paired are still running whatever containers they had. They are yours - Fleet no longer manages them, and the agent can be removed with the uninstall step in the docs.',
+        'This is the last email you will get from us.',
+      ],
+      footer: 'Sent by Fleet OS. Nothing further is stored against this address.',
+    }),
+  }
+}

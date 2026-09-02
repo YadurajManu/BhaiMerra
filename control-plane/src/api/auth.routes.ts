@@ -15,8 +15,18 @@ import {
   verifyEmail,
   passwordChangedEmail,
   newSignInEmail,
+  deletionConfirmEmail,
+  deletionScheduledEmail,
+  deletionCancelledEmail,
 } from '../email/templates.js'
 import { recordSignIn, loginContextFrom, describeDevice } from '../auth/sessions.js'
+import {
+  deletionImpact,
+  requestDeletion,
+  scheduleDeletion,
+  cancelDeletion,
+  GRACE_DAYS,
+} from '../auth/account-deletion.js'
 import { recordAudit } from '../lib/audit.js'
 import { ApiError } from './errors.js'
 import { requireUser } from './guards.js'
@@ -301,6 +311,120 @@ export async function authRoutes(app: FastifyInstance) {
 
     await sendVerification(user.id, user.email)
     return reply.send({ ok: true })
+  })
+
+  /* ── closing an account ─────────────────────────────────────────────
+     Deliberately slow. Deleting an org cascades to its fleets, and a fleet
+     cascades to its nodes, services, deployments, secrets and backups, with
+     no undo once it runs. */
+
+  /** What would actually be destroyed. The dashboard shows this before asking. */
+  app.get('/account/deletion', { preHandler: requireUser }, async (req) => {
+    const [user] = await db
+      .select({ scheduledFor: users.deletionScheduledFor })
+      .from(users)
+      .where(eq(users.id, req.userId!))
+      .limit(1)
+    return {
+      graceDays: GRACE_DAYS,
+      scheduledFor: user?.scheduledFor ?? null,
+      impact: await deletionImpact(app.ctx, req.userId!),
+    }
+  })
+
+  /**
+   * Ask to close. Requires the password even though the caller is already
+   * authenticated: a borrowed laptop with a live session must not be enough to
+   * start destroying someone's infrastructure.
+   */
+  app.post('/account/deletion', { preHandler: requireUser }, async (req, reply) => {
+    const parsed = z.object({ password: z.string().min(1).max(1024) }).safeParse(req.body)
+    if (!parsed.success) {
+      throw ApiError.unprocessable('password_required', 'Confirm your password to continue')
+    }
+
+    const [user] = await db
+      .select({ id: users.id, email: users.email, passwordHash: users.passwordHash })
+      .from(users)
+      .where(eq(users.id, req.userId!))
+      .limit(1)
+    if (!user) throw ApiError.notFound('User')
+
+    if (!(await verifyPassword(user.passwordHash, parsed.data.password))) {
+      throw ApiError.unauthorized('That password is not correct')
+    }
+
+    if (!(await withinSendLimit(app.ctx, 'password_reset', `del:${user.email}`))) {
+      throw ApiError.tooManyRequests('rate_limited', 'Too many requests. Try again later.')
+    }
+
+    const impact = await deletionImpact(app.ctx, user.id)
+    await requestDeletion(app.ctx, user.id)
+
+    const token = await issueEmailToken(app.ctx, user.id, 'account_delete')
+    const { subject, body } = deletionConfirmEmail(
+      `${appUrl()}/account/close?token=${token}`,
+      impact,
+      GRACE_DAYS
+    )
+    await app.ctx.email.send(user.email, subject, body).catch((err) => {
+      req.log.warn({ err }, 'deletion confirmation email failed to send')
+    })
+
+    req.log.warn({ userId: user.id }, 'account deletion requested')
+    return reply.send({ ok: true, graceDays: GRACE_DAYS, impact })
+  })
+
+  /** Confirm from the emailed link. Starts the countdown; deletes nothing yet. */
+  app.post('/account/deletion/confirm', async (req) => {
+    const parsed = z.object({ token: z.string().min(1).max(512) }).safeParse(req.body)
+    if (!parsed.success) throw ApiError.unprocessable('invalid_token', 'Check the submitted fields')
+
+    const result = await consumeEmailToken(app.ctx, parsed.data.token, 'account_delete')
+    if (!result.ok) {
+      throw ApiError.unprocessable(
+        'invalid_token',
+        'That confirmation link is no longer valid. Start again from Settings.'
+      )
+    }
+
+    const impact = await deletionImpact(app.ctx, result.userId)
+    const due = await scheduleDeletion(app.ctx, result.userId)
+
+    const [user] = await db
+      .select({ email: users.email })
+      .from(users)
+      .where(eq(users.id, result.userId))
+      .limit(1)
+    if (user) {
+      const { subject, body } = deletionScheduledEmail(due, impact, appUrl() || undefined)
+      await app.ctx.email.send(user.email, subject, body).catch((err) => {
+        req.log.warn({ err }, 'deletion scheduled email failed to send')
+      })
+    }
+
+    req.log.warn({ userId: result.userId, due }, 'account deletion scheduled')
+    return { ok: true, scheduledFor: due, graceDays: GRACE_DAYS }
+  })
+
+  /** Call it off. Signing in at all is enough - cancelling is never the risky direction. */
+  app.delete('/account/deletion', { preHandler: requireUser }, async (req) => {
+    const cancelled = await cancelDeletion(app.ctx, req.userId!)
+    if (cancelled) {
+      const [user] = await db
+        .select({ email: users.email })
+        .from(users)
+        .where(eq(users.id, req.userId!))
+        .limit(1)
+      if (user) {
+        const { subject, body } = deletionCancelledEmail()
+        await app.ctx.email.send(user.email, subject, body).catch((err) => {
+          req.log.warn({ err }, 'deletion cancelled email failed to send')
+        })
+      }
+      req.log.info({ userId: req.userId }, 'account deletion cancelled')
+    }
+    return { ok: true, cancelled }
   })
 
   /** Start a CLI web login session. Mints a single-use code stored in Redis. */

@@ -17,12 +17,15 @@ import type { AppContext } from '../api/context.js'
  *     indexed read and does not vary in time with how many tokens exist.
  */
 
-export type TokenPurpose = 'password_reset' | 'email_verify'
+export type TokenPurpose = 'password_reset' | 'email_verify' | 'account_delete'
 
 /** Reset links are short-lived; verification links are not urgent. */
 export const TTL_MS: Record<TokenPurpose, number> = {
   password_reset: 30 * 60_000,
   email_verify: 24 * 60 * 60_000,
+  // Short. This link starts destroying infrastructure, so an old one sitting
+  // in a mailbox should stop working long before anyone stumbles back onto it.
+  account_delete: 60 * 60_000,
 }
 
 export const hashToken = (token: string) => createHash('sha256').update(token).digest('hex')
