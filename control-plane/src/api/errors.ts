@@ -28,6 +28,10 @@ export class ApiError extends Error {
   static conflict(code: string, message: string) {
     return new ApiError(409, code, message)
   }
+  static tooManyRequests(code: string, message: string) {
+    return new ApiError(429, code, message)
+  }
+
   static unprocessable(code: string, message: string, detail?: unknown) {
     return new ApiError(422, code, message, detail)
   }

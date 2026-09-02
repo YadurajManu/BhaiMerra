@@ -3,7 +3,14 @@ import { z } from 'zod'
 import type { FastifyInstance } from 'fastify'
 import { users, orgs, orgMembers, fleets } from '../db/schema.js'
 import { hashPassword, verifyPassword } from '../auth/passwords.js'
-import { issueTokens, consumeRefresh } from '../auth/tokens.js'
+import { issueTokens, consumeRefresh, revokeAllRefresh } from '../auth/tokens.js'
+import {
+  issueEmailToken,
+  consumeEmailToken,
+  withinSendLimit,
+  TTL_MS,
+} from '../auth/email-tokens.js'
+import { passwordResetEmail, verifyEmail, passwordChangedEmail } from '../email/templates.js'
 import { recordAudit } from '../lib/audit.js'
 import { ApiError } from './errors.js'
 import { requireUser } from './guards.js'
@@ -51,6 +58,11 @@ export async function authRoutes(app: FastifyInstance) {
 
       return { user: user!, org: org!, fleet: fleet! }
     })
+
+    // Signup returns a working session either way: the address is confirmed
+    // so the account can be recovered later, not to gate access on a mail
+    // provider being reachable in this exact second.
+    await sendVerification(created.user.id, created.user.email)
 
     const tokens = await issueTokens(app, redis, created.user.id)
     return reply.code(201).send({
@@ -124,6 +136,141 @@ export async function authRoutes(app: FastifyInstance) {
       .where(eq(orgMembers.userId, req.userId!))
 
     return { user: rows[0], orgs: memberships }
+  })
+
+  /* ── password reset and email verification ──────────────────────────
+     A forgotten password used to be unrecoverable: no reset path existed,
+     so the only fix was editing password_hash in Postgres by hand. */
+
+  const appUrl = () => app.ctx.config.PUBLIC_DASHBOARD_URL?.replace(/\/$/, '') ?? ''
+
+  async function sendVerification(userId: string, email: string) {
+    const token = await issueEmailToken(app.ctx, userId, 'email_verify')
+    const { subject, body } = verifyEmail(`${appUrl()}/verify?token=${token}`)
+    await app.ctx.email.send(email, subject, body).catch((err) => {
+      // A signup must not fail because a mail provider is having a bad day.
+      app.log.warn({ err, email }, 'verification email failed to send')
+    })
+  }
+
+  app.post('/auth/forgot', async (req, reply) => {
+    const parsed = z
+      .object({ email: z.string().email().max(254).transform((e) => e.toLowerCase().trim()) })
+      .safeParse(req.body)
+
+    // Always 204, even for a malformed body. Any variation here turns this
+    // endpoint into a way to test which addresses have accounts.
+    if (!parsed.success) return reply.code(204).send()
+    const { email } = parsed.data
+
+    if (!(await withinSendLimit(app.ctx, 'password_reset', email))) {
+      // Silent to the caller for the same reason, but loud in the logs: this
+      // is what an inbox-flooding attempt through our domain looks like.
+      req.log.warn({ email }, 'password reset rate limit hit')
+      return reply.code(204).send()
+    }
+
+    const [user] = await db
+      .select({ id: users.id, email: users.email })
+      .from(users)
+      .where(eq(users.email, email))
+      .limit(1)
+
+    if (user) {
+      const token = await issueEmailToken(app.ctx, user.id, 'password_reset')
+      const { subject, body } = passwordResetEmail(
+        `${appUrl()}/reset?token=${token}`,
+        Math.round(TTL_MS.password_reset / 60_000)
+      )
+      await app.ctx.email.send(user.email, subject, body).catch((err) => {
+        req.log.warn({ err }, 'password reset email failed to send')
+      })
+    }
+
+    return reply.code(204).send()
+  })
+
+  app.post('/auth/reset', async (req) => {
+    const parsed = z
+      .object({
+        token: z.string().min(1).max(512),
+        password: z.string().min(12, 'Password must be at least 12 characters').max(1024),
+      })
+      .safeParse(req.body)
+    if (!parsed.success) {
+      throw ApiError.unprocessable('invalid_reset', 'Check the submitted fields', parsed.error.issues)
+    }
+
+    const result = await consumeEmailToken(app.ctx, parsed.data.token, 'password_reset')
+    if (!result.ok) {
+      // One message for all three reasons. "Expired" rather than "not found"
+      // would confirm the token was once real.
+      req.log.info({ reason: result.reason }, 'password reset token rejected')
+      throw ApiError.unprocessable(
+        'invalid_reset',
+        'That reset link is no longer valid. Request a new one.'
+      )
+    }
+
+    const passwordHash = await hashPassword(parsed.data.password)
+    const [updated] = await db
+      .update(users)
+      .set({ passwordHash })
+      .where(eq(users.id, result.userId))
+      .returning({ id: users.id, email: users.email })
+
+    // Every refresh token for this user dies with the password. A reset is
+    // frequently a response to a compromise, and leaving old sessions alive
+    // would leave the attacker signed in. Refresh tokens are keyed by jti, not
+    // by user, so this needs the scan helper rather than a del.
+    const revoked = await revokeAllRefresh(redis, result.userId)
+    req.log.info({ revoked }, 'sessions revoked after password reset')
+
+    if (updated) {
+      const { subject, body } = passwordChangedEmail(new Date(), appUrl() || undefined)
+      await app.ctx.email.send(updated.email, subject, body).catch((err) => {
+        req.log.warn({ err }, 'password changed notice failed to send')
+      })
+    }
+
+    return { ok: true }
+  })
+
+  app.post('/auth/verify', async (req) => {
+    const parsed = z.object({ token: z.string().min(1).max(512) }).safeParse(req.body)
+    if (!parsed.success) throw ApiError.unprocessable('invalid_token', 'Check the submitted fields')
+
+    const result = await consumeEmailToken(app.ctx, parsed.data.token, 'email_verify')
+    if (!result.ok) {
+      throw ApiError.unprocessable(
+        'invalid_token',
+        'That confirmation link is no longer valid. Request a new one.'
+      )
+    }
+
+    await db
+      .update(users)
+      .set({ emailVerifiedAt: new Date() })
+      .where(eq(users.id, result.userId))
+
+    return { ok: true }
+  })
+
+  app.post('/auth/resend-verification', { preHandler: requireUser }, async (req, reply) => {
+    const [user] = await db
+      .select({ id: users.id, email: users.email, verifiedAt: users.emailVerifiedAt })
+      .from(users)
+      .where(eq(users.id, req.userId!))
+      .limit(1)
+    if (!user) throw ApiError.notFound('User')
+    if (user.verifiedAt) return { ok: true, alreadyVerified: true }
+
+    if (!(await withinSendLimit(app.ctx, 'email_verify', user.email))) {
+      throw ApiError.tooManyRequests('rate_limited', 'Too many requests. Try again later.')
+    }
+
+    await sendVerification(user.id, user.email)
+    return reply.send({ ok: true })
   })
 
   /** Start a CLI web login session. Mints a single-use code stored in Redis. */

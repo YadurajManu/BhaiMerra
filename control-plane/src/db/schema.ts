@@ -61,9 +61,32 @@ export const users = pgTable(
     email: text('email').notNull(),
     passwordHash: text('password_hash').notNull(),
     totpSecret: text('totp_secret'), // PRD 7.8 — optional 2FA
+    /** Null until the address is confirmed. Accounts predating this are backfilled. */
+    emailVerifiedAt: timestamp('email_verified_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex('users_email_key').on(t.email)]
+)
+
+/**
+ * Single-use, short-lived tokens for password reset and email verification.
+ * Only the sha256 of the token is stored: the plaintext lives in the email and
+ * nowhere else, so this table is not a set of working reset links.
+ */
+export const authTokens = pgTable(
+  'auth_tokens',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    tokenHash: text('token_hash').notNull(),
+    purpose: text('purpose').$type<'password_reset' | 'email_verify'>().notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    usedAt: timestamp('used_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('auth_tokens_hash_key').on(t.tokenHash)]
 )
 
 export const orgs = pgTable('orgs', {
