@@ -64,6 +64,7 @@ const GROUPS: Array<[string, Array<[string, string]>]> = [
       ['unpair', 'Remove this machine from its fleet, run on the machine'],
       ['alerts', 'List, add, and test alert rules'],
       ['auth login|logout|whoami', 'Sign in to a control plane'],
+      ['auth forgot|reset', 'Recover an account you are locked out of'],
     ],
   ],
 ]

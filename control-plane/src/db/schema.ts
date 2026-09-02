@@ -89,6 +89,29 @@ export const authTokens = pgTable(
   (t) => [uniqueIndex('auth_tokens_hash_key').on(t.tokenHash)]
 )
 
+/**
+ * One row per user per remembered device. Used to decide whether a sign-in is
+ * new and therefore worth telling the account owner about.
+ */
+export const authSessions = pgTable(
+  'auth_sessions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** Browser family + OS family only. Versions change too often to be signal. */
+    deviceHash: text('device_hash').notNull(),
+    userAgent: text('user_agent'),
+    ip: text('ip'),
+    country: text('country'),
+    firstSeen: timestamp('first_seen', { withTimezone: true }).notNull().defaultNow(),
+    lastSeen: timestamp('last_seen', { withTimezone: true }).notNull().defaultNow(),
+    loginCount: integer('login_count').notNull().default(1),
+  },
+  (t) => [uniqueIndex('auth_sessions_user_device_key').on(t.userId, t.deviceHash)]
+)
+
 export const orgs = pgTable('orgs', {
   id: uuid('id').primaryKey().defaultRandom(),
   name: text('name').notNull(),

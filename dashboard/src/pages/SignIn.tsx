@@ -82,15 +82,25 @@ export default function SignIn() {
             </Button>
           </form>
 
-          <button
-            onClick={() => {
-              setMode(mode === 'in' ? 'up' : 'in')
-              setError(null)
-            }}
-            className="mt-6 font-mono text-[11.5px] text-[var(--color-fg-dim)] transition-colors duration-300 hover:text-[var(--color-fg-muted)]"
-          >
-            {mode === 'in' ? 'No account? Create one →' : 'Already have an account? Sign in →'}
-          </button>
+          <div className="mt-6 flex flex-wrap items-center gap-x-5 gap-y-2">
+            <button
+              onClick={() => {
+                setMode(mode === 'in' ? 'up' : 'in')
+                setError(null)
+              }}
+              className="font-mono text-[11.5px] text-[var(--color-fg-dim)] transition-colors duration-300 hover:text-[var(--color-fg-muted)]"
+            >
+              {mode === 'in' ? 'No account? Create one →' : 'Already have an account? Sign in →'}
+            </button>
+            {mode === 'in' && (
+              <a
+                href="/reset"
+                className="font-mono text-[11.5px] text-[var(--color-fg-dim)] transition-colors duration-300 hover:text-[var(--color-fg-muted)]"
+              >
+                Forgot your password?
+              </a>
+            )}
+          </div>
 
           <p className="mt-10 border-t border-[var(--color-line)] pt-5 font-mono text-[10.5px] leading-relaxed text-[var(--color-fg-dim)]">
             Self-hosting? This dashboard talks to whichever control plane it was

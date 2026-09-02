@@ -14,6 +14,8 @@ import Settings from './pages/Settings'
 import Doctor from './pages/Doctor'
 import Logs from './pages/Logs'
 import CliAuth from './pages/CliAuth'
+import ResetPassword from './pages/ResetPassword'
+import VerifyEmail from './pages/VerifyEmail'
 import { Logo } from './components/ui'
 import './index.css'
 
@@ -27,11 +29,25 @@ function Gate() {
       </div>
     )
   }
-  if (!email) return <SignIn />
+  // Reset and verify have to be reachable while signed out - that is the whole
+  // situation they exist for. Returning <SignIn /> for every route when there
+  // is no session would swallow both, and the link in the email would land on
+  // a sign-in form the reader cannot get past.
+  if (!email) {
+    return (
+      <Routes>
+        <Route path="reset" element={<ResetPassword />} />
+        <Route path="verify" element={<VerifyEmail />} />
+        <Route path="*" element={<SignIn />} />
+      </Routes>
+    )
+  }
 
   return (
     <Routes>
       <Route path="cli-auth" element={<CliAuth />} />
+      <Route path="reset" element={<ResetPassword />} />
+      <Route path="verify" element={<VerifyEmail />} />
       <Route element={<Shell />}>
         <Route index element={<Overview />} />
         <Route path="nodes" element={<Nodes />} />

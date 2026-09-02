@@ -10,7 +10,13 @@ import {
   withinSendLimit,
   TTL_MS,
 } from '../auth/email-tokens.js'
-import { passwordResetEmail, verifyEmail, passwordChangedEmail } from '../email/templates.js'
+import {
+  passwordResetEmail,
+  verifyEmail,
+  passwordChangedEmail,
+  newSignInEmail,
+} from '../email/templates.js'
+import { recordSignIn, loginContextFrom, describeDevice } from '../auth/sessions.js'
 import { recordAudit } from '../lib/audit.js'
 import { ApiError } from './errors.js'
 import { requireUser } from './guards.js'
@@ -93,6 +99,30 @@ export async function authRoutes(app: FastifyInstance) {
       : await verifyPassword('$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', parsed.data.password)
 
     if (!user || !ok) throw ApiError.unauthorized('Invalid email or password')
+
+    // Remember the device and tell the owner if this sign-in is unfamiliar.
+    // Never let this fail a login: a mail outage must not lock anyone out.
+    try {
+      const login = loginContextFrom(req.headers as Record<string, unknown>, req.ip)
+      const verdict = await recordSignIn(app.ctx, user.id, login)
+      req.log.info(
+        { userId: user.id, reason: verdict.reason, country: login.country },
+        'sign-in recorded'
+      )
+      if (verdict.isNew) {
+        const { subject, body } = newSignInEmail({
+          device: describeDevice(verdict.device),
+          ip: login.ip,
+          country: login.country,
+          at: new Date(),
+          reason: verdict.reason,
+          dashboardUrl: app.ctx.config.PUBLIC_DASHBOARD_URL || undefined,
+        })
+        await app.ctx.email.send(user.email, subject, body)
+      }
+    } catch (err) {
+      req.log.warn({ err, userId: user.id }, 'sign-in notification failed')
+    }
 
     const tokens = await issueTokens(app, redis, user.id)
     return { ...tokens, user: { id: user.id, email: user.email } }

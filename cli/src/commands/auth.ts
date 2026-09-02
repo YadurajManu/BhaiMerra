@@ -290,8 +290,71 @@ export const authCommand = {
         return
       }
 
+      /**
+       * Ask for a reset link. The control plane answers 204 for every address,
+       * known or not, so this command cannot be used to discover whether an
+       * account exists either - and says so, rather than implying the mail is
+       * definitely on its way.
+       */
+      case 'forgot': {
+        if (!profile.api) {
+          profile.api = validApi(
+            await requiredPrompt('control plane URL', { hint: 'e.g. https://fleetapi.example.com' })
+          )
+        }
+        const email =
+          typeof flags.email === 'string' ? flags.email : await requiredPrompt('email')
+
+        await task('requesting a reset link', async () => {
+          // auth:false - you cannot be signed in when you have forgotten the password.
+          await request('POST', '/auth/forgot', { profile, body: { email }, auth: false })
+        })
+
+        console.log(`\n${glyph.ok} If an account exists for ${c.bold(email)}, a reset link is on its way.`)
+        console.log(c.dim('  The link works once and expires in 30 minutes.'))
+        console.log(c.dim(`\n  fleet auth reset --token <token>   finish it here`))
+        console.log(c.dim('  or open the link in a browser instead'))
+        return
+      }
+
+      /**
+       * Finish a reset without a browser. The token comes from the email; the
+       * new password is prompted for rather than passed as a flag, because a
+       * flag lands in shell history.
+       */
+      case 'reset': {
+        if (!profile.api) {
+          profile.api = validApi(await requiredPrompt('control plane URL'))
+        }
+        const token =
+          typeof flags.token === 'string'
+            ? flags.token
+            : await requiredPrompt('reset token', {
+                hint: 'the token from the reset email, or the token= part of the link',
+              })
+
+        const password = await requiredPrompt('new password', { silent: true })
+        if (password.length < 12) {
+          throw new CliError('Password must be at least 12 characters.', EXIT.usage)
+        }
+        const again = await requiredPrompt('confirm password', { silent: true })
+        if (password !== again) throw new CliError('Those did not match.', EXIT.usage)
+
+        await task('setting your new password', async () => {
+          await request('POST', '/auth/reset', { profile, body: { token, password }, auth: false })
+        })
+
+        console.log(`\n${glyph.ok} ${c.green('password changed')}`)
+        console.log(c.dim('  Every other session was signed out.'))
+        console.log(c.dim(`\n  fleet auth login   sign in again`))
+        return
+      }
+
       default:
-        throw new CliError('usage: fleet auth login|logout|whoami', EXIT.usage)
+        throw new CliError(
+          'usage: fleet auth login|logout|whoami|forgot|reset',
+          EXIT.usage
+        )
     }
   },
 }
