@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
+    "build": "vite build && node scripts/prerender.mjs",
+    "preview": "vite preview",
+    "prerender": "node scripts/prerender.mjs"
   },
   "dependencies": {
     "@react-three/fiber": "^9.7.0",

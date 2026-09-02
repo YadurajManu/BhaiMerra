@@ -27,9 +27,10 @@ function setMeta(selector, value) {
  * Per-route title and description. This is what browser tabs, history entries
  * and bookmarks read — all twenty routes reported the same string before.
  *
- * Note it does NOT fix link previews: with hash routing the fragment is never
- * sent to the server, so a crawler fetching fleet-os.dev/#/docs/cli only ever
- * sees the homepage HTML. Per-page cards need real paths and prerendering.
+ * These are the client-side values. The authoritative copies are baked into
+ * each prerendered file at build time by scripts/prerender.mjs — a crawler
+ * that never runs the JavaScript still gets the right title, description and
+ * canonical, and one that does run it gets the same answer.
  */
 export function useDocumentTitle(route) {
   useEffect(() => {
@@ -50,7 +51,13 @@ export function useDocumentTitle(route) {
       setMeta('meta[property="og:description"]', HOME_DESC)
     }
 
-    const url = route === null ? 'https://fleet-os.dev/' : `https://fleet-os.dev/#/${route}`
+    // Real paths, matching the prerendered files. A canonical pointing at the
+    // hash form would tell a crawler the authoritative copy lives at a URL whose
+    // content it can never fetch.
+    const url =
+      route === null
+        ? 'https://fleet.plastikworld.xyz/'
+        : `https://fleet.plastikworld.xyz/${route}`
     setMeta('meta[property="og:url"]', url)
     document.head.querySelector('link[rel="canonical"]')?.setAttribute('href', url)
   }, [route])
