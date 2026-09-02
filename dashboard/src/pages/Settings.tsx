@@ -3,6 +3,7 @@ import { api, type AuditEntry } from '../lib/api'
 import { useAuth, usePoll } from '../lib/auth'
 import { since } from '../lib/format'
 import { Button, Copyable, ErrorNote, Field, Panel } from '../components/ui'
+import CloseAccount from '../components/CloseAccount'
 
 type GitHubStatus = {
   configured: boolean
@@ -478,6 +479,10 @@ export default function Settings() {
           )}
         </Panel>
       )}
+
+      {/* Last on the page on purpose: the most destructive control should not
+          sit next to routine settings where it can be reached by accident. */}
+      <CloseAccount />
     </div>
   )
 }

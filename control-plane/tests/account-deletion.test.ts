@@ -22,6 +22,7 @@ import {
   GRACE_DAYS,
 } from '../src/auth/account-deletion.js'
 import { deletionScheduledEmail, deletionCompleteEmail } from '../src/email/templates.js'
+import { runJanitor, JANITOR_INTERVAL_MS } from '../src/janitor.js'
 
 let ctx: AppContext
 let ownerId: string
@@ -218,5 +219,67 @@ describe('the emails', () => {
     assert.ok(deletionCompleteEmail(0).body.includes('another owner were left in place'))
     assert.ok(deletionCompleteEmail(2).body.includes('2 organisations'))
     assert.ok(deletionCompleteEmail(1).body.includes('1 organisation,'))
+  })
+})
+
+describe('the janitor, which is what actually runs in production', () => {
+  test('deletes a due account and emails the address before it is gone', async () => {
+    // The previous suite proves runDueDeletions works. This proves the thing
+    // that CALLS it works, including the closure email - the wiring was the
+    // untested half, and it is the half nobody notices is broken until an
+    // account quietly fails to close.
+    const sent: Array<{ to: string; subject: string; body: string }> = []
+    const spy = { ...ctx, email: { async send(to: string, subject: string, body: string) {
+      sent.push({ to, subject, body })
+    } } } as AppContext
+
+    const [u] = await ctx.db.select({ email: users.email }).from(users).where(eq(users.id, ownerId))
+    await ctx.db
+      .update(users)
+      .set({ deletionScheduledFor: new Date(Date.now() - 1000) })
+      .where(eq(users.id, ownerId))
+
+    const result = await runJanitor(spy)
+
+    assert.equal(result.accountsDeleted, 1)
+    assert.equal(result.closureEmailsSent, 1)
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0]!.to, u!.email, 'addressed to the account that closed')
+    assert.match(sent[0]!.subject, /has been closed/)
+    assert.match(sent[0]!.body, /last email/)
+
+    assert.equal((await ctx.db.select().from(users).where(eq(users.id, ownerId))).length, 0)
+  })
+
+  test('a failing mail provider does not undo the deletion', async () => {
+    // Deletion already happened when the send is attempted. Rolling it back on
+    // an SMTP hiccup would leave an account the owner believes is closed.
+    const angry = { ...ctx, email: { async send() { throw new Error('provider down') } } } as AppContext
+    await ctx.db
+      .update(users)
+      .set({ deletionScheduledFor: new Date(Date.now() - 1000) })
+      .where(eq(users.id, ownerId))
+
+    const result = await runJanitor(angry, {
+      info: () => {}, warn: () => {}, error: () => {},
+    })
+
+    assert.equal(result.accountsDeleted, 1)
+    assert.equal(result.closureEmailsSent, 0, 'the send failed')
+    assert.equal(
+      (await ctx.db.select().from(users).where(eq(users.id, ownerId))).length,
+      0,
+      'but the account is still gone'
+    )
+  })
+
+  test('a quiet tick touches nothing', async () => {
+    const result = await runJanitor(ctx)
+    assert.equal(result.accountsDeleted, 0)
+    assert.equal((await ctx.db.select().from(users).where(eq(users.id, ownerId))).length, 1)
+  })
+
+  test('runs hourly, not on the heartbeat clock', () => {
+    assert.equal(JANITOR_INTERVAL_MS, 60 * 60_000)
   })
 })

@@ -16,6 +16,7 @@ import Logs from './pages/Logs'
 import CliAuth from './pages/CliAuth'
 import ResetPassword from './pages/ResetPassword'
 import VerifyEmail from './pages/VerifyEmail'
+import CloseAccountConfirm from './pages/CloseAccountConfirm'
 import { Logo } from './components/ui'
 import './index.css'
 
@@ -38,6 +39,7 @@ function Gate() {
       <Routes>
         <Route path="reset" element={<ResetPassword />} />
         <Route path="verify" element={<VerifyEmail />} />
+        <Route path="account/close" element={<CloseAccountConfirm />} />
         <Route path="*" element={<SignIn />} />
       </Routes>
     )
@@ -48,6 +50,7 @@ function Gate() {
       <Route path="cli-auth" element={<CliAuth />} />
       <Route path="reset" element={<ResetPassword />} />
       <Route path="verify" element={<VerifyEmail />} />
+      <Route path="account/close" element={<CloseAccountConfirm />} />
       <Route element={<Shell />}>
         <Route index element={<Overview />} />
         <Route path="nodes" element={<Nodes />} />
