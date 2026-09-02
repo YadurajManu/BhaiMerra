@@ -175,6 +175,63 @@ for (const route of PAGE_ORDER) {
   written++
 }
 
+/* ── the founder page ────────────────────────────────────────────────
+   Not a PAGES entry — it renders its own component, so there is no block
+   data to walk. It still gets real meta and a Person entity, which is what
+   ties the project to a named human in a knowledge graph. Without this it
+   inherited the homepage title. */
+{
+  const url = `${ORIGIN}/founder`
+  const title = 'Yaduraj Singh — Fleet OS'
+  const lede =
+    'Fleet OS is built and maintained by one person. Why it exists, what running it alone can and cannot promise you, and how to get hold of me.'
+  const person = JSON.stringify({
+    '@context': 'https://schema.org',
+    '@type': 'Person',
+    name: 'Yaduraj Singh',
+    url: 'https://yaduraj.me',
+    jobTitle: 'Software engineer',
+    sameAs: ['https://yaduraj.me', 'https://github.com/YadurajManu', 'https://www.linkedin.com/in/yadurajenc'],
+    worksFor: { '@type': 'Organization', name: 'Fleet OS', url: ORIGIN },
+  })
+
+  const head = [
+    `<title>${esc(title)}</title>`,
+    `<meta name="description" content="${esc(lede)}" />`,
+    `<link rel="canonical" href="${url}" />`,
+    `<meta property="og:type" content="profile" />`,
+    `<meta property="og:url" content="${url}" />`,
+    `<meta property="og:title" content="${esc(title)}" />`,
+    `<meta property="og:description" content="${esc(lede)}" />`,
+    `<script type="application/ld+json">${person}</script>`,
+  ].join('\n    ')
+
+  const body =
+    `<main id="prerendered"><article><h1>Yaduraj Singh</h1><p>${esc(lede)}</p>` +
+    `<p>Fleet OS is maintained by one person. That page explains what a one-person ` +
+    `project can promise you and what it cannot, including the parts that might make ` +
+    `you decide against it.</p>` +
+    `<ul><li><a href="https://yaduraj.me">yaduraj.me</a></li>` +
+    `<li><a href="https://github.com/YadurajManu">GitHub</a></li></ul>` +
+    `<nav><ul>` +
+    PAGE_ORDER.map((r) => `<li><a href="/${r}">${esc(PAGES[r].title)}</a></li>`).join('') +
+    `</ul></nav></article></main>`
+
+  let html = shell
+    .replace(/<title>[\s\S]*?<\/title>/, '')
+    .replace(/<meta name="description"[\s\S]*?\/>/, '')
+    .replace(/<link rel="canonical"[\s\S]*?\/>/, '')
+    .replace(/<meta property="og:url"[\s\S]*?\/>/, '')
+    .replace(/<meta property="og:title"[\s\S]*?\/>/, '')
+    .replace(/<meta property="og:description"[\s\S]*?\/>/, '')
+    .replace('</head>', `  ${head}\n  </head>`)
+    .replace('<div id="root"></div>', `<div id="root">${body}</div>`)
+
+  await mkdir(join(dist, 'founder'), { recursive: true })
+  await writeFile(join(dist, 'founder/index.html'), html, 'utf8')
+  written++
+}
+
 /* ── sitemap ─────────────────────────────────────────────────────────
    Without this nothing tells a search engine these pages exist, and with
    hash routing nothing could have. */
