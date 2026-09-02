@@ -129,7 +129,13 @@ export function ConfirmDialog({
 
   if (!open) return null
 
-  const ready = !confirmPhrase || typed.trim() === confirmPhrase
+  // Case-insensitive on purpose. Field renders its label uppercased, so the
+  // dialog asks for TYPE "WEB" and an exact comparison then rejects the WEB the
+  // reader just copied off the screen. The friction that matters is having to
+  // type the words at all, not reproducing their case from a label that changed
+  // it. Trimmed too: selecting the phrase to copy usually takes a space with it.
+  const ready =
+    !confirmPhrase || typed.trim().toLowerCase() === confirmPhrase.trim().toLowerCase()
 
   return (
     <div
