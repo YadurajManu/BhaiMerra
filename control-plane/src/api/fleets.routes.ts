@@ -226,7 +226,7 @@ export async function fleetRoutes(app: FastifyInstance) {
       // move, pinned services are held and raise their own alert rather than
       // being separated from their volume.
       const evicted = await rescheduleFromNode(app.ctx, fleetId, nodeId, {
-        onEvent: async (e) => { await dispatchEvent(app.ctx, e, { log: req.log }) },
+        onEvent: async (e) => { await dispatchEvent(app.ctx, e, { log: req.log, email: app.ctx.email }) },
       })
 
       const removed = await db.transaction(async (tx) => {
@@ -384,7 +384,7 @@ export async function fleetRoutes(app: FastifyInstance) {
           subject: 'test-node',
           detail: { missedThreshold: 3, intervalSec: 5, silentForMs: 15000, test: true },
         },
-        { log: app.log }
+        { log: app.log, email: app.ctx.email }
       )
       return { delivered: results.filter((r) => r.ok).length, results }
     }

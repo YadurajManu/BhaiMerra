@@ -316,7 +316,7 @@ export async function agentRoutes(app: FastifyInstance) {
         onEvent: async (e) => {
           const key = `drift:${nodeId}:${e.subject}`
           if (await redis.set(key, '1', 'EX', 300, 'NX')) {
-            await dispatchEvent(app.ctx, e, { log: req.log })
+            await dispatchEvent(app.ctx, e, { log: req.log, email: app.ctx.email })
             req.log.warn({ event: e }, 'drift detected')
           }
         },
@@ -344,7 +344,7 @@ export async function agentRoutes(app: FastifyInstance) {
       // must not fail the heartbeat — the node is alive either way.
       try {
         const outcomes = await reclaimToNode(app.ctx, fleetId, nodeId, {
-          onEvent: async (e) => { await dispatchEvent(app.ctx, e, { log: req.log }) },
+          onEvent: async (e) => { await dispatchEvent(app.ctx, e, { log: req.log, email: app.ctx.email }) },
         })
         if (outcomes.length) req.log.info({ nodeId, outcomes }, 'reclaim policy applied')
       } catch (err) {

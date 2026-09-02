@@ -19,6 +19,15 @@ const schema = z.object({
   HEARTBEAT_MISS_THRESHOLD: z.coerce.number().int().min(1).max(20).default(3),
   /** Publicly reported to agents and diagnostics; set during release builds. */
   CONTROL_PLANE_VERSION: z.string().max(32).default('0.1.0'),
+  /**
+   * Email delivery. Both are optional and only do anything together: without
+   * them the control plane runs normally and alert rules with an email channel
+   * log instead of sending, which is the right default for a self-hoster who
+   * never wanted mail in the first place.
+   */
+  RESEND_API_KEY: z.string().optional(),
+  /** Envelope sender. Must be on a domain verified in Resend, or every send 403s. */
+  MAIL_FROM: z.string().optional(),
   REGISTRY_URL: z.string().optional(),
   REGISTRY_CREDENTIALS: z.string().optional(),
   BUILDX_BUILDER: z.string().optional(),

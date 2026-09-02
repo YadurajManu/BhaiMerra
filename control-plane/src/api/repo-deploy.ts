@@ -127,7 +127,7 @@ export async function deployRepository(
         subject: spec.subject,
         detail: { sha: shortSha, ref: spec.ref ?? 'import', reason: message },
       },
-      { log }
+      { log, email: app.ctx.email }
     )
     return { deployed: [] }
   } finally {

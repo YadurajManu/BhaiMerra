@@ -6,6 +6,7 @@ import type { BuildRunner } from '../build/runner.js'
 import type { GitHubConfig } from '../github/app.js'
 import type { Config } from '../config.js'
 import { TunnelRegistry } from '../tunnel/registry.js'
+import { createEmailSender, type EmailSender } from '../email/sender.js'
 
 export type AppContext = {
   config: Config
@@ -17,9 +18,17 @@ export type AppContext = {
   /** null when no GitHub App is configured — private repos simply will not work. */
   github: GitHubConfig | null
   tunnels: TunnelRegistry
+  /**
+   * Never null. When no provider is configured this logs instead of sending,
+   * so no call site has to branch on whether email exists.
+   */
+  email: EmailSender
 }
 
-export function createContext(config: Config): AppContext {
+export function createContext(
+  config: Config,
+  log?: { info: (o: unknown, m: string) => void; warn: (o: unknown, m: string) => void }
+): AppContext {
   const { db, sql } = createDb(config.DATABASE_URL)
   const redis = new Redis(config.REDIS_URL, { maxRetriesPerRequest: null })
   const heartbeats = new HeartbeatTracker(
@@ -46,7 +55,9 @@ export function createContext(config: Config): AppContext {
       }
     : null
 
-  const ctx: Partial<AppContext> = { config, db, sql, redis, heartbeats, builds, github }
+  const email = createEmailSender(config, log)
+
+  const ctx: Partial<AppContext> = { config, db, sql, redis, heartbeats, builds, github, email }
   ctx.tunnels = new TunnelRegistry(ctx as AppContext)
 
   return ctx as AppContext

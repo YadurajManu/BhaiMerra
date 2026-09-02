@@ -30,7 +30,7 @@ const sweeper = startSweeper(ctx, {
     // Delivery failures are logged inside dispatchEvent and never rethrown:
     // an unreachable Discord webhook must not stop the sweeper from finding
     // the next dead node.
-    await dispatchEvent(ctx, event, { log: app.log })
+    await dispatchEvent(ctx, event, { log: app.log, email: ctx.email })
   },
 })
 

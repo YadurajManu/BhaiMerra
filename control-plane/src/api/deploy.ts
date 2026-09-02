@@ -111,7 +111,7 @@ export async function deployFromPush(
       at: new Date().toISOString(),
       subject: service.name,
       detail: { node: decision.nodeName, sha: gitSha.slice(0, 12), url: service.domain ?? service.hostname },
-    })
+    }, { email: ctx.email })
 
     return { nodeId: decision.nodeId, nodeName: decision.nodeName, image }
   } catch (err) {
