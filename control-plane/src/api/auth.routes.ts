@@ -193,13 +193,24 @@ export async function authRoutes(app: FastifyInstance) {
 
   const appUrl = () => app.ctx.config.PUBLIC_DASHBOARD_URL?.replace(/\/$/, '') ?? ''
 
-  async function sendVerification(userId: string, email: string) {
+  /**
+   * Returns whether the message actually left. Callers decide what a failure
+   * means: a signup swallows it, because nobody should be unable to create an
+   * account while a mail provider is having a bad day. An explicit "send it
+   * again" must not, because telling someone their mail is on the way when it
+   * is not sends them to search an inbox that will never receive it — which is
+   * exactly what a rejected sending domain looked like from the outside.
+   */
+  async function sendVerification(userId: string, email: string): Promise<boolean> {
     const token = await issueEmailToken(app.ctx, userId, 'email_verify')
     const { subject, body } = verifyEmail(`${appUrl()}/verify?token=${token}`)
-    await app.ctx.email.send(email, subject, body).catch((err) => {
-      // A signup must not fail because a mail provider is having a bad day.
+    try {
+      await app.ctx.email.send(email, subject, body)
+      return true
+    } catch (err) {
       app.log.warn({ err, email }, 'verification email failed to send')
-    })
+      return false
+    }
   }
 
   app.post('/auth/forgot', async (req, reply) => {
@@ -318,7 +329,12 @@ export async function authRoutes(app: FastifyInstance) {
       throw ApiError.tooManyRequests('rate_limited', 'Too many requests. Try again later.')
     }
 
-    await sendVerification(user.id, user.email)
+    if (!(await sendVerification(user.id, user.email))) {
+      throw ApiError.unavailable(
+        'email_send_failed',
+        'We could not send the email just now. Try again in a moment — if it keeps failing, the problem is on our side, not yours.'
+      )
+    }
     return reply.send({ ok: true })
   })
 

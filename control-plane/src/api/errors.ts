@@ -35,4 +35,14 @@ export class ApiError extends Error {
   static unprocessable(code: string, message: string, detail?: unknown) {
     return new ApiError(422, code, message, detail)
   }
+
+  /**
+   * We could not do it, but the request was fine and trying again may work.
+   * For a dependency that is down or misconfigured rather than a caller who
+   * got something wrong — reporting those as 4xx sends people to audit their
+   * own request for a fault that is on our side.
+   */
+  static unavailable(code: string, message: string) {
+    return new ApiError(503, code, message)
+  }
 }
