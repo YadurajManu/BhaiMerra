@@ -8,6 +8,7 @@ import {
   issueEmailToken,
   consumeEmailToken,
   withinSendLimit,
+  refundSendLimit,
   TTL_MS,
 } from '../auth/email-tokens.js'
 import {
@@ -330,6 +331,8 @@ export async function authRoutes(app: FastifyInstance) {
     }
 
     if (!(await sendVerification(user.id, user.email))) {
+      // The attempt cost them nothing, so it must not cost them an allowance.
+      await refundSendLimit(app.ctx, 'email_verify', user.email)
       throw ApiError.unavailable(
         'email_send_failed',
         'We could not send the email just now. Try again in a moment — if it keeps failing, the problem is on our side, not yours.'

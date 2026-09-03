@@ -112,17 +112,58 @@ export async function consumeEmailToken(
  * submitted address so it also applies to addresses that have no account —
  * which is exactly what an abuser would use.
  */
+/**
+ * Per-purpose, because the purposes carry different risk.
+ *
+ * A password reset is reachable without signing in, so three an hour is the
+ * budget an abuser gets for flooding a stranger's inbox from our domain.
+ * Confirming your own address is different: the endpoint needs a session, the
+ * recipient is fixed to that account's own address, and the person asking is
+ * usually asking because the previous message did not arrive. Three was mean
+ * enough that a genuinely lost email plus one impatient retry locked someone
+ * out of their own account for an hour.
+ */
+const SEND_LIMITS: Record<TokenPurpose, { max: number; windowSec: number }> = {
+  password_reset: { max: 3, windowSec: 3600 },
+  email_verify: { max: 10, windowSec: 3600 },
+  account_delete: { max: 3, windowSec: 3600 },
+}
+
+const limitKey = (purpose: TokenPurpose, email: string) =>
+  `mail:${purpose}:${createHash('sha256').update(email).digest('hex').slice(0, 32)}`
+
 export async function withinSendLimit(
   ctx: AppContext,
   purpose: TokenPurpose,
   email: string,
-  max = 3,
-  windowSec = 3600
+  max = SEND_LIMITS[purpose].max,
+  windowSec = SEND_LIMITS[purpose].windowSec
 ): Promise<boolean> {
-  const key = `mail:${purpose}:${createHash('sha256').update(email).digest('hex').slice(0, 32)}`
+  const key = limitKey(purpose, email)
   const n = await ctx.redis.incr(key)
   if (n === 1) await ctx.redis.expire(key, windowSec)
   return n <= max
+}
+
+/**
+ * Give the allowance back when the send failed.
+ *
+ * The counter is spent before the attempt, because it has to be — checking
+ * afterwards is not a rate limit. But an attempt that a provider rejected
+ * cost the recipient nothing and must not count against them. Without this,
+ * a misconfigured sending domain spends someone's whole hourly budget on
+ * messages that were never delivered, and the rate limit then hides the
+ * original fault behind a second, unrelated error.
+ */
+export async function refundSendLimit(
+  ctx: AppContext,
+  purpose: TokenPurpose,
+  email: string
+): Promise<void> {
+  const key = limitKey(purpose, email)
+  // Only ever decrement a key that exists; a DECR on a missing key creates it
+  // at -1, which would hand out an extra allowance once it expired.
+  if ((await ctx.redis.exists(key)) === 1) await ctx.redis.decr(key)
 }
 
 /** Housekeeping: redeemed and expired rows have no further use. */

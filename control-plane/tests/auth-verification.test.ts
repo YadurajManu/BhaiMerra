@@ -86,6 +86,22 @@ describe('an unconfirmed address', () => {
     assert.equal(res.json().error?.code ?? res.json().code, 'email_send_failed')
   })
 
+  test('a rejected send does not spend the hourly allowance', async () => {
+    // Ten failures in a row. If a failed attempt counted, the eleventh - and
+    // in the original three-per-hour version, the fourth - would come back as
+    // "too many requests", which is a second error unrelated to the real one
+    // and locks someone out of their own account for an hour over mail that
+    // was never sent.
+    for (let i = 0; i < 10; i++) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/auth/resend-verification',
+        headers: { authorization: `Bearer ${accessToken}` },
+      })
+      assert.equal(res.statusCode, 503, `attempt ${i + 1} should report the send failure`)
+    }
+  })
+
   test('the failure message does not blame the reader', async () => {
     const res = await app.inject({
       method: 'POST',
