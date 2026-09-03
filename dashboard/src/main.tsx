@@ -17,12 +17,13 @@ import Logs from './pages/Logs'
 import CliAuth from './pages/CliAuth'
 import ResetPassword from './pages/ResetPassword'
 import VerifyEmail from './pages/VerifyEmail'
+import ConfirmEmail from './pages/ConfirmEmail'
 import CloseAccountConfirm from './pages/CloseAccountConfirm'
 import { Logo } from './components/ui'
 import './index.css'
 
 function Gate() {
-  const { ready, email } = useAuth()
+  const { ready, email, verified } = useAuth()
 
   if (!ready) {
     return (
@@ -42,6 +43,24 @@ function Gate() {
         <Route path="verify" element={<VerifyEmail />} />
         <Route path="account/close" element={<CloseAccountConfirm />} />
         <Route path="*" element={<SignIn />} />
+      </Routes>
+    )
+  }
+
+  // Signed in, address never confirmed. Everything the product does is held
+  // back until it is - including the CLI pairing route, because approving a
+  // long-lived CLI token is exactly the kind of thing an unproven address
+  // should not be able to do.
+  //
+  // `verify` and `account/close` stay reachable: the first is the way out of
+  // this state, and the second is a link from an email that must work whatever
+  // the account's condition.
+  if (verified === false) {
+    return (
+      <Routes>
+        <Route path="verify" element={<VerifyEmail />} />
+        <Route path="account/close" element={<CloseAccountConfirm />} />
+        <Route path="*" element={<ConfirmEmail />} />
       </Routes>
     )
   }

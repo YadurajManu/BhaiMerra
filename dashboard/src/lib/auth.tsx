@@ -1,11 +1,16 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { api, session, type Fleet } from './api'
 
-type Me = { user: { id: string; email: string }; orgs: Array<{ orgName: string; role: string; plan: string }> }
+type Me = {
+  user: { id: string; email: string; emailVerifiedAt: string | null }
+  orgs: Array<{ orgName: string; role: string; plan: string }>
+}
 
 type AuthState = {
   ready: boolean
   email: string | null
+  /** Null until /auth/me has answered, so the gate can wait rather than guess. */
+  verified: boolean | null
   fleets: Fleet[]
   fleet: Fleet | null
   selectFleet: (id: string) => void
@@ -13,6 +18,9 @@ type AuthState = {
   signUp: (email: string, password: string) => Promise<void>
   signOut: () => void
   refreshFleets: () => Promise<void>
+  /** Re-read /auth/me. The confirmation link is usually opened in another tab,
+      so this tab has to be able to notice without a full reload. */
+  refreshMe: () => Promise<boolean>
 }
 
 const Ctx = createContext<AuthState | null>(null)
@@ -21,6 +29,7 @@ const LAST_FLEET = 'fleet-os.fleet'
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false)
   const [email, setEmail] = useState<string | null>(null)
+  const [verified, setVerified] = useState<boolean | null>(null)
   const [fleets, setFleets] = useState<Fleet[]>([])
   const [fleetId, setFleetId] = useState<string | null>(() => localStorage.getItem(LAST_FLEET))
 
@@ -35,22 +44,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     })
   }, [])
 
+  const refreshMe = useCallback(async () => {
+    const me = await api<Me>('/auth/me')
+    setEmail(me.user.email)
+    const ok = me.user.emailVerifiedAt != null
+    setVerified(ok)
+    return ok
+  }, [])
+
   const bootstrap = useCallback(async () => {
     if (!session.get()?.accessToken) {
       setReady(true)
       return
     }
     try {
-      const me = await api<Me>('/auth/me')
-      setEmail(me.user.email)
-      await loadFleets()
+      const ok = await refreshMe()
+      // Fleets are only fetched once the address is confirmed. An unverified
+      // account has nothing to show, and asking for them anyway means a failed
+      // request behind the confirmation screen for no benefit.
+      if (ok) await loadFleets()
     } catch {
       session.clear()
       setEmail(null)
+      setVerified(null)
     } finally {
       setReady(true)
     }
-  }, [loadFleets])
+  }, [loadFleets, refreshMe])
 
   useEffect(() => {
     void bootstrap()
@@ -69,15 +89,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       })
       session.set({ accessToken: res.accessToken, refreshToken: res.refreshToken, email: res.user.email })
       setEmail(res.user.email)
-      await loadFleets()
+      // The login response does not carry verification state, so ask for it
+      // rather than assuming. Assuming true would flash the whole dashboard
+      // before the gate closed on it, which looks like a bug and leaks the
+      // shape of an account the reader has not proven is theirs.
+      const ok = await refreshMe()
+      if (ok) await loadFleets()
     },
-    [loadFleets]
+    [loadFleets, refreshMe]
   )
 
   const value = useMemo<AuthState>(
     () => ({
       ready,
       email,
+      verified,
       fleets,
       fleet: fleets.find((f) => f.id === fleetId) ?? null,
       selectFleet: setFleetId,
@@ -86,11 +112,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       signOut: () => {
         session.clear()
         setEmail(null)
+        setVerified(null)
         setFleets([])
       },
       refreshFleets: loadFleets,
+      refreshMe: async () => {
+        const ok = await refreshMe()
+        // Crossing from unverified to verified is the moment the rest of the
+        // app becomes reachable, so load what it needs before handing over.
+        if (ok) await loadFleets()
+        return ok
+      },
     }),
-    [ready, email, fleets, fleetId, enter, loadFleets]
+    [ready, email, verified, fleets, fleetId, enter, loadFleets, refreshMe]
   )
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>

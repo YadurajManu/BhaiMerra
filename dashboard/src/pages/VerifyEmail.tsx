@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
 import { api } from '../lib/api'
+import { useAuth } from '../lib/auth'
 import { Button, ErrorNote } from '../components/ui'
 import { Frame } from './ResetPassword'
 
@@ -14,6 +15,7 @@ import { Frame } from './ResetPassword'
 export default function VerifyEmail() {
   const [params] = useSearchParams()
   const navigate = useNavigate()
+  const { refreshMe } = useAuth()
   const token = params.get('token')
 
   const [state, setState] = useState<'working' | 'done' | 'failed'>(token ? 'working' : 'failed')
@@ -55,7 +57,20 @@ export default function VerifyEmail() {
             Your address is on file, so you can recover this account if you ever lose the
             password.
           </p>
-          <Button variant="primary" className="mt-8 w-full" onClick={() => navigate('/')}>
+          <Button
+            variant="primary"
+            className="mt-8 w-full"
+            onClick={() => {
+              // Navigating alone is not enough when the link was opened in the
+              // same tab that is signed in: the gate reads verification from
+              // auth state, which still says false until /auth/me is asked
+              // again. Without this the reader confirms their address and is
+              // returned to the screen telling them to confirm their address.
+              void refreshMe()
+                .catch(() => {})
+                .finally(() => navigate('/'))
+            }}
+          >
             Continue
           </Button>
         </>

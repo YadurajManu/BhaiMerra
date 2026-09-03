@@ -163,7 +163,16 @@ export async function authRoutes(app: FastifyInstance) {
 
   app.get('/auth/me', { preHandler: requireUser }, async (req) => {
     const rows = await db
-      .select({ id: users.id, email: users.email, createdAt: users.createdAt })
+      .select({
+        id: users.id,
+        email: users.email,
+        createdAt: users.createdAt,
+        // The dashboard gates itself on this. Without it here there is no way
+        // for a signed-in client to know the address was never confirmed, and
+        // an unverified account gets the whole product - including a recovery
+        // flow that mails a link to an address nobody has proven they own.
+        emailVerifiedAt: users.emailVerifiedAt,
+      })
       .from(users)
       .where(eq(users.id, req.userId!))
       .limit(1)
