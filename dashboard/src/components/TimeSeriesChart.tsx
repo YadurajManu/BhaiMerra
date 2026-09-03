@@ -8,6 +8,16 @@ import { useId, useMemo, useRef, useState } from 'react'
  * and that is the difference between a decoration and a diagnosis. Where a
  * series has no min/max — anything older than the columns that store them — the
  * band is simply absent and the mean is drawn alone, rather than faking a range.
+ *
+ * Three things here exist to serve a page of several charts rather than one:
+ *
+ *   - the crosshair can be driven from outside, so hovering CPU at 03:14 reads
+ *     memory and network at 03:14 too. Correlation is the whole reason to stack
+ *     charts on a shared axis, and eyeballing vertical alignment across four
+ *     panels is not correlation.
+ *   - dragging selects a window and hands it up, so every chart zooms together.
+ *   - expanding is a callback rather than internal state, because the expanded
+ *     view belongs to the page that knows what the other metrics are.
  */
 
 export type Marker = {
@@ -34,14 +44,22 @@ const TONE: Record<string, string> = {
 
 const PAD = { l: 46, r: 12, t: 10, b: 22 }
 
+/** Below this a drag is a click that wandered, not a selection. */
+const DRAG_MIN_PX = 8
+
 export default function TimeSeriesChart({
   series,
-  height = 150,
+  height = 220,
   unit = '',
   ceiling,
   format = (v: number) => String(Math.round(v)),
   markers = [],
   emptyHint = 'No history in this window yet.',
+  hoverT: hoverTProp,
+  onHoverT,
+  onZoom,
+  onExpand,
+  expandLabel = 'Expand this chart',
 }: {
   series: ChartSeries[]
   height?: number
@@ -51,10 +69,24 @@ export default function TimeSeriesChart({
   format?: (v: number) => string
   markers?: Marker[]
   emptyHint?: string
+  /** Crosshair position in ms, when the page is driving it. */
+  hoverT?: number | null
+  onHoverT?: (t: number | null) => void
+  /** Called with the selected window when the reader drags across the plot. */
+  onZoom?: (from: number, to: number) => void
+  onExpand?: () => void
+  expandLabel?: string
 }) {
   const id = useId()
   const svgRef = useRef<SVGSVGElement>(null)
-  const [hoverX, setHoverX] = useState<number | null>(null)
+  // Used only when nothing outside is driving the crosshair, so the chart still
+  // works on its own.
+  const [localHoverT, setLocalHoverT] = useState<number | null>(null)
+  const [drag, setDrag] = useState<{ from: number; to: number } | null>(null)
+
+  const controlled = onHoverT != null
+  const hoverT = controlled ? (hoverTProp ?? null) : localHoverT
+  const setHoverT = (t: number | null) => (controlled ? onHoverT!(t) : setLocalHoverT(t))
 
   const model = useMemo(() => {
     const pts = series.flatMap((s) => s.avg)
@@ -90,6 +122,13 @@ export default function TimeSeriesChart({
   const innerH = height - PAD.t - PAD.b
   const x = (t: number) => PAD.l + ((t - model.t0) / (model.t1 - model.t0)) * innerW
   const y = (v: number) => PAD.t + innerH - (v / model.peak) * innerH
+  const tAt = (px: number) => model.t0 + ((px - PAD.l) / innerW) * (model.t1 - model.t0)
+
+  /** Viewport pixels to the chart's own coordinate space. */
+  const pxOf = (clientX: number, el: SVGSVGElement) => {
+    const r = el.getBoundingClientRect()
+    return ((clientX - r.left) / r.width) * W
+  }
 
   const line = (pts: Array<{ t: number; v: number | null }>) => {
     let d = ''
@@ -118,7 +157,11 @@ export default function TimeSeriesChart({
   // Four gridlines, each labelled with a value the chart actually reaches.
   const ticks = [0, 0.25, 0.5, 0.75, 1].map((f) => model.peak * f)
 
-  const hoverT = hoverX == null ? null : model.t0 + ((hoverX - PAD.l) / innerW) * (model.t1 - model.t0)
+  // A crosshair driven from another chart can point outside this one's data.
+  // Showing it clamped to the edge would claim a reading that does not exist.
+  const hoverX =
+    hoverT != null && hoverT >= model.t0 && hoverT <= model.t1 ? x(hoverT) : null
+
   const readAt = (s: ChartSeries) => {
     if (hoverT == null) return null
     let best: { t: number; v: number | null } | null = null
@@ -134,21 +177,55 @@ export default function TimeSeriesChart({
       ? new Date(t).toLocaleDateString([], { day: 'numeric', month: 'short' })
       : new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 
+  const dragFrom = drag ? Math.min(drag.from, drag.to) : 0
+  const dragTo = drag ? Math.max(drag.from, drag.to) : 0
+  const dragging = drag != null && dragTo - dragFrom >= DRAG_MIN_PX
+
+  const endDrag = () => {
+    if (dragging && onZoom) onZoom(tAt(dragFrom), tAt(dragTo))
+    setDrag(null)
+  }
+
   return (
-    <div className="relative">
+    <div className="group relative">
+      {onExpand && (
+        <button
+          type="button"
+          onClick={onExpand}
+          aria-label={expandLabel}
+          title={expandLabel}
+          className="absolute right-1 top-1 z-20 flex h-7 w-7 items-center justify-center border border-[var(--color-line-2)] bg-[var(--color-ink-950)] text-[var(--color-fg-dim)] opacity-0 transition-all duration-200 hover:border-[var(--color-signal)] hover:text-[var(--color-signal)] focus-visible:opacity-100 group-hover:opacity-100"
+        >
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+            <path d="M4.5 1H1v3.5M7.5 11H11V7.5M11 4.5V1H7.5M1 7.5V11h3.5"
+                  stroke="currentColor" strokeWidth="1.3" strokeLinecap="square" />
+          </svg>
+        </button>
+      )}
+
       <svg
         ref={svgRef}
         viewBox={`0 0 ${W} ${height}`}
-        className="w-full touch-none"
+        className={`w-full touch-none ${onZoom ? 'cursor-crosshair' : ''}`}
         style={{ height }}
         role="img"
         aria-label={`${series.map((s) => s.label).join(' and ')} over time`}
-        onMouseLeave={() => setHoverX(null)}
-        onMouseMove={(e) => {
-          const r = e.currentTarget.getBoundingClientRect()
-          const px = ((e.clientX - r.left) / r.width) * W
-          setHoverX(px < PAD.l || px > W - PAD.r ? null : px)
+        onMouseLeave={() => {
+          setHoverT(null)
+          setDrag(null)
         }}
+        onMouseDown={(e) => {
+          if (!onZoom) return
+          const px = pxOf(e.clientX, e.currentTarget)
+          if (px < PAD.l || px > W - PAD.r) return
+          setDrag({ from: px, to: px })
+        }}
+        onMouseMove={(e) => {
+          const px = pxOf(e.clientX, e.currentTarget)
+          setHoverT(px < PAD.l || px > W - PAD.r ? null : tAt(px))
+          if (drag) setDrag({ ...drag, to: Math.min(Math.max(px, PAD.l), W - PAD.r) })
+        }}
+        onMouseUp={endDrag}
       >
         <defs>
           {series.map((s, i) => (
@@ -200,11 +277,44 @@ export default function TimeSeriesChart({
           )
         })}
 
-        {hoverX != null && (
-          <line
-            x1={hoverX} x2={hoverX} y1={PAD.t} y2={PAD.t + innerH}
-            stroke="var(--color-fg-muted)" strokeWidth="1" vectorEffect="non-scaling-stroke"
-          />
+        {/* the window being selected, drawn under the crosshair */}
+        {dragging && (
+          <g>
+            <rect
+              x={dragFrom} y={PAD.t} width={dragTo - dragFrom} height={innerH}
+              fill="var(--color-signal)" fillOpacity="0.12"
+            />
+            {[dragFrom, dragTo].map((px, i) => (
+              <line
+                key={i} x1={px} x2={px} y1={PAD.t} y2={PAD.t + innerH}
+                stroke="var(--color-signal)" strokeWidth="1" vectorEffect="non-scaling-stroke"
+              />
+            ))}
+            <text
+              x={(dragFrom + dragTo) / 2} y={PAD.t + 12} textAnchor="middle"
+              fill="var(--color-signal)" fontSize="10" fontFamily="ui-monospace, monospace"
+            >
+              {timeLabel(tAt(dragFrom))} – {timeLabel(tAt(dragTo))}
+            </text>
+          </g>
+        )}
+
+        {hoverX != null && !dragging && (
+          <g>
+            <line
+              x1={hoverX} x2={hoverX} y1={PAD.t} y2={PAD.t + innerH}
+              stroke="var(--color-fg-muted)" strokeWidth="1" vectorEffect="non-scaling-stroke"
+            />
+            {/* A dot per series at the crosshair, so the reading is anchored to
+                the line rather than only to a number in a box. */}
+            {series.map((s) => {
+              const v = readAt(s)
+              return v == null ? null : (
+                <circle key={s.label} cx={hoverX} cy={y(v)} r="3"
+                        fill={s.colour} stroke="var(--color-ink-950)" strokeWidth="1.5" />
+              )
+            })}
+          </g>
         )}
 
         <text x={PAD.l} y={height - 6} fill="var(--color-fg-dim)" fontSize="10" fontFamily="ui-monospace, monospace">
@@ -215,14 +325,14 @@ export default function TimeSeriesChart({
         </text>
       </svg>
 
-      {hoverT != null && (
+      {hoverT != null && hoverX != null && !dragging && (
         <div
           className="pointer-events-none absolute top-1 z-10 whitespace-nowrap border border-[var(--color-line)] bg-[var(--color-ink-950)] px-2.5 py-1.5 shadow-lg"
           style={{
             // Flip to the left of the cursor past halfway so the tooltip never
             // runs off the right edge of the chart.
-            left: hoverX! / W > 0.6 ? undefined : `${(hoverX! / W) * 100}%`,
-            right: hoverX! / W > 0.6 ? `${100 - (hoverX! / W) * 100}%` : undefined,
+            left: hoverX / W > 0.6 ? undefined : `${(hoverX / W) * 100}%`,
+            right: hoverX / W > 0.6 ? `${100 - (hoverX / W) * 100}%` : undefined,
           }}
         >
           <div className="font-mono text-[9.5px] uppercase tracking-[0.1em] text-[var(--color-fg-dim)]">

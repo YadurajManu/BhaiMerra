@@ -1,10 +1,10 @@
-import { useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { api, type Node } from '../lib/api'
 import { useAuth, usePoll } from '../lib/auth'
 import { mb, since } from '../lib/format'
 import { Dot, ErrorNote, Panel, StatusPill } from '../components/ui'
-import TimeSeriesChart, { type Marker } from '../components/TimeSeriesChart'
+import TimeSeriesChart, { type ChartSeries, type Marker } from '../components/TimeSeriesChart'
 import { HeartbeatStrip, projectFull } from '../components/viz'
 import { beatsFrom, type NodeSample } from '../lib/useSamples'
 
@@ -15,6 +15,11 @@ import { beatsFrom, type NodeSample } from '../lib/useSamples'
  * memory over one is a way to reach a confident wrong conclusion, so the
  * selector is deliberately not per-chart — and it lives in the URL, because
  * /nodes/:id?range=24h is a link worth sending someone mid-incident.
+ *
+ * The crosshair is shared for the same reason. Four charts on a shared axis
+ * exist so you can ask "what was memory doing when CPU spiked", and answering
+ * that by eye across four panels is guesswork. Hovering anywhere reads every
+ * metric at that instant.
  */
 
 const RANGES = [
@@ -39,6 +44,9 @@ type NodeEvent = { at: string; kind: string; label: string; tone: 'info' | 'warn
 
 const SERIES = { cpu: '#3987e5', ram: '#9a6bd8', disk: '#12a594', netRx: '#d6409f', netTx: '#a16207' }
 
+const toneColour = (tone: string) =>
+  tone === 'down' ? 'var(--color-down)' : tone === 'warn' ? 'var(--color-warn)' : 'var(--color-fg-muted)'
+
 function Tile({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: string }) {
   return (
     <div className="bg-[var(--color-ink-950)] p-4">
@@ -54,6 +62,18 @@ function Tile({ label, value, sub, tone }: { label: string; value: string; sub?:
   )
 }
 
+/** One chart's identity, so the expanded view can cycle between them. */
+type ChartDef = {
+  key: string
+  title: string
+  note?: ReactNode
+  series: ChartSeries[]
+  ceiling?: number
+  unit?: string
+  format?: (v: number) => string
+  emptyHint?: string
+}
+
 export default function NodeDetail() {
   const { nodeId } = useParams<{ nodeId: string }>()
   const { fleet } = useAuth()
@@ -61,6 +81,16 @@ export default function NodeDetail() {
 
   const rangeKey = params.get('range') ?? '6h'
   const range = RANGES.find((r) => r.key === rangeKey) ?? RANGES[2]
+
+  /* Shared across every chart on the page. */
+  const [hoverT, setHoverT] = useState<number | null>(null)
+  const [zoom, setZoom] = useState<{ from: number; to: number } | null>(null)
+  const [expanded, setExpanded] = useState<string | null>(null)
+
+  // A zoom is a window inside a range. Changing the range makes it meaningless,
+  // and keeping it would silently show a slice of a period the reader thinks
+  // they are seeing in full.
+  useEffect(() => setZoom(null), [range.key])
 
   const nodes = usePoll(
     () => (fleet?.id ? api<{ nodes: Node[] }>(`/fleets/${fleet.id}/nodes`) : Promise.resolve({ nodes: [] })),
@@ -89,17 +119,48 @@ export default function NodeDetail() {
     60_000
   )
 
-  const samples = hist.data?.samples ?? []
-  const peaks = hist.data?.peaks
+  const allSamples = hist.data?.samples ?? []
   const t = node?.telemetry
 
+  const samples = useMemo(() => {
+    if (!zoom) return allSamples
+    return allSamples.filter((s) => {
+      const ts = +new Date(s.at)
+      return ts >= zoom.from && ts <= zoom.to
+    })
+  }, [allSamples, zoom])
+
+  /* Zooming has to move the summary too. Tiles that still describe the whole
+     range while the charts show ten minutes of it is a mismatch nobody reads
+     carefully enough to catch. */
+  const peaks: Peaks | undefined = useMemo(() => {
+    if (!zoom) return hist.data?.peaks
+    const num = (pick: (s: NodeSample) => number | null | undefined) =>
+      samples.map(pick).filter((v): v is number => v != null)
+    const max = (xs: number[]) => (xs.length ? Math.max(...xs) : null)
+    const avg = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null)
+    const cpu = num((s) => s.cpuPct)
+    const ram = num((s) => s.ramUsedMb)
+    return {
+      cpuMax: max(num((s) => s.cpuMax ?? s.cpuPct)), cpuAvg: avg(cpu),
+      ramMaxMb: max(num((s) => s.ramMaxMb ?? s.ramUsedMb)), ramAvgMb: avg(ram),
+      netRxMax: max(num((s) => s.netRxKbps)), netTxMax: max(num((s) => s.netTxKbps)),
+      tempMax: max(num((s) => s.tempC)), load1Max: max(num((s) => s.load1)),
+      samples: samples.length, coverage: null,
+    }
+  }, [zoom, hist.data, samples])
+
+  const events = evts.data?.events ?? []
   const markers: Marker[] = useMemo(
-    () => (evts.data?.events ?? []).map((e) => ({ at: +new Date(e.at), label: e.label, tone: e.tone })),
-    [evts.data]
+    () => events.map((e) => ({ at: +new Date(e.at), label: e.label, tone: e.tone })),
+    [events]
   )
 
-  const pt = (pick: (s: NodeSample) => number | null | undefined) =>
-    samples.map((s) => ({ t: +new Date(s.at), v: pick(s) ?? null }))
+  const pt = useCallback(
+    (pick: (s: NodeSample) => number | null | undefined) =>
+      samples.map((s) => ({ t: +new Date(s.at), v: pick(s) ?? null })),
+    [samples]
+  )
 
   const diskTotal =
     t?.diskTotalMb ?? (t?.diskUsedMb != null && node?.diskMb ? t.diskUsedMb + node.diskMb : 0)
@@ -109,7 +170,11 @@ export default function NodeDetail() {
     return diskTotal ? projectFull(d, diskTotal) : null
   }, [samples, diskTotal])
 
-  const beats = useMemo(() => beatsFrom(samples, 60, range.minutes * 60_000), [samples, range.minutes])
+  // Zooming narrows the window the strip describes too. Left at the full range
+  // it would draw a zoomed selection as a short run of beats followed by hours
+  // of "no data", which reads as an outage rather than as a chosen window.
+  const beatWindowMs = zoom ? Math.max(zoom.to - zoom.from, 60_000) : range.minutes * 60_000
+  const beats = useMemo(() => beatsFrom(samples, 60, beatWindowMs), [samples, beatWindowMs])
   const recorded = beats.filter((b) => b !== 'nodata')
   const uptime = recorded.length ? (recorded.filter((b) => b === 'ok').length / recorded.length) * 100 : null
 
@@ -118,6 +183,93 @@ export default function NodeDetail() {
   const hasNet = samples.some((s) => s.netRxKbps != null || s.netTxKbps != null)
   const hasTemp = samples.some((s) => s.tempC != null)
   const hasLoad = samples.some((s) => s.load1 != null)
+
+  const charts: ChartDef[] = useMemo(() => {
+    if (!node) return []
+    const list: ChartDef[] = [
+      {
+        key: 'cpu',
+        title: 'cpu',
+        note: 'band is min to max, line is the mean',
+        ceiling: 100,
+        // No `unit` here: the tooltip appends unit to the formatted value, and
+        // this formatter already carries the sign. Setting both printed "52%%".
+        format: (v) => `${Math.round(v)}%`,
+        emptyHint: 'No CPU history in this window yet. It fills in as the node reports.',
+        series: [{
+          label: 'cpu', colour: SERIES.cpu,
+          avg: pt((s) => s.cpuPct),
+          min: pt((s) => s.cpuMin ?? s.cpuPct),
+          max: pt((s) => s.cpuMax ?? s.cpuPct),
+        }],
+      },
+      {
+        key: 'memory',
+        title: 'memory',
+        ceiling: node.ramMb,
+        format: (v) => mb(v),
+        emptyHint: 'No memory history in this window yet.',
+        series: [{
+          label: 'memory', colour: SERIES.ram,
+          avg: pt((s) => s.ramUsedMb),
+          min: pt((s) => s.ramUsedMb),
+          max: pt((s) => s.ramMaxMb ?? s.ramUsedMb),
+        }],
+      },
+    ]
+    if (hasNet) {
+      list.push({
+        key: 'network',
+        title: 'network',
+        unit: ' kB/s',
+        format: (v) => (v >= 1024 ? `${(v / 1024).toFixed(1)}M` : String(Math.round(v))),
+        series: [
+          { label: 'in', colour: SERIES.netRx, avg: pt((s) => s.netRxKbps) },
+          { label: 'out', colour: SERIES.netTx, avg: pt((s) => s.netTxKbps) },
+        ],
+      })
+    }
+    if (hasLoad || hasTemp) {
+      list.push({
+        key: 'load',
+        title: 'load and temperature',
+        format: (v) => v.toFixed(1),
+        series: [
+          ...(hasLoad ? [{ label: 'load', colour: SERIES.disk, avg: pt((s) => s.load1) }] : []),
+          ...(hasTemp ? [{ label: '°C', colour: SERIES.netTx, avg: pt((s) => s.tempC) }] : []),
+        ],
+      })
+    }
+    return list
+  }, [node, pt, hasNet, hasLoad, hasTemp])
+
+  const expandedIndex = charts.findIndex((c) => c.key === expanded)
+  const step = useCallback(
+    (delta: number) => {
+      if (!charts.length || expandedIndex < 0) return
+      const next = (expandedIndex + delta + charts.length) % charts.length
+      setExpanded(charts[next]!.key)
+    },
+    [charts, expandedIndex]
+  )
+
+  // Esc closes, arrows move between metrics without leaving the expanded view.
+  useEffect(() => {
+    if (!expanded) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setExpanded(null)
+      else if (e.key === 'ArrowRight') { e.preventDefault(); step(1) }
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); step(-1) }
+    }
+    window.addEventListener('keydown', onKey)
+    // Nothing behind the overlay should scroll under it.
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      document.body.style.overflow = prev
+    }
+  }, [expanded, step])
 
   if (nodes.error) return <ErrorNote error={nodes.error} />
   if (!node) {
@@ -133,8 +285,18 @@ export default function NodeDetail() {
     )
   }
 
-  const staleWarning =
-    peaks && peaks.coverage != null && peaks.coverage < 0.5 && peaks.samples > 0
+  const staleWarning = !zoom && peaks && peaks.coverage != null && peaks.coverage < 0.5 && peaks.samples > 0
+
+  const shared = {
+    hoverT,
+    onHoverT: setHoverT,
+    onZoom: (from: number, to: number) => setZoom({ from, to }),
+    markers,
+  }
+
+  const windowLabel = zoom
+    ? `${new Date(zoom.from).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}–${new Date(zoom.to).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+    : range.label
 
   return (
     <div className="space-y-5">
@@ -173,12 +335,45 @@ export default function NodeDetail() {
             {r.label}
           </button>
         ))}
+        {zoom && (
+          <button
+            onClick={() => setZoom(null)}
+            className="flash-signal flex items-center gap-1.5 border border-[var(--color-signal)] px-2.5 py-1 font-mono text-[11px] text-[var(--color-signal)] transition-colors hover:bg-[var(--color-signal)] hover:text-[#04140c]"
+          >
+            ✕ zoomed {windowLabel} · back to {range.label}
+          </button>
+        )}
         {hist.data && (
           <span className="ml-auto font-mono text-[10px] text-[var(--color-fg-dim)]">
             {hist.data.grain} grain · {samples.length} points
+            {charts.length > 0 && <span className="ml-2 opacity-70">drag to zoom</span>}
           </span>
         )}
       </div>
+
+      {/* what changed, on the same axis the charts use */}
+      {events.length > 0 && (
+        <div className="flex items-center gap-2 overflow-x-auto pb-1">
+          <span className="mono-label shrink-0 text-[9px] text-[var(--color-fg-dim)]">CHANGES</span>
+          {events.slice(0, 12).map((e, i) => (
+            <button
+              key={i}
+              onMouseEnter={() => setHoverT(+new Date(e.at))}
+              onMouseLeave={() => setHoverT(null)}
+              title={new Date(e.at).toLocaleString()}
+              className="shrink-0 border-l-2 bg-[var(--color-ink-950)] py-1 pl-2 pr-3 text-left transition-colors hover:bg-[var(--color-ink-900)]"
+              style={{ borderColor: toneColour(e.tone) }}
+            >
+              <span className="font-mono text-[10px] text-[var(--color-fg-dim)]">
+                {new Date(e.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              </span>
+              <span className="ml-2 font-mono text-[11px]" style={{ color: toneColour(e.tone) }}>
+                {e.label}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {staleWarning && (
         <p className="border-l-2 border-[var(--color-warn)] py-2 pl-3 font-mono text-[11px] text-[var(--color-fg-muted)]">
@@ -190,13 +385,13 @@ export default function NodeDetail() {
       {/* the summary before the detail */}
       <div className="grid gap-px bg-[var(--color-line)] sm:grid-cols-2 lg:grid-cols-4">
         <Tile
-          label={`cpu peak · ${range.label}`}
+          label={`cpu peak · ${windowLabel}`}
           value={peaks?.cpuMax != null ? `${Math.round(peaks.cpuMax)}%` : '—'}
           sub={peaks?.cpuAvg != null ? `avg ${Math.round(peaks.cpuAvg)}%` : undefined}
           tone={peaks?.cpuMax != null && peaks.cpuMax > 85 ? 'var(--color-warn)' : undefined}
         />
         <Tile
-          label={`memory peak · ${range.label}`}
+          label={`memory peak · ${windowLabel}`}
           value={peaks?.ramMaxMb != null ? mb(peaks.ramMaxMb) : '—'}
           sub={`of ${mb(node.ramMb)}`}
           tone={peaks?.ramMaxMb != null && peaks.ramMaxMb / node.ramMb > 0.9 ? 'var(--color-warn)' : undefined}
@@ -208,91 +403,50 @@ export default function NodeDetail() {
           tone={projection && projection.days < 14 ? 'var(--color-warn)' : undefined}
         />
         <Tile
-          label={`uptime · ${range.label}`}
+          label={`uptime · ${windowLabel}`}
           value={uptime != null ? `${uptime.toFixed(1)}%` : '—'}
           sub={recorded.length ? `${recorded.filter((b) => b === 'missed').length} gaps` : 'no history yet'}
           tone={uptime != null && uptime < 99 ? 'var(--color-warn)' : undefined}
         />
       </div>
 
-      {/* charts, all on the same time axis */}
-      <Panel title={`cpu · ${range.label}`} right={<span className="normal-case">band is min to max, line is the mean</span>}>
-        <div className="p-4">
-          <TimeSeriesChart
-            ceiling={100}
-            unit="%"
-            markers={markers}
-            format={(v) => `${Math.round(v)}%`}
-            emptyHint="No CPU history in this window yet. It fills in as the node reports."
-            series={[{
-              label: 'cpu', colour: SERIES.cpu,
-              avg: pt((s) => s.cpuPct),
-              min: pt((s) => s.cpuMin ?? s.cpuPct),
-              max: pt((s) => s.cpuMax ?? s.cpuPct),
-            }]}
-          />
-        </div>
-      </Panel>
-
-      <Panel title={`memory · ${range.label}`}>
-        <div className="p-4">
-          <TimeSeriesChart
-            ceiling={node.ramMb}
-            markers={markers}
-            format={(v) => mb(v)}
-            emptyHint="No memory history in this window yet."
-            series={[{
-              label: 'memory', colour: SERIES.ram,
-              avg: pt((s) => s.ramUsedMb),
-              min: pt((s) => s.ramUsedMb),
-              max: pt((s) => s.ramMaxMb ?? s.ramUsedMb),
-            }]}
-          />
-        </div>
-      </Panel>
-
-      <Panel
-        title={`network · ${range.label}`}
-        right={!hasNet ? <span className="normal-case text-[var(--color-warn)]">agent upgrade required</span> : undefined}
-      >
-        <div className="p-4">
-          {hasNet ? (
-            <TimeSeriesChart
-              markers={markers}
-              unit=" kB/s"
-              format={(v) => (v >= 1024 ? `${(v / 1024).toFixed(1)}M` : String(Math.round(v)))}
-              series={[
-                { label: 'in', colour: SERIES.netRx, avg: pt((s) => s.netRxKbps) },
-                { label: 'out', colour: SERIES.netTx, avg: pt((s) => s.netTxKbps) },
-              ]}
-            />
-          ) : (
-            <p className="py-8 text-center font-mono text-[11px] leading-relaxed text-[var(--color-fg-dim)]">
-              This node runs agent {node.agentVersion ?? 'v0.1.9'}, which does not report network.
-              <br />
-              Re-run the installer on it to start collecting.
-            </p>
-          )}
-        </div>
-      </Panel>
-
-      {(hasLoad || hasTemp) && (
-        <Panel title={`load and temperature · ${range.label}`}>
+      {/* charts, all on the same time axis and the same crosshair */}
+      {charts.map((c) => (
+        <Panel
+          key={c.key}
+          title={`${c.title} · ${windowLabel}`}
+          right={c.note ? <span className="normal-case">{c.note}</span> : undefined}
+        >
           <div className="p-4">
             <TimeSeriesChart
-              markers={markers}
-              format={(v) => v.toFixed(1)}
-              series={[
-                ...(hasLoad ? [{ label: 'load', colour: SERIES.disk, avg: pt((s) => s.load1) }] : []),
-                ...(hasTemp ? [{ label: '°C', colour: SERIES.netTx, avg: pt((s) => s.tempC) }] : []),
-              ]}
+              {...shared}
+              series={c.series}
+              ceiling={c.ceiling}
+              unit={c.unit}
+              format={c.format}
+              emptyHint={c.emptyHint}
+              onExpand={() => setExpanded(c.key)}
+              expandLabel={`Expand ${c.title}`}
             />
           </div>
+        </Panel>
+      ))}
+
+      {!hasNet && (
+        <Panel
+          title={`network · ${windowLabel}`}
+          right={<span className="normal-case text-[var(--color-warn)]">agent upgrade required</span>}
+        >
+          <p className="p-4 py-8 text-center font-mono text-[11px] leading-relaxed text-[var(--color-fg-dim)]">
+            This node runs agent {node.agentVersion ?? 'v0.1.9'}, which does not report network.
+            <br />
+            Re-run the installer on it to start collecting.
+          </p>
         </Panel>
       )}
 
       {/* reporting history */}
-      <Panel title={`reporting · ${range.label}`}>
+      <Panel title={`reporting · ${windowLabel}`}>
         <div className="flex items-center gap-3 p-4">
           <HeartbeatStrip beats={beats} height={20} />
           <span className="shrink-0 font-mono text-[10.5px] tabular-nums text-[var(--color-fg-dim)]">
@@ -324,17 +478,14 @@ export default function NodeDetail() {
         </Panel>
 
         <Panel title={`what happened · ${range.label}`}>
-          {(evts.data?.events ?? []).length ? (
+          {events.length ? (
             <div className="max-h-[280px] divide-y divide-[var(--color-line)] overflow-y-auto">
-              {evts.data!.events.map((e, i) => (
+              {events.map((e, i) => (
                 <div key={i} className="flex items-baseline gap-3 px-5 py-2.5">
                   <span className="min-w-[74px] shrink-0 font-mono text-[10.5px] text-[var(--color-fg-dim)]">
                     {since(e.at)}
                   </span>
-                  <span
-                    className="font-mono text-[11.5px]"
-                    style={{ color: e.tone === 'down' ? 'var(--color-down)' : e.tone === 'warn' ? 'var(--color-warn)' : 'var(--color-fg-muted)' }}
-                  >
+                  <span className="font-mono text-[11.5px]" style={{ color: toneColour(e.tone) }}>
                     {e.label}
                   </span>
                 </div>
@@ -346,6 +497,119 @@ export default function NodeDetail() {
             </p>
           )}
         </Panel>
+      </div>
+
+      {expandedIndex >= 0 && (
+        <ExpandedChart
+          chart={charts[expandedIndex]!}
+          index={expandedIndex}
+          total={charts.length}
+          windowLabel={windowLabel}
+          shared={shared}
+          onClose={() => setExpanded(null)}
+          onStep={step}
+        />
+      )}
+    </div>
+  )
+}
+
+/**
+ * The same chart, given the room to be read.
+ *
+ * Stacked four to a page a chart is about 150px tall against 1400 wide — nearly
+ * all horizontal, so a four percent wobble and a forty percent one look alike.
+ * Here it gets most of the viewport, which is the only thing that actually
+ * fixes that.
+ */
+function ExpandedChart({
+  chart, index, total, windowLabel, shared, onClose, onStep,
+}: {
+  chart: ChartDef
+  index: number
+  total: number
+  windowLabel: string
+  shared: {
+    hoverT: number | null
+    onHoverT: (t: number | null) => void
+    onZoom: (from: number, to: number) => void
+    markers: Marker[]
+  }
+  onClose: () => void
+  onStep: (delta: number) => void
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm sm:p-8"
+      style={{ animation: 'fade-up 0.2s var(--ease-out-expo) both' }}
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label={`${chart.title} expanded`}
+    >
+      <div
+        // Clicking the backdrop closes; clicking the chart must not.
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-[1200px] border border-[var(--color-line-2)] bg-[var(--color-ink-950)] shadow-2xl"
+        style={{ animation: 'rise-in 0.28s var(--ease-out-expo) both' }}
+      >
+        <div className="flex items-center gap-3 border-b border-[var(--color-line)] px-5 py-3">
+          <h2 className="mono-label text-[11px] text-[var(--color-fg)]">
+            {chart.title} · {windowLabel}
+          </h2>
+          {chart.note && (
+            <span className="hidden font-mono text-[10.5px] text-[var(--color-fg-dim)] sm:inline">
+              {chart.note}
+            </span>
+          )}
+
+          <div className="ml-auto flex items-center gap-1">
+            <button
+              onClick={() => onStep(-1)}
+              aria-label="Previous metric"
+              className="flex h-7 w-7 items-center justify-center border border-[var(--color-line-2)] font-mono text-[12px] text-[var(--color-fg-dim)] transition-colors hover:border-[var(--color-signal)] hover:text-[var(--color-signal)]"
+            >
+              ←
+            </button>
+            <span className="px-1 font-mono text-[10.5px] tabular-nums text-[var(--color-fg-dim)]">
+              {index + 1}/{total}
+            </span>
+            <button
+              onClick={() => onStep(1)}
+              aria-label="Next metric"
+              className="flex h-7 w-7 items-center justify-center border border-[var(--color-line-2)] font-mono text-[12px] text-[var(--color-fg-dim)] transition-colors hover:border-[var(--color-signal)] hover:text-[var(--color-signal)]"
+            >
+              →
+            </button>
+            <button
+              onClick={onClose}
+              aria-label="Close"
+              className="ml-2 flex h-7 w-7 items-center justify-center border border-[var(--color-line-2)] font-mono text-[12px] text-[var(--color-fg-dim)] transition-colors hover:border-[var(--color-down)] hover:text-[var(--color-down)]"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+
+        <div className="p-5">
+          {/* Keyed on the metric so switching re-runs the entrance animation
+              rather than swapping the paths under a static frame. */}
+          <div key={chart.key} style={{ animation: 'fade-up 0.24s var(--ease-out-expo) both' }}>
+            <TimeSeriesChart
+              {...shared}
+              height={Math.max(320, Math.round(window.innerHeight * 0.62))}
+              series={chart.series}
+              ceiling={chart.ceiling}
+              unit={chart.unit}
+              format={chart.format}
+              emptyHint={chart.emptyHint}
+            />
+          </div>
+        </div>
+
+        <div className="border-t border-[var(--color-line)] px-5 py-2.5 font-mono text-[10px] text-[var(--color-fg-dim)]">
+          drag to zoom · ← → to change metric · esc to close
+        </div>
       </div>
     </div>
   )
