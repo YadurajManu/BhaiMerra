@@ -18,6 +18,24 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: Fleet OS control plane - Lightsail host, static IP, daily snapshots
 
 Parameters:
+  InstanceName:
+    Type: String
+    Default: fleet-os-control-plane
+    Description: >
+      Named rather than hardcoded so a replacement can be built alongside the
+      instance it replaces. Cutting over by standing the new box up first and
+      retiring the old one afterwards is the only order that leaves a way back;
+      the reverse cost this project three minutes of downtime once already.
+
+  StaticIpName:
+    Type: String
+    Default: fleet-os-control-plane-ip
+    Description: >
+      Must differ from the live one while both exist. A Lightsail static IP is
+      released for good when its stack is deleted - the address does not come
+      back - so anything pointing at it (the registry's DNS-only A record) has
+      to be repointed before the old stack goes.
+
   BundleId:
     Type: String
     Default: large_3_1
@@ -59,7 +77,7 @@ Resources:
   ControlPlane:
     Type: AWS::Lightsail::Instance
     Properties:
-      InstanceName: fleet-os-control-plane
+      InstanceName: !Ref InstanceName
       BlueprintId: ubuntu_24_04
       BundleId: !Ref BundleId
       KeyPairName: fleet-os
@@ -127,6 +145,17 @@ Resources:
         apt-get update -y
         apt-get install -y ca-certificates curl git unattended-upgrades fail2ban
 
+        # openssh-server explicitly, and verified. The instance this template
+        # replaces ended up with no sshd at all - not a misconfigured unit, no
+        # sshd - which is unrecoverable remotely because every route in needs
+        # it, the Lightsail browser console included. Never assume it is there.
+        apt-get install -y openssh-server
+        systemctl enable --now ssh.socket 2>/dev/null || systemctl enable --now ssh
+        ss -tlnp | grep -q ':22 ' || {
+          echo "FATAL: nothing listening on 22 after install" >&2
+          exit 1
+        }
+
         # Docker, from Docker's own repository rather than Ubuntu's, which
         # ships a version too old for the buildx features the control plane uses.
         curl -fsSL https://get.docker.com | sh
@@ -164,7 +193,7 @@ Resources:
   ControlPlaneIp:
     Type: AWS::Lightsail::StaticIp
     Properties:
-      StaticIpName: fleet-os-control-plane-ip
+      StaticIpName: !Ref StaticIpName
       AttachedTo: !Ref ControlPlane
 
 Outputs:
