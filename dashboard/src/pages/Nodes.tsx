@@ -500,12 +500,13 @@ export default function Nodes() {
                   {/* Live numbers with the hour behind them. Extracted
                       because each card fetches its own history, and a hook
                       cannot be called inside a map body. */}
-                  {/* Above the stretched link: this block owns the expand
-                      toggle, which must stay a toggle rather than becoming
-                      one more place that navigates away. */}
-                  <div className="relative z-10">
-                    <NodeTelemetry node={n} fleetId={fleet?.id} />
-                  </div>
+                  {/* Deliberately NOT raised above the stretched link. Doing
+                      that shielded the meters and sparklines - the largest
+                      and most clickable-looking part of the card - and left
+                      clicking the graphs doing nothing at all. Only the
+                      expand toggle inside needs to sit above it, and it
+                      raises itself. */}
+                  <NodeTelemetry node={n} fleetId={fleet?.id} />
 
                   {/* ── Workloads Section ─────────────────────────── */}
                   <div className="mt-3.5">

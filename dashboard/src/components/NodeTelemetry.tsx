@@ -191,10 +191,15 @@ export default function NodeTelemetry({ node, fleetId }: { node: Node; fleetId?:
         </div>
       )}
 
+      {/* z-10 because the node card makes its whole surface a link with a
+          stretched pseudo-element. Without it this toggle sits underneath and
+          navigates instead of expanding. Raising the whole telemetry block
+          instead would shield the meters and sparklines, which is the part
+          people actually click. */}
       <button
         onClick={() => setExpanded((v) => !v)}
         aria-expanded={expanded}
-        className="w-full border-t border-[var(--color-line)] px-4 py-2 text-left font-mono text-[10.5px] text-[var(--color-fg-dim)] transition-colors duration-300 hover:bg-[var(--color-ink-800)] hover:text-[var(--color-fg-muted)]"
+        className="relative z-10 w-full border-t border-[var(--color-line)] px-4 py-2 text-left font-mono text-[10.5px] text-[var(--color-fg-dim)] transition-colors duration-300 hover:bg-[var(--color-ink-800)] hover:text-[var(--color-fg-muted)]"
       >
         {expanded ? '− less' : '+ six hours, larger charts'}
       </button>
