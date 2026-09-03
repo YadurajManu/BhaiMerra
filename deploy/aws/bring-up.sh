@@ -133,10 +133,33 @@ fi
 # with no error that names the cause. Refuse to continue on anything but a file.
 [ -f "$CF" ] || die "$CF is not a regular file - remove it and re-run"
 
-say "5. bringing the stack up"
+say "5. registry credentials"
+# registry:2 has no access control of its own, so compose configures htpasswd
+# auth and mounts deploy/registry-auth read-only. That directory is not in the
+# repository, and a missing bind-mount source is not an error to Docker - it
+# creates an empty directory, mounts it read-only, and the registry then panics
+# with "failed to open htpasswd path ... read-only file system", which reads
+# like a permissions bug rather than a missing file. Generate it from the
+# credentials already in .env so the two cannot drift apart.
+AUTH_DIR="$REPO_DIR/deploy/registry-auth"
+if [ ! -s "$AUTH_DIR/htpasswd" ]; then
+  CREDS=$(grep -E '^REGISTRY_CREDENTIALS=' "$ENV_FILE" | cut -d= -f2-)
+  RU="${CREDS%%:*}"; RP="${CREDS#*:}"
+  [ -n "$RU" ] && [ -n "$RP" ] && [ "$RU" != "$CREDS" ] \
+    || die "REGISTRY_CREDENTIALS in $ENV_FILE must be user:password"
+  mkdir -p "$AUTH_DIR"
+  # bcrypt via the httpd image, so this needs no apache2-utils on the host.
+  docker run --rm httpd:2-alpine htpasswd -Bbn "$RU" "$RP" > "$AUTH_DIR/htpasswd"
+  chmod 644 "$AUTH_DIR/htpasswd"
+  say "   wrote $AUTH_DIR/htpasswd for user $RU"
+else
+  say "   htpasswd already present - keeping it"
+fi
+
+say "6. bringing the stack up"
 docker compose -f deploy/docker-compose.yml --profile tunnel up -d --build
 
-say "6. what is running"
+say "7. what is running"
 docker compose -f deploy/docker-compose.yml ps
 cat <<EOF
 
