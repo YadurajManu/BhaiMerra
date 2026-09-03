@@ -79,6 +79,13 @@ export default function Nodes() {
     })
   }, [nodes, filter, search])
 
+  /**
+   * One node gets the full width. Two columns for a single card leaves it
+   * stranded in half the screen with its charts squeezed, which is worse than
+   * no grid at all.
+   */
+  const gridClass = `grid gap-4 ${filteredNodes.length > 1 ? 'lg:grid-cols-2' : ''}`
+
   async function mintToken() {
     setBusy('pair')
     setActionError(null)
@@ -401,7 +408,7 @@ export default function Nodes() {
           </button>
         </div>
       ) : (
-        <div className="grid gap-4 lg:grid-cols-2">
+        <div className={gridClass}>
           {filteredNodes.map((n) => {
             const isOnline = n.status === 'online'
             const osInfo = getOsIcon(n.os)

@@ -1,158 +1,203 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import type { Node } from '../lib/api'
 import { useSamples, beatsFrom } from '../lib/useSamples'
 import { mb, since } from '../lib/format'
-import { Meter } from './ui'
 import { Sparkline, HeartbeatStrip, projectFull } from './viz'
 
 /**
  * A node's numbers, with the hour behind them.
  *
- * Every reading here used to be an instant: 21% told you nothing about whether
- * it was 4% ten minutes ago. The sparklines are the smallest change that fixes
- * that — no extra page, no click, and the trend sits where the number already
- * was.
+ * Laid out as an explicit grid — name, bar, value, trend — rather than a flex
+ * row with a fixed-width label. The first version used `Meter`, whose label is
+ * `w-[112px] whitespace-nowrap`; "RAM 16.8 GB / 18.0 GB" is wider than that, so
+ * it overflowed its box and the sparkline was drawn straight through the text.
+ * Columns cannot collide, so the fix is columns.
  */
-export default function NodeTelemetry({ node, fleetId }: { node: Node; fleetId?: string }) {
-  const { samples } = useSamples(fleetId, node.id, 60)
 
-  const series = useMemo(() => {
-    const cpu = samples.map((s) => s.cpuPct)
-    const ram = samples.map((s) => s.ramUsedMb)
-    const disk = samples
-      .filter((s) => s.diskUsedMb != null)
-      .map((s) => ({ t: new Date(s.at).getTime(), used: s.diskUsedMb! }))
-    return { cpu, ram, disk }
-  }, [samples])
+type Row = {
+  key: string
+  name: string
+  value: number
+  max: number
+  display: string
+  points: Array<number | null>
+  warnAt: number
+}
+
+function MetricRow({ row, expanded }: { row: Row; expanded: boolean }) {
+  const ratio = row.max > 0 ? Math.min(1, row.value / row.max) : 0
+  const warn = ratio >= row.warnAt
+  const colour = warn ? 'var(--color-warn)' : 'var(--color-signal)'
+
+  return (
+    <div className="grid grid-cols-[3rem_1fr_auto] items-center gap-x-3 gap-y-1.5 sm:grid-cols-[3rem_1fr_auto_auto]">
+      <span className="font-mono text-[10.5px] uppercase tracking-[0.1em] text-[var(--color-fg-dim)]">
+        {row.name}
+      </span>
+
+      <span className="h-[4px] w-full min-w-0 rounded-[2px] bg-[var(--color-line)]">
+        <span
+          className="block h-full rounded-[2px] transition-[width] duration-700"
+          style={{ width: `${ratio * 100}%`, background: colour }}
+        />
+      </span>
+
+      {/* tabular-nums so the numbers line up down the column as they change */}
+      <span
+        className="whitespace-nowrap text-right font-mono text-[11px] tabular-nums"
+        style={{ color: warn ? 'var(--color-warn)' : 'var(--color-fg-muted)' }}
+      >
+        {row.display}
+      </span>
+
+      {/* Its own column, and hidden on narrow screens rather than allowed to
+          squeeze into the value. */}
+      <span className="hidden sm:block">
+        <Sparkline
+          points={row.points}
+          max={row.max}
+          width={expanded ? 150 : 72}
+          height={expanded ? 34 : 20}
+          tone={warn ? 'warn' : 'signal'}
+          label={`${row.name} over the last hour, now ${row.display}`}
+        />
+      </span>
+    </div>
+  )
+}
+
+export default function NodeTelemetry({ node, fleetId }: { node: Node; fleetId?: string }) {
+  const [expanded, setExpanded] = useState(false)
+  const { samples } = useSamples(fleetId, node.id, expanded ? 360 : 60)
+  const t = node.telemetry
 
   const beats = useMemo(() => beatsFrom(samples), [samples])
-  const t = node.telemetry
 
   /**
    * Capacity, not free space.
    *
-   * node.diskMb is FREE disk — it is what the scheduler places against. This
-   * panel rendered "used / diskMb" as though it were the total, which is why a
-   * node with more used than free showed an impossible reading like
-   * "395.7 GB / 68.6 GB". Newer agents report the real total; for older ones,
-   * used + free is exactly the total anyway.
+   * node.diskMb is FREE disk — what the scheduler places against. Rendering
+   * "used / diskMb" as though it were the total is how a node showed an
+   * impossible "395.7 GB / 68.6 GB". Newer agents send the real total; for
+   * older ones, used + free is exactly that.
    */
   const diskTotal =
     t?.diskTotalMb ?? (t?.diskUsedMb != null && node.diskMb ? t.diskUsedMb + node.diskMb : 0)
 
-  const projection = useMemo(
-    () => (diskTotal ? projectFull(series.disk, diskTotal) : null),
-    [series.disk, diskTotal]
-  )
+  const rows: Row[] = useMemo(() => {
+    if (!t) return []
+    const out: Row[] = [
+      {
+        key: 'cpu',
+        name: 'cpu',
+        value: t.cpuPct,
+        max: 100,
+        display: `${Math.round(t.cpuPct)}%`,
+        points: samples.map((s) => s.cpuPct),
+        warnAt: 0.8,
+      },
+      {
+        key: 'ram',
+        name: 'ram',
+        value: t.ramUsedMb ?? 0,
+        max: node.ramMb,
+        display: `${mb(t.ramUsedMb ?? 0)} / ${mb(node.ramMb)}`,
+        points: samples.map((s) => s.ramUsedMb),
+        warnAt: 0.85,
+      },
+    ]
+    if (diskTotal > 0) {
+      out.push({
+        key: 'disk',
+        name: 'disk',
+        value: t.diskUsedMb || 0,
+        max: diskTotal,
+        display: `${mb(t.diskUsedMb || 0)} / ${mb(diskTotal)}`,
+        points: samples.map((s) => s.diskUsedMb),
+        warnAt: 0.9,
+      })
+    }
+    return out
+  }, [t, samples, node.ramMb, diskTotal])
 
-  /* An offline node is not a node with nothing to say. It has history, and
-     where the line stopped is how you tell "died under load" from "lid closed". */
+  const projection = useMemo(() => {
+    const disk = samples
+      .filter((s) => s.diskUsedMb != null)
+      .map((s) => ({ t: new Date(s.at).getTime(), used: s.diskUsedMb! }))
+    return diskTotal ? projectFull(disk, diskTotal) : null
+  }, [samples, diskTotal])
+
+  const recorded = beats.filter((b) => b !== 'nodata')
+  const okBeats = recorded.filter((b) => b === 'ok').length
+
+  /* An offline node still has history. Where the line stopped is how you tell
+     "died under load" from "someone closed the lid". */
   if (!t) {
-    const hasHistory = series.cpu.length > 1
+    const hasHistory = samples.filter((s) => s.cpuPct != null).length > 1
     return (
-      <div className="mt-4 rounded-[3px] border border-[var(--color-line)] bg-[var(--color-ink-900)] p-3.5">
+      <div className="mt-4 rounded-[3px] border border-[var(--color-line)] bg-[var(--color-ink-900)] p-4">
         <p className="font-mono text-[11px] text-[var(--color-fg-dim)]">
           No live telemetry — node last heartbeated {since(node.lastHeartbeatAt)}.
         </p>
         {hasHistory && (
-          <div className="mt-3 space-y-2 border-t border-[var(--color-line)] pt-3">
-            <div className="mono-label text-[9px] text-[var(--color-fg-dim)]">
-              LAST SEEN DOING
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <span className="font-mono text-[11px] text-[var(--color-fg-dim)]">cpu</span>
-              <Sparkline points={series.cpu} max={100} frozen label="CPU before it stopped" />
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <span className="font-mono text-[11px] text-[var(--color-fg-dim)]">memory</span>
-              <Sparkline points={series.ram} max={node.ramMb} frozen label="Memory before it stopped" />
-            </div>
+          <div className="mt-3.5 space-y-2.5 border-t border-[var(--color-line)] pt-3.5">
+            <div className="mono-label text-[9px] text-[var(--color-fg-dim)]">LAST SEEN DOING</div>
+            {(
+              [
+                ['cpu', samples.map((s) => s.cpuPct), 100],
+                ['ram', samples.map((s) => s.ramUsedMb), node.ramMb],
+              ] as const
+            ).map(([name, pts, max]) => (
+              <div key={name} className="grid grid-cols-[3rem_1fr] items-center gap-3">
+                <span className="font-mono text-[10.5px] uppercase tracking-[0.1em] text-[var(--color-fg-dim)]">
+                  {name}
+                </span>
+                <Sparkline points={pts} max={max} width={150} height={24} frozen label={`${name} before it stopped`} />
+              </div>
+            ))}
           </div>
         )}
       </div>
     )
   }
 
-  const ramUsed = t.ramUsedMb ?? 0
-
   return (
-    <div className="mt-4 rounded-[3px] border border-[var(--color-line)] bg-[var(--color-ink-900)] p-3.5">
-      <div className="space-y-2.5">
-        <div className="flex items-center gap-3">
-          <div className="min-w-0 flex-1">
-            <Meter value={t.cpuPct} max={100} label={`CPU ${Math.round(t.cpuPct)}%`} warnAt={0.8} />
-          </div>
-          <Sparkline
-            points={series.cpu}
-            max={100}
-            tone={t.cpuPct > 80 ? 'warn' : 'signal'}
-            label={`CPU over the last hour, now ${Math.round(t.cpuPct)}%`}
-          />
-        </div>
-
-        <div className="flex items-center gap-3">
-          <div className="min-w-0 flex-1">
-            <Meter
-              value={ramUsed}
-              max={node.ramMb}
-              label={`RAM ${mb(ramUsed)} / ${mb(node.ramMb)}`}
-              warnAt={0.85}
-            />
-          </div>
-          <Sparkline
-            points={series.ram}
-            max={node.ramMb}
-            tone={ramUsed / node.ramMb > 0.85 ? 'warn' : 'signal'}
-            label={`Memory over the last hour, now ${mb(ramUsed)}`}
-          />
-        </div>
-
-        {diskTotal > 0 && (
-          <div className="flex items-center gap-3">
-            <div className="min-w-0 flex-1">
-              <Meter
-                value={t.diskUsedMb || 0}
-                max={diskTotal}
-                label={`Disk ${mb(t.diskUsedMb || 0)} / ${mb(diskTotal)}`}
-                warnAt={0.9}
-              />
-            </div>
-            <Sparkline
-              points={samples.map((s) => s.diskUsedMb)}
-              max={diskTotal}
-              tone={(t.diskUsedMb || 0) / diskTotal > 0.9 ? 'warn' : 'signal'}
-              label="Disk over the last hour"
-            />
-          </div>
-        )}
+    <div className="mt-4 rounded-[3px] border border-[var(--color-line)] bg-[var(--color-ink-900)]">
+      <div className="space-y-3 p-4">
+        {rows.map((r) => (
+          <MetricRow key={r.key} row={r} expanded={expanded} />
+        ))}
       </div>
 
-      {/* "Full in nine days" is the sentence someone acts on. A percentage is
-          not. Absent unless the trend is real, because an invented date is
-          worse than none. */}
       {projection && (
         <p
-          className="mt-3 font-mono text-[10.5px]"
+          className="px-4 pb-3 font-mono text-[10.5px]"
           style={{ color: projection.days < 14 ? 'var(--color-warn)' : 'var(--color-fg-dim)' }}
         >
-          at this rate, disk is full in {projection.days < 1 ? 'under a day' : `${Math.round(projection.days)} days`}
+          at this rate, disk is full in{' '}
+          {projection.days < 1 ? 'under a day' : `${Math.round(projection.days)} days`}
         </p>
       )}
 
       {beats.length > 0 && (
-        <div className="mt-3 flex items-center gap-3 border-t border-[var(--color-line)] pt-3">
+        <div className="flex items-center gap-3 border-t border-[var(--color-line)] px-4 py-3">
           <span className="mono-label shrink-0 text-[9px] text-[var(--color-fg-dim)]">
-            LAST HOUR
+            {expanded ? 'LAST 6H' : 'LAST HOUR'}
           </span>
-          <HeartbeatStrip
-            beats={beats}
-            label={`${beats.filter(Boolean).length} of ${beats.length} intervals reported`}
-          />
-          <span className="ml-auto shrink-0 font-mono text-[10px] tabular-nums text-[var(--color-fg-dim)]">
-            {beats.filter(Boolean).length}/{beats.length}
+          <HeartbeatStrip beats={beats} />
+          <span className="shrink-0 font-mono text-[10px] tabular-nums text-[var(--color-fg-dim)]">
+            {recorded.length ? `${okBeats}/${recorded.length}` : 'no history yet'}
           </span>
         </div>
       )}
+
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+        className="w-full border-t border-[var(--color-line)] px-4 py-2 text-left font-mono text-[10.5px] text-[var(--color-fg-dim)] transition-colors duration-300 hover:bg-[var(--color-ink-800)] hover:text-[var(--color-fg-muted)]"
+      >
+        {expanded ? '− less' : '+ six hours, larger charts'}
+      </button>
     </div>
   )
 }

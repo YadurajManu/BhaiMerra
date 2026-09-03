@@ -76,7 +76,12 @@ describe('recording', () => {
   test('floors to ten seconds, so two beats a moment apart are one point', async () => {
     // Heartbeats do not arrive on a tidy cadence. Without flooring, two beats
     // milliseconds apart become two rows that a chart draws as a spike.
-    const base = Date.now()
+    //
+    // Floored to the bucket boundary on purpose. Starting from Date.now() makes
+    // this pass or fail on where in the ten-second window the clock happens to
+    // be — base at :09.5 puts base+1200ms in the *next* bucket, and two rows is
+    // then the correct answer. That is a flaky test, not a caught bug.
+    const base = Math.floor(Date.now() / 10_000) * 10_000
     await recordSamples(ctx, [sample(new Date(base))])
     await recordSamples(ctx, [sample(new Date(base + 1200), { cpuPct: 90 })])
 
@@ -124,7 +129,10 @@ describe('choosing a grain', () => {
 
 describe('compaction', () => {
   test('rolls fine samples into minutes and deletes what it consumed', async () => {
-    const old = Date.now() - RETAIN_MS.fine - 5 * MIN
+    // Pinned to a minute boundary: samples at +10s and +20s must land in the
+    // same minute bucket, and an unfloored start puts them in two whenever it
+    // falls in the last twenty seconds of a minute.
+    const old = Math.floor((Date.now() - RETAIN_MS.fine - 5 * MIN) / MIN) * MIN
     await recordSamples(ctx, [
       { ...sample(new Date(old), { cpuPct: 10 }) },
       { ...sample(new Date(old + 10_000), { cpuPct: 30 }) },
@@ -150,7 +158,10 @@ describe('compaction', () => {
   test('disk takes the last value rather than the mean', async () => {
     // Disk is a level, not a rate. Averaging an hour of it understates how full
     // the disk is right now, which is the number someone acts on.
-    const old = Date.now() - RETAIN_MS.fine - 5 * MIN
+    // Pinned to a minute boundary: samples at +10s and +20s must land in the
+    // same minute bucket, and an unfloored start puts them in two whenever it
+    // falls in the last twenty seconds of a minute.
+    const old = Math.floor((Date.now() - RETAIN_MS.fine - 5 * MIN) / MIN) * MIN
     await recordSamples(ctx, [
       { ...sample(new Date(old), { diskUsedMb: 1000 }) },
       { ...sample(new Date(old + 10_000), { diskUsedMb: 9000 }) },
@@ -180,7 +191,10 @@ describe('compaction', () => {
   })
 
   test('is safe to run twice', async () => {
-    const old = Date.now() - RETAIN_MS.fine - 5 * MIN
+    // Pinned to a minute boundary: samples at +10s and +20s must land in the
+    // same minute bucket, and an unfloored start puts them in two whenever it
+    // falls in the last twenty seconds of a minute.
+    const old = Math.floor((Date.now() - RETAIN_MS.fine - 5 * MIN) / MIN) * MIN
     await recordSamples(ctx, [sample(new Date(old))])
     await compactSamples(ctx)
     await compactSamples(ctx)

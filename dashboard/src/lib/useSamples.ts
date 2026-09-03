@@ -62,23 +62,33 @@ export function useSamples(fleetId: string | undefined, nodeId: string, sinceMin
   return { data, error, samples: data?.samples ?? [] }
 }
 
+/** What one interval of the heartbeat strip means. */
+export type Beat = 'ok' | 'missed' | 'nodata'
+
 /**
- * Turn samples into the presence/absence strip the heartbeat display draws.
+ * Turn samples into the strip the heartbeat display draws.
  *
- * A sample exists for every interval the node reported, so a gap in the series
- * is a gap in the beats. Bucketing by expected interval rather than counting
- * rows is what makes a two-minute outage read as two minutes rather than as one
- * missing point.
+ * Three states, not two. Before the first sample ever recorded there is no
+ * evidence either way — the control plane was not collecting yet — and drawing
+ * that as a missed beat is a lie that makes a healthy node look like it has
+ * been failing for an hour. Only the span between the first and last sample can
+ * contain a real gap.
  */
-export function beatsFrom(samples: NodeSample[], buckets = 40, windowMs = 60 * 60_000): boolean[] {
+export function beatsFrom(samples: NodeSample[], buckets = 40, windowMs = 60 * 60_000): Beat[] {
   if (!samples.length) return []
+
   const now = Date.now()
   const size = windowMs / buckets
-  const seen = new Set<number>()
-  for (const s of samples) {
-    const age = now - new Date(s.at).getTime()
-    if (age < 0 || age > windowMs) continue
-    seen.add(Math.floor((windowMs - age) / size))
-  }
-  return Array.from({ length: buckets }, (_, i) => seen.has(i))
+  const bucketOf = (t: number) => Math.floor((windowMs - (now - t)) / size)
+
+  const times = samples.map((s) => new Date(s.at).getTime()).filter((t) => now - t <= windowMs)
+  if (!times.length) return []
+
+  const first = bucketOf(Math.min(...times))
+  const seen = new Set(times.map(bucketOf))
+
+  return Array.from({ length: buckets }, (_, i) => {
+    if (i < first) return 'nodata'
+    return seen.has(i) ? 'ok' : 'missed'
+  })
 }

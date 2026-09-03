@@ -166,30 +166,34 @@ export function HeartbeatStrip({
   height = 16,
   label,
 }: {
-  beats: boolean[]
+  beats: Array<'ok' | 'missed' | 'nodata'>
   height?: number
   label?: string
 }) {
   if (!beats.length) return null
-  const missed = beats.filter((b) => !b).length
+  const recorded = beats.filter((b) => b !== 'nodata')
+  const ok = recorded.filter((b) => b === 'ok').length
 
   return (
     <div
-      className="flex items-end gap-[2px]"
+      className="flex flex-1 items-end gap-[2px]"
       style={{ height }}
       role="img"
-      aria-label={label ?? `${beats.length - missed} of ${beats.length} heartbeats received`}
-      title={`${beats.length - missed}/${beats.length} received`}
+      aria-label={label ?? `${ok} of ${recorded.length} recorded intervals reported`}
     >
-      {beats.map((ok, i) => (
+      {beats.map((b, i) => (
         <span
           key={i}
-          className="w-[3px] rounded-[1px] transition-opacity duration-300"
-          style={{
-            height: ok ? height : Math.round(height * 0.55),
-            background: ok ? 'var(--color-signal)' : 'var(--color-down)',
-            opacity: ok ? 0.55 + (i / beats.length) * 0.45 : 1,
-          }}
+          className="min-w-[2px] flex-1 rounded-[1px]"
+          style={
+            b === 'nodata'
+              ? // Not a missed beat — nothing was being recorded yet. A faint
+                // baseline says "no evidence" without crying wolf.
+                { height: 2, background: 'var(--color-line-2)' }
+              : b === 'ok'
+                ? { height, background: 'var(--color-signal)', opacity: 0.85 }
+                : { height: Math.round(height * 0.6), background: 'var(--color-down)' }
+          }
         />
       ))}
     </div>
