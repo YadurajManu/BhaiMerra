@@ -117,11 +117,35 @@ export async function request<T = any>(
 export async function requireFleet(explicit?: string): Promise<string> {
   if (explicit) return explicit
   const profile = await loadProfile()
-  if (profile.fleetId) return profile.fleetId
+
+  // A cached id is a hint, not a fact. It survives the fleet being deleted, the
+  // control plane being rebuilt, and signing in as somebody else — and the
+  // failure was a bare "Fleet not found" on every command, which names neither
+  // the cache nor the way out. Verify it, and fall through when it is stale.
+  if (profile.fleetId) {
+    try {
+      await request('GET', `/fleets/${profile.fleetId}`)
+      return profile.fleetId
+    } catch (err) {
+      if (!(err instanceof CliError) || err.exitCode !== EXIT.failure) throw err
+      await saveProfile({ ...profile, fleetId: undefined, fleetName: undefined })
+    }
+  }
 
   const { body } = await request<{ fleets: Array<{ id: string; name: string }> }>('GET', '/fleets')
-  if (body.fleets.length === 1) return body.fleets[0]!.id
-  if (!body.fleets.length) throw new CliError('You have no fleets yet.', EXIT.usage)
+  if (body.fleets.length === 1) {
+    // Remember it, so the next command does not pay for this lookup again.
+    await saveProfile({ ...profile, fleetId: body.fleets[0]!.id, fleetName: body.fleets[0]!.name })
+    return body.fleets[0]!.id
+  }
+  if (!body.fleets.length) {
+    throw new CliError(
+      'This account owns no fleets on ' + (profile.api ?? 'this control plane') + '.\n' +
+        '  If you expected one, you may be signed in as the wrong account — check with `fleet auth whoami`,\n' +
+        '  or create a fleet in the dashboard and run `fleet use <name>`.',
+      EXIT.usage
+    )
+  }
   throw new CliError(
     `You are in several fleets. Pass --fleet <id> or run \`fleet use <name>\`:\n` +
       body.fleets.map((f) => `  ${f.name}  ${f.id}`).join('\n'),
