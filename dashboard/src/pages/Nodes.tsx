@@ -4,6 +4,7 @@ import { api, type Node } from '../lib/api'
 import { useAuth, usePoll } from '../lib/auth'
 import { mb, since, pct, toneOf } from '../lib/format'
 import { Button, ConfirmDialog, Dot, Empty, ErrorNote, Meter, Panel, StatusPill } from '../components/ui'
+import NodeTelemetry from '../components/NodeTelemetry'
 
 type FilterOption = 'ALL' | 'ONLINE' | 'OFFLINE' | 'CORDONED' | 'DARWIN' | 'LINUX' | 'WINDOWS'
 type PlatformTab = 'unix' | 'windows' | 'cli'
@@ -475,37 +476,10 @@ export default function Nodes() {
                     </div>
                   </div>
 
-                  {/* ── Telemetry Gauges ──────────────────────────── */}
-                  <div className="mt-4 rounded-[3px] border border-[var(--color-line)] bg-[var(--color-ink-900)] p-3.5">
-                    {n.telemetry ? (
-                      <div className="space-y-2.5">
-                        <Meter
-                          value={n.telemetry.cpuPct}
-                          max={100}
-                          label={`CPU ${Math.round(n.telemetry.cpuPct)}%`}
-                          warnAt={0.8}
-                        />
-                        <Meter
-                          value={ramUsed}
-                          max={n.ramMb}
-                          label={`RAM ${mb(ramUsed)} / ${mb(n.ramMb)}`}
-                          warnAt={0.85}
-                        />
-                        {n.diskMb > 0 && (
-                          <Meter
-                            value={n.telemetry.diskUsedMb || 0}
-                            max={n.diskMb}
-                            label={`Disk ${mb(n.telemetry.diskUsedMb || 0)} / ${mb(n.diskMb)}`}
-                            warnAt={0.9}
-                          />
-                        )}
-                      </div>
-                    ) : (
-                      <p className="font-mono text-[11px] text-[var(--color-fg-dim)]">
-                        No live telemetry — node last heartbeated {since(n.lastHeartbeatAt)}.
-                      </p>
-                    )}
-                  </div>
+                  {/* Live numbers with the hour behind them. Extracted
+                      because each card fetches its own history, and a hook
+                      cannot be called inside a map body. */}
+                  <NodeTelemetry node={n} fleetId={fleet?.id} />
 
                   {/* ── Workloads Section ─────────────────────────── */}
                   <div className="mt-3.5">

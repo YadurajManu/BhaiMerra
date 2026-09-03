@@ -105,6 +105,10 @@ export async function fleetRoutes(app: FastifyInstance) {
                   cpuPct: hb.cpuPct,
                   ramUsedMb: hb.ramUsedMb,
                   diskUsedMb: hb.diskUsedMb,
+                  // Capacity. node.diskMb is FREE space and is what the
+                  // scheduler places against, so it is not the denominator
+                  // for a "used of total" reading.
+                  diskTotalMb: hb.diskTotalMb ?? null,
                   containers: hb.containers,
                   meshConnected: hb.meshConnected,
                   runtime: hb.runtime ?? { dockerAvailable: false, registryStatus: 'not_tested' },

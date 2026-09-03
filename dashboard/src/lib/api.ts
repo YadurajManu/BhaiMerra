@@ -138,6 +138,8 @@ export type Node = {
     cpuPct: number
     ramUsedMb: number
     diskUsedMb: number
+    /** Capacity. Null from agents that predate the field. */
+    diskTotalMb: number | null
     meshConnected: boolean
     ageMs: number
     containers: Array<{ name: string; state: string; health?: string }>
