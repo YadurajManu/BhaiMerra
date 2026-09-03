@@ -160,15 +160,28 @@ elif [ "$os" = linux ]; then
     step "runtime setup"
     info "docker was not found — installing Docker automatically..."
     if [ -n "$fetch" ]; then
-      $fetch https://get.docker.com | $SUDO sh 2>/dev/null || {
+      # Docker's own script, which knows the repo layout for Ubuntu, Debian,
+      # Fedora, CentOS, RHEL and Raspberry Pi OS. Its stderr is kept: when this
+      # fails, the reason is the only thing that shortens the next hour, and
+      # discarding it left a silent fall through to a different Docker.
+      if ! $fetch https://get.docker.com | $SUDO sh; then
+        warn "get.docker.com failed (see above) — falling back to the distro package"
+        # A deliberately different Docker. Ubuntu's docker.io in particular
+        # lags well behind, so say which one is being installed rather than
+        # leaving a fleet running two versions nobody chose between.
         if have apt-get; then
+          info "installing docker.io from apt — older than Docker's own build"
           $SUDO apt-get update -y && $SUDO apt-get install -y docker.io
         elif have yum; then
+          info "installing docker from yum"
           $SUDO yum install -y docker
         elif have dnf; then
+          info "installing docker from dnf"
           $SUDO dnf install -y docker
+        else
+          warn "no supported package manager found — install Docker yourself, then re-run"
         fi
-      }
+      fi
     fi
   fi
 
@@ -180,8 +193,19 @@ elif [ "$os" = linux ]; then
     $SUDO service docker start 2>/dev/null || true
   fi
 
-  if have docker; then
+  # `have docker` only asks whether a binary is on PATH. A daemon that failed
+  # to start - the usual outcome in LXC, in a container, or on a box with no
+  # init - leaves the binary sitting there and every deploy failing, so the
+  # reassuring version of this message was the wrong one to print. Ask the
+  # daemon, the way the WSL branch above already does.
+  # Unprivileged first: a user in the docker group needs no sudo, and reaching
+  # for it would prompt for a password to answer a question already answered.
+  if have docker && { docker info >/dev/null 2>&1 || $SUDO docker info >/dev/null 2>&1; }; then
     info "docker container runtime is active"
+  elif have docker; then
+    warn "docker is installed but its daemon is not responding"
+    printf "     ${DIM}the node will pair and report; workloads wait until the daemon starts.${RESET_C}\n"
+    printf "     ${DIM}try: ${CYAN}sudo systemctl status docker${RESET_C}\n"
   else
     warn "docker not found on PATH — workloads will wait until docker is installed"
   fi
