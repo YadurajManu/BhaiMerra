@@ -421,7 +421,7 @@ export default function Nodes() {
             return (
               <div
                 key={n.id}
-                className="panel flex flex-col justify-between rounded-[4px] bg-[var(--color-ink-950)] p-5 transition-all duration-200 hover:border-[var(--color-line-2)]"
+                className="panel group relative flex flex-col justify-between rounded-[4px] bg-[var(--color-ink-950)] p-5 transition-all duration-200 hover:border-[var(--color-line-2)] has-[a:focus-visible]:border-[var(--color-signal)]"
                 style={
                   !isOnline
                     ? { background: 'color-mix(in oklab, var(--color-down) 3%, var(--color-ink-950))' }
@@ -436,14 +436,20 @@ export default function Nodes() {
                         <span className="text-[14px]" title={osInfo.name}>
                           {osInfo.icon}
                         </span>
-                        {/* The name is the way in. A whole-card link would
-                            swallow Cordon and Remove, which sit inside it. */}
+                        {/* The whole card is the way in, via a pseudo-element
+                            stretched over it from this one link. A card-sized
+                            <Link> wrapping everything would swallow Cordon,
+                            Remove and the container links; this leaves one
+                            real link for a screen reader and keyboard, and the
+                            controls sit above it on z-10. Only the name was
+                            clickable before, which nobody guesses from a card
+                            that highlights on hover. */}
                         <Link
                           to={`/nodes/${n.id}`}
-                          className="group/name font-mono text-[15px] font-semibold text-[var(--color-fg)] transition-colors duration-300 hover:text-[var(--color-signal)]"
+                          className="font-mono text-[15px] font-semibold text-[var(--color-fg)] transition-colors duration-300 after:absolute after:inset-0 after:content-[''] hover:text-[var(--color-signal)] group-hover:text-[var(--color-signal)]"
                         >
                           {n.name}
-                          <span className="ml-1.5 inline-block text-[11px] text-[var(--color-fg-dim)] opacity-0 transition-opacity duration-300 group-hover/name:opacity-100">
+                          <span className="ml-1.5 inline-block text-[11px] text-[var(--color-fg-dim)] opacity-0 transition-opacity duration-300 group-hover:opacity-100">
                             →
                           </span>
                         </Link>
@@ -494,7 +500,12 @@ export default function Nodes() {
                   {/* Live numbers with the hour behind them. Extracted
                       because each card fetches its own history, and a hook
                       cannot be called inside a map body. */}
-                  <NodeTelemetry node={n} fleetId={fleet?.id} />
+                  {/* Above the stretched link: this block owns the expand
+                      toggle, which must stay a toggle rather than becoming
+                      one more place that navigates away. */}
+                  <div className="relative z-10">
+                    <NodeTelemetry node={n} fleetId={fleet?.id} />
+                  </div>
 
                   {/* ── Workloads Section ─────────────────────────── */}
                   <div className="mt-3.5">
@@ -502,7 +513,7 @@ export default function Nodes() {
                       ACTIVE WORKLOADS ({(n.telemetry?.containers ?? []).length})
                     </div>
                     {(n.telemetry?.containers ?? []).length > 0 ? (
-                      <div className="flex flex-wrap gap-1.5">
+                      <div className="relative z-10 flex flex-wrap gap-1.5">
                         {n.telemetry?.containers.map((c) => (
                           <Link
                             key={c.name}
@@ -566,7 +577,7 @@ export default function Nodes() {
                 </div>
 
                 {/* ── Action Bar Footer ──────────────────────────── */}
-                <div className="mt-4 flex items-center justify-between border-t border-[var(--color-line)] pt-3">
+                <div className="relative z-10 mt-4 flex items-center justify-between border-t border-[var(--color-line)] pt-3">
                   <span className="font-mono text-[10px] text-[var(--color-fg-dim)]">
                     Agent {n.agentVersion ? `v${n.agentVersion}` : 'v0.1.0'}
                   </span>
