@@ -103,3 +103,45 @@ export function beatsFrom(samples: NodeSample[], buckets = 40, windowMs = 60 * 6
     return seen.has(i) ? 'ok' : 'missed'
   })
 }
+
+/**
+ * The same strip, for whether Docker was answering.
+ *
+ * A node can report faithfully every five seconds while its Docker daemon is
+ * dead, and the heartbeat strip would show an unbroken run of green. That is
+ * the state where nothing can be deployed and everything looks fine.
+ *
+ * A bucket is only 'ok' when every sample in it said so: one failure inside a
+ * bucket is the thing worth seeing, and averaging it away defeats the point.
+ * Agents too old to report it send null, which stays 'nodata' rather than
+ * becoming a claim in either direction.
+ */
+export function dockerBeatsFrom(
+  samples: NodeSample[],
+  buckets = 40,
+  windowMs = 60 * 60_000
+): Beat[] {
+  if (!samples.length) return []
+
+  const now = Date.now()
+  const size = windowMs / buckets
+  const bucketOf = (t: number) => Math.floor((windowMs - (now - t)) / size)
+
+  const states = new Map<number, boolean>()
+  let earliest = Infinity
+
+  for (const s of samples) {
+    if (s.dockerOk == null) continue
+    const t = new Date(s.at).getTime()
+    if (now - t > windowMs) continue
+    const b = bucketOf(t)
+    earliest = Math.min(earliest, b)
+    states.set(b, (states.get(b) ?? true) && s.dockerOk)
+  }
+  if (!states.size) return []
+
+  return Array.from({ length: buckets }, (_, i) => {
+    if (i < earliest || !states.has(i)) return 'nodata'
+    return states.get(i) ? 'ok' : 'missed'
+  })
+}

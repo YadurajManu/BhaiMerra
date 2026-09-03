@@ -6,7 +6,7 @@ import { mb, since } from '../lib/format'
 import { Dot, ErrorNote, Panel, StatusPill } from '../components/ui'
 import TimeSeriesChart, { type ChartSeries, type Marker } from '../components/TimeSeriesChart'
 import { HeartbeatStrip, projectFull } from '../components/viz'
-import { beatsFrom, type NodeSample } from '../lib/useSamples'
+import { beatsFrom, dockerBeatsFrom, type NodeSample } from '../lib/useSamples'
 
 /**
  * Everything known about one machine.
@@ -176,6 +176,8 @@ export default function NodeDetail() {
   const beatWindowMs = zoom ? Math.max(zoom.to - zoom.from, 60_000) : range.minutes * 60_000
   const beats = useMemo(() => beatsFrom(samples, 60, beatWindowMs), [samples, beatWindowMs])
   const recorded = beats.filter((b) => b !== 'nodata')
+  const dockerBeats = useMemo(() => dockerBeatsFrom(samples, 60, beatWindowMs), [samples, beatWindowMs])
+  const dockerRecorded = dockerBeats.filter((b) => b !== 'nodata')
   const uptime = recorded.length ? (recorded.filter((b) => b === 'ok').length / recorded.length) * 100 : null
 
   /* Only true when a node has actually reported one. An agent too old to send
@@ -183,6 +185,23 @@ export default function NodeDetail() {
   const hasNet = samples.some((s) => s.netRxKbps != null || s.netTxKbps != null)
   const hasTemp = samples.some((s) => s.tempC != null)
   const hasLoad = samples.some((s) => s.load1 != null)
+  const hasDisk = samples.some((s) => s.diskUsedMb != null)
+  const hasSwap = samples.some((s) => s.swapUsedMb != null)
+  const hasContainers = samples.some((s) => s.containers != null)
+  const hasDocker = samples.some((s) => s.dockerOk != null)
+
+  /* Which metrics this agent never sends, named once rather than as a grid of
+     empty boxes. Four charts beside three "agent upgrade required" panels
+     looks like something is broken; a single line saying what is missing and
+     how to get it does not. */
+  const missing = [
+    !hasNet && 'network',
+    !hasSwap && 'swap',
+    !hasTemp && 'temperature',
+    !hasLoad && 'load',
+  ].filter(Boolean) as string[]
+
+  const diskCeiling = samples.reduce((m, s) => Math.max(m, s.diskTotalMb ?? 0), 0) || diskTotal
 
   const charts: ChartDef[] = useMemo(() => {
     if (!node) return []
@@ -229,6 +248,29 @@ export default function NodeDetail() {
         ],
       })
     }
+    if (hasDisk) {
+      list.push({
+        key: 'disk',
+        title: 'disk',
+        // Capacity as the ceiling, so the line reads as a share of full rather
+        // than a number that happens to be large. The card projects a date the
+        // disk runs out; this is the evidence that projection comes from, and
+        // it is the metric most likely to actually stop a node.
+        ceiling: diskCeiling || undefined,
+        format: (v) => mb(v),
+        emptyHint: 'No disk history in this window yet.',
+        series: [{ label: 'used', colour: SERIES.disk, avg: pt((s) => s.diskUsedMb) }],
+      })
+    }
+    if (hasSwap) {
+      list.push({
+        key: 'swap',
+        title: 'swap',
+        note: 'rising swap is the warning before memory runs out',
+        format: (v) => mb(v),
+        series: [{ label: 'swap', colour: SERIES.netTx, avg: pt((s) => s.swapUsedMb) }],
+      })
+    }
     if (hasLoad || hasTemp) {
       list.push({
         key: 'load',
@@ -240,8 +282,17 @@ export default function NodeDetail() {
         ],
       })
     }
+    if (hasContainers) {
+      list.push({
+        key: 'containers',
+        title: 'containers',
+        format: (v) => String(Math.round(v)),
+        emptyHint: 'No container history in this window yet.',
+        series: [{ label: 'running', colour: SERIES.ram, avg: pt((s) => s.containers) }],
+      })
+    }
     return list
-  }, [node, pt, hasNet, hasLoad, hasTemp])
+  }, [node, pt, hasNet, hasLoad, hasTemp, hasDisk, hasSwap, hasContainers, diskCeiling])
 
   const expandedIndex = charts.findIndex((c) => c.key === expanded)
   const step = useCallback(
@@ -410,48 +461,73 @@ export default function NodeDetail() {
         />
       </div>
 
-      {/* charts, all on the same time axis and the same crosshair */}
-      {charts.map((c) => (
-        <Panel
-          key={c.key}
-          title={`${c.title} · ${windowLabel}`}
-          right={c.note ? <span className="normal-case">{c.note}</span> : undefined}
-        >
-          <div className="p-4">
-            <TimeSeriesChart
-              {...shared}
-              series={c.series}
-              ceiling={c.ceiling}
-              unit={c.unit}
-              format={c.format}
-              emptyHint={c.emptyHint}
-              onExpand={() => setExpanded(c.key)}
-              expandLabel={`Expand ${c.title}`}
-            />
-          </div>
-        </Panel>
-      ))}
+      {/* Small multiples: every metric on one screen, on one time axis and one
+          crosshair. Full width each, they were 9:1 boxes you had to scroll
+          past one at a time; half width they read better AND fit together.
+          The grid is the glance, and expanding is where a value gets read. */}
+      <div className="grid gap-4 lg:grid-cols-2">
+        {charts.map((c) => (
+          <Panel
+            key={c.key}
+            title={`${c.title} · ${windowLabel}`}
+            right={c.note ? <span className="normal-case">{c.note}</span> : undefined}
+          >
+            <div className="p-4">
+              <TimeSeriesChart
+                {...shared}
+                height={170}
+                series={c.series}
+                ceiling={c.ceiling}
+                unit={c.unit}
+                format={c.format}
+                emptyHint={c.emptyHint}
+                onExpand={() => setExpanded(c.key)}
+                expandLabel={`Expand ${c.title}`}
+              />
+            </div>
+          </Panel>
+        ))}
+      </div>
 
-      {!hasNet && (
-        <Panel
-          title={`network · ${windowLabel}`}
-          right={<span className="normal-case text-[var(--color-warn)]">agent upgrade required</span>}
-        >
-          <p className="p-4 py-8 text-center font-mono text-[11px] leading-relaxed text-[var(--color-fg-dim)]">
-            This node runs agent {node.agentVersion ?? 'v0.1.9'}, which does not report network.
-            <br />
-            Re-run the installer on it to start collecting.
-          </p>
-        </Panel>
+      {missing.length > 0 && (
+        <p className="border-l-2 border-[var(--color-line-2)] py-2 pl-3 font-mono text-[11px] leading-relaxed text-[var(--color-fg-dim)]">
+          This node runs agent {node.agentVersion ? `v${node.agentVersion}` : 'an older build'}, which
+          does not report {missing.join(', ')}. Re-run the installer with{' '}
+          <span className="text-[var(--color-fg-muted)]">--reset</span> to start collecting{' '}
+          {missing.length === 1 ? 'it' : 'them'}.
+        </p>
       )}
 
       {/* reporting history */}
       <Panel title={`reporting · ${windowLabel}`}>
-        <div className="flex items-center gap-3 p-4">
-          <HeartbeatStrip beats={beats} height={20} />
-          <span className="shrink-0 font-mono text-[10.5px] tabular-nums text-[var(--color-fg-dim)]">
-            {recorded.length ? `${recorded.filter((b) => b === 'ok').length}/${recorded.length}` : 'no history'}
-          </span>
+        <div className="space-y-2.5 p-4">
+          <div className="flex items-center gap-3">
+            <span className="mono-label w-[68px] shrink-0 text-[9px] text-[var(--color-fg-dim)]">
+              HEARTBEAT
+            </span>
+            <HeartbeatStrip beats={beats} height={20} />
+            <span className="shrink-0 font-mono text-[10.5px] tabular-nums text-[var(--color-fg-dim)]">
+              {recorded.length ? `${recorded.filter((b) => b === 'ok').length}/${recorded.length}` : 'no history'}
+            </span>
+          </div>
+
+          {/* Not a chart, because it is a yes or no. A node can report
+              faithfully every five seconds with a dead Docker daemon, and the
+              row above would be unbroken green - the state where nothing can
+              be deployed and everything looks fine. */}
+          {hasDocker && (
+            <div className="flex items-center gap-3">
+              <span className="mono-label w-[68px] shrink-0 text-[9px] text-[var(--color-fg-dim)]">
+                DOCKER
+              </span>
+              <HeartbeatStrip beats={dockerBeats} height={20} label="Docker daemon reachability" />
+              <span className="shrink-0 font-mono text-[10.5px] tabular-nums text-[var(--color-fg-dim)]">
+                {dockerRecorded.length
+                  ? `${dockerRecorded.filter((b) => b === 'ok').length}/${dockerRecorded.length}`
+                  : 'no history'}
+              </span>
+            </div>
+          )}
         </div>
       </Panel>
 
