@@ -59,6 +59,10 @@ type Heartbeat struct {
 	CPUPct        float64     `json:"cpu_pct"`
 	RAMUsedMb     int         `json:"ram_used_mb"`
 	DiskUsedMb    int         `json:"disk_used_mb"`
+	// Capacity, not what is left. The capability report's disk_mb is FREE
+	// space and is what the scheduler places against; this is the denominator
+	// a "used of total" reading needs.
+	DiskTotalMb   int         `json:"disk_total_mb"`
 	MeshConnected bool        `json:"mesh_connected"`
 	AgentVersion  string      `json:"agent_version,omitempty"`
 	AdvertiseAddr string      `json:"advertise_addr,omitempty"`

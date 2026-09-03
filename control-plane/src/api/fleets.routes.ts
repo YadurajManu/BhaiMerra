@@ -7,6 +7,7 @@ import { recordAudit } from '../lib/audit.js'
 import { ApiError } from './errors.js'
 import { requireUser, requireFleetPermission, invalidateAgentAuth } from './guards.js'
 import { dispatchEvent } from '../alerting/dispatch.js'
+import { samplesFor, grainFor, RETAIN_MS } from '../heartbeat/samples.js'
 import { rescheduleFromNode } from '../scheduler/reschedule.js'
 import { publicApiOrigin } from './install.routes.js'
 import { FLEET_EVENTS } from '../lib/events.js'
@@ -153,6 +154,36 @@ export async function fleetRoutes(app: FastifyInstance) {
         // does not resolve for them.
         install_command: `curl -fsSL ${publicApiOrigin(req, config)}/install | sh -s -- --token ${token}`,
       })
+    }
+  )
+
+  /**
+   * Telemetry history for one node.
+   *
+   * `since` is a window in minutes rather than a start timestamp, because every
+   * caller wants "the last hour" and none of them want to compute a boundary
+   * that is already stale by the time the request lands. The grain is chosen
+   * from the window and reported back, so a chart knows how far apart its
+   * points are without guessing from their spacing.
+   */
+  app.get(
+    '/fleets/:fleetId/nodes/:nodeId/samples',
+    { preHandler: requireFleetPermission('node.read') },
+    async (req) => {
+      const { nodeId } = req.params as { nodeId: string }
+      const q = z
+        .object({ since: z.coerce.number().int().min(1).max(43_200).default(60) })
+        .safeParse(req.query ?? {})
+      // A bad window is not worth a 422 when the obvious reading is an hour.
+      const minutes = q.success ? q.data.since : 60
+      const sinceMs = minutes * 60_000
+
+      return {
+        grain: grainFor(sinceMs),
+        sinceMinutes: minutes,
+        retention: RETAIN_MS,
+        samples: await samplesFor(app.ctx, nodeId, sinceMs),
+      }
     }
   )
 

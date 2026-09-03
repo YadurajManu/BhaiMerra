@@ -1,15 +1,17 @@
 import {
-  pgTable,
-  uuid,
-  text,
-  integer,
   bigint,
   boolean,
-  timestamp,
-  jsonb,
   index,
-  uniqueIndex,
+  integer,
+  jsonb,
   pgEnum,
+  pgTable,
+  primaryKey,
+  real,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
 } from 'drizzle-orm/pg-core'
 import { relations, sql } from 'drizzle-orm'
 
@@ -420,6 +422,34 @@ export const placementEvents = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index('placement_events_service_idx').on(t.serviceId, t.createdAt)]
+)
+
+/**
+ * Telemetry history, downsampled.
+ *
+ * Heartbeats live in Redis under a TTL so a restart costs a detection cycle
+ * rather than data. That makes every reading an instant with no before, which
+ * is why nothing in the product could show a trend. This is the before.
+ */
+export const nodeSamples = pgTable(
+  'node_samples',
+  {
+    nodeId: uuid('node_id')
+      .notNull()
+      .references(() => nodes.id, { onDelete: 'cascade' }),
+    at: timestamp('at', { withTimezone: true }).notNull(),
+    cpuPct: real('cpu_pct'),
+    ramUsedMb: integer('ram_used_mb'),
+    diskUsedMb: integer('disk_used_mb'),
+    diskTotalMb: integer('disk_total_mb'),
+    containers: integer('containers'),
+    /** 'fine' (10s), 'minute', or 'hour'. Coarser grains outlive finer ones. */
+    grain: text('grain').$type<'fine' | 'minute' | 'hour'>().notNull().default('fine'),
+  },
+  (t) => [
+    primaryKey({ columns: [t.nodeId, t.at, t.grain] }),
+    index('node_samples_node_at_idx').on(t.nodeId, t.grain, t.at),
+  ]
 )
 
 /* ── operations ────────────────────────────────────────────────── */

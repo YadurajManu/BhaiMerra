@@ -43,6 +43,7 @@ func (h *Host) Sample(ctx context.Context) (client.Heartbeat, error) {
 		CPUPct:        loadPercent(),
 		RAMUsedMb:     h.usedRAMMb(),
 		DiskUsedMb:    usedDiskMb("/"),
+		DiskTotalMb:   totalDiskMb("/"),
 		AgentVersion:  h.Version,
 		AdvertiseAddr: capability.AdvertiseAddr(),
 		Containers:    []client.Container{},

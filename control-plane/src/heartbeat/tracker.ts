@@ -6,6 +6,7 @@ export type HeartbeatPayload = {
   cpuPct: number
   ramUsedMb: number
   diskUsedMb: number
+  diskTotalMb?: number
   /**
    * `deployment_id` is what ties a running container back to the row that
    * asked for it. It was already being stored and simply not declared, so

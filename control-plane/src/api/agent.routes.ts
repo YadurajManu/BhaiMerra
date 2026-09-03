@@ -10,6 +10,7 @@ import { pendingForNode, restoresForNode } from '../backup/store.js'
 import { reclaimToNode } from '../scheduler/reclaim.js'
 import { detectDrift } from '../heartbeat/drift.js'
 import { dispatchEvent } from '../alerting/dispatch.js'
+import { recordSamples } from '../heartbeat/samples.js'
 import { buildEnv } from '../secrets/store.js'
 import { invalidateRoutesForService } from '../ingress/routes.js'
 
@@ -32,6 +33,10 @@ const heartbeat = z.object({
   cpu_pct: z.number().min(0).max(100),
   ram_used_mb: z.number().int().min(0),
   disk_used_mb: z.number().int().min(0),
+  // Optional: agents older than this field simply do not send it, and a
+  // required field here would reject every heartbeat from a node that has
+  // not been updated yet.
+  disk_total_mb: z.number().int().min(0).optional(),
   mesh_connected: z.boolean().default(false),
   agent_version: z.string().max(32).optional(),
   advertise_addr: z.string().max(255).optional(),
@@ -217,6 +222,7 @@ export async function agentRoutes(app: FastifyInstance) {
       cpuPct: hb.cpu_pct,
       ramUsedMb: hb.ram_used_mb,
       diskUsedMb: hb.disk_used_mb,
+      diskTotalMb: hb.disk_total_mb,
       containers: hb.containers,
       meshConnected: hb.mesh_connected,
       agentVersion: hb.agent_version,
@@ -231,6 +237,22 @@ export async function agentRoutes(app: FastifyInstance) {
       },
       logs: hb.logs,
     })
+
+    // History, alongside the Redis copy. Redis answers "is it alive right now"
+    // and expires; this answers "what has it been doing" and does not. Failing
+    // to write a sample must never fail the heartbeat: a node that cannot beat
+    // is a node the sweeper will shortly declare down.
+    void recordSamples(app.ctx, [
+      {
+        nodeId,
+        at: new Date(),
+        cpuPct: hb.cpu_pct,
+        ramUsedMb: hb.ram_used_mb,
+        diskUsedMb: hb.disk_used_mb,
+        diskTotalMb: hb.disk_total_mb ?? null,
+        containers: hb.containers.length,
+      },
+    ]).catch((err) => req.log.warn({ err, nodeId }, 'telemetry sample not stored'))
 
     // Promote deployments the agent reports as actually serving. The control
     // plane schedules; only the node can say whether the container came up, so

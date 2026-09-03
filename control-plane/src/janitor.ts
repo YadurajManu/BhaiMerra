@@ -1,4 +1,5 @@
 import { runDueDeletions } from './auth/account-deletion.js'
+import { compactSamples } from './heartbeat/samples.js'
 import { pruneExpiredTokens } from './auth/email-tokens.js'
 import { deletionCompleteEmail } from './email/templates.js'
 import type { AppContext } from './api/context.js'
@@ -31,10 +32,16 @@ export type JanitorResult = {
   accountsDeleted: number
   closureEmailsSent: number
   tokensPruned: number
+  samplesRolledUp: number
 }
 
 export async function runJanitor(ctx: AppContext, log?: Logger): Promise<JanitorResult> {
-  const result: JanitorResult = { accountsDeleted: 0, closureEmailsSent: 0, tokensPruned: 0 }
+  const result: JanitorResult = {
+    accountsDeleted: 0,
+    closureEmailsSent: 0,
+    tokensPruned: 0,
+    samplesRolledUp: 0,
+  }
 
   const deleted = await runDueDeletions(ctx, log)
   result.accountsDeleted = deleted.length
@@ -52,6 +59,11 @@ export async function runJanitor(ctx: AppContext, log?: Logger): Promise<Janitor
       log?.warn({ err }, 'account closed email failed to send')
     }
   }
+
+  // Telemetry compaction. Hourly is the right cadence: fine-grain rows are
+  // retained for an hour, so nothing accumulates beyond one window's worth.
+  const compacted = await compactSamples(ctx, log)
+  result.samplesRolledUp = compacted.toMinute + compacted.toHour
 
   result.tokensPruned = await pruneExpiredTokens(ctx)
   if (result.tokensPruned) log?.info({ pruned: result.tokensPruned }, 'expired auth tokens pruned')
