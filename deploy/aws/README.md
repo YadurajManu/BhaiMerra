@@ -135,6 +135,64 @@ curl -s https://fleet.plastikworld.xyz | grep -oE 'assets/index-[A-Za-z0-9_-]+\.
 The hash changes on every dashboard build. If it did not change, the new code
 is not live no matter what the build log said.
 
+## When the box refuses SSH but keeps serving traffic
+
+The Lightsail browser console shows `UPSTREAM_ERROR [515]`, meaning the
+instance closed the connection. AWS lists three causes: sshd is down, sshd is
+no longer on port 22, or CPU and memory are exhausted.
+
+Check the site before assuming the box is down, because the third cause looks
+nothing like an outage:
+
+```bash
+curl -s https://fleetapi.plastikworld.xyz/healthz
+```
+
+If that returns `"status":"ok"` while SSH refuses you, the box is alive and the
+problem is that nothing *new* can start on it. Resident containers are already
+running and keep answering; forking a login shell needs memory and a writable
+filesystem, and it is not getting one. On this box that is nearly always the
+`docker buildx` cache, which grows with every multi-arch deploy and is never
+pruned.
+
+`scripts/server-doctor.sh` reports all of it and reclaims space with
+`--reclaim`. When the disk is too full to `git pull` it, paste the short
+version into the browser console instead:
+
+```bash
+df -h /; docker system df; free -h
+journalctl -k --since '24 hours ago' | grep -iE 'oom|killed process' | tail
+```
+
+Then, if the cache is the problem:
+
+```bash
+docker buildx prune -af && journalctl --vacuum-size=200M && df -h /
+```
+
+`buildx prune` rather than `system prune -a`: the latter also deletes the
+images the running stack was built from and the registry's own data, which are
+the two things here that are expensive to recreate.
+
+If the filesystem has room and memory is clear, the connection cap is the next
+suspect. Port 22 is reachable from `0.0.0.0/0` on a public address, so it
+takes continuous brute-force traffic, and socket-activated sshd refuses
+everyone once its concurrent-connection cap is saturated — including AWS's own
+relay, which presents as a 515. Scope the port to your own address:
+
+```bash
+aws lightsail put-instance-public-ports --region ap-south-1 \
+  --instance-name fleet-os-control-plane \
+  --port-infos \
+    "fromPort=22,toPort=22,protocol=tcp,cidrs=$(curl -fsS https://checkip.amazonaws.com)/32" \
+    "fromPort=80,toPort=80,protocol=tcp,cidrs=0.0.0.0/0" \
+    "fromPort=443,toPort=443,protocol=tcp,cidrs=0.0.0.0/0"
+```
+
+`put-instance-public-ports` **replaces** the whole rule set rather than adding
+to it, so every port you still want has to appear in that one call. Leaving 80
+and 443 out of it takes the site down.
+
 ## Cost
 
 `large_3_1` is USD 44/month, fixed, including 2.5 TB of transfer. The S3 bucket
