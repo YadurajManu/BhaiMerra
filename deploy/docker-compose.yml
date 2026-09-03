@@ -186,6 +186,10 @@ services:
     depends_on:
       control-plane: { condition: service_healthy }
     command: tunnel --config /etc/cloudflared/config.yml run
+    # sshd runs on the host, not in a container, so the ssh ingress rule needs
+    # a name that resolves to the host from inside this one.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./cloudflare/fleet-os.yml:/etc/cloudflared/config.yml:ro
       - ${TUNNEL_CREDENTIALS:?set TUNNEL_CREDENTIALS in .env}:/etc/cloudflared/credentials.json:ro

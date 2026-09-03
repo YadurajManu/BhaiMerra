@@ -75,6 +75,20 @@ ingress:
       # Image layers are large; a slow uplink must not time out a push.
       connectTimeout: 60s
 
+  # SSH, carried over the tunnel instead of over port 22.
+  #
+  # Campus and corporate networks routinely block outbound 22 by port number,
+  # and the stricter ones refuse every connection to a bare IP address, which
+  # leaves no way in at all - including the Lightsail browser console, which is
+  # only useful if sshd is already running. This route is HTTPS to a hostname,
+  # so it survives both. It must sit above the wildcard: rules match in order
+  # and "*.REPLACE_ZONE" would otherwise answer it.
+  #
+  # host.docker.internal because cloudflared runs in a container and the sshd
+  # it has to reach does not; compose maps that name to the host gateway.
+  - hostname: fleetssh.REPLACE_ZONE
+    service: ssh://host.docker.internal:22
+
   - hostname: "*.REPLACE_ZONE"
     service: http://control-plane:8081
 
