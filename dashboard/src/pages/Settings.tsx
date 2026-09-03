@@ -374,15 +374,197 @@ function GitHubWorkspace({ fleet }: { fleet: NonNullable<ReturnType<typeof useAu
   )
 }
 
-const ROLE_CAN: Record<string, string> = {
-  viewer: 'read everything: nodes, services, logs, events',
-  deployer: 'everything a viewer can, plus deploy, roll back, reschedule and set secrets',
-  admin: 'everything a deployer can, plus pair, cordon and drain nodes, edit services and alerts',
-  owner: 'everything, plus remove nodes, manage members and billing',
+/**
+ * The fleet's settings, as settings rather than as facts about settings.
+ *
+ * This was eight read-only rows beside a panel listing all four roles. Three
+ * of the rows were one idea — interval, threshold, and the product of the two
+ * — two more repeated the header, and the role panel was documentation that
+ * never changed for anyone and mostly described roles the reader does not
+ * have. Meanwhile the four values the schema calls per-fleet had no way to be
+ * changed at all: there was no update route.
+ */
+function FleetSettings() {
+  const { fleet, refreshFleets } = useAuth()
+  const canEdit = fleet?.role === 'owner' || fleet?.role === 'admin'
+
+  const [name, setName] = useState('')
+  const [interval, setInterval] = useState(5)
+  const [threshold, setThreshold] = useState(3)
+  const [reclaim, setReclaim] = useState('idle')
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [error, setError] = useState<unknown>(null)
+
+  // Re-seed whenever the fleet arrives or the selection changes, so the form
+  // never shows one fleet's values under another's name.
+  useEffect(() => {
+    if (!fleet) return
+    setName(fleet.name)
+    setInterval(fleet.heartbeatIntervalSec)
+    setThreshold(fleet.heartbeatMissThreshold)
+    setReclaim(fleet.defaultReclaimPolicy)
+    setError(null)
+    setSaved(false)
+  }, [fleet?.id, fleet?.name, fleet?.heartbeatIntervalSec, fleet?.heartbeatMissThreshold, fleet?.defaultReclaimPolicy]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const detection = interval * threshold
+  const dirty =
+    !!fleet &&
+    (name !== fleet.name ||
+      interval !== fleet.heartbeatIntervalSec ||
+      threshold !== fleet.heartbeatMissThreshold ||
+      reclaim !== fleet.defaultReclaimPolicy)
+
+  // Mirrors the server's rule rather than trusting the button to be enough.
+  const tooWide = detection > 300
+  const invalid =
+    !name.trim() || interval < 1 || interval > 60 || threshold < 1 || threshold > 10 || tooWide
+
+  const save = async () => {
+    if (!fleet) return
+    setSaving(true)
+    setError(null)
+    try {
+      await api(`/fleets/${fleet.id}`, {
+        method: 'PATCH',
+        body: {
+          name: name.trim(),
+          heartbeatIntervalSec: interval,
+          heartbeatMissThreshold: threshold,
+          defaultReclaimPolicy: reclaim,
+        },
+      })
+      await refreshFleets()
+      setSaved(true)
+    } catch (err) {
+      setError(err)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (!fleet) return null
+
+  return (
+    <Panel
+      title="fleet"
+      right={
+        <span className="normal-case text-[var(--color-fg-dim)]">
+          you are {fleet.role} · enforced at the API, not by hiding buttons
+        </span>
+      }
+    >
+      <div className="space-y-5 p-5">
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field
+            label="name"
+            value={name}
+            disabled={!canEdit}
+            maxLength={64}
+            onChange={(e) => setName(e.target.value)}
+          />
+          <div>
+            <label className="mono-label block text-[10px] text-[var(--color-fg-dim)]">
+              default reclaim
+            </label>
+            <select
+              value={reclaim}
+              disabled={!canEdit}
+              onChange={(e) => setReclaim(e.target.value)}
+              className="mt-1.5 h-[34px] w-full border border-[var(--color-line-2)] bg-[var(--color-ink-900)] px-2.5 font-mono text-[12px] text-[var(--color-fg)] transition-colors focus:border-[var(--color-signal)] focus:outline-none disabled:opacity-60"
+            >
+              <option value="idle">idle — reclaim once nothing is running</option>
+              <option value="eager">eager — reclaim as soon as it can</option>
+              <option value="manual">manual — never reclaim on its own</option>
+            </select>
+          </div>
+        </div>
+
+        <div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field
+              label="heartbeat interval"
+              hint="seconds between beats · 1–60"
+              type="number"
+              min={1}
+              max={60}
+              value={interval}
+              disabled={!canEdit}
+              onChange={(e) => setInterval(Number(e.target.value))}
+            />
+            <Field
+              label="missed beats before down"
+              hint="1–10"
+              type="number"
+              min={1}
+              max={10}
+              value={threshold}
+              disabled={!canEdit}
+              onChange={(e) => setThreshold(Number(e.target.value))}
+            />
+          </div>
+
+          {/* The old page listed this as a third row of equal weight. It is
+              not a third setting — it is what the two above multiply to, and
+              it is the number that actually matters, so it reads as a
+              consequence of them. */}
+          <p
+            className="mt-2.5 border-l-2 py-1 pl-3 font-mono text-[11px] leading-relaxed"
+            style={{
+              borderColor: tooWide ? 'var(--color-warn)' : 'var(--color-line-2)',
+              color: tooWide ? 'var(--color-warn)' : 'var(--color-fg-muted)',
+            }}
+          >
+            {tooWide
+              ? `${detection}s is too long to wait before calling a node down. Keep interval × missed beats at 300s or less.`
+              : `A node is called down after ${detection}s of silence.`}
+          </p>
+        </div>
+
+        {error != null && <ErrorNote error={error} />}
+
+        {canEdit ? (
+          <div className="flex items-center gap-3">
+            <Button variant="primary" onClick={() => void save()} disabled={!dirty || invalid || saving}>
+              {saving ? 'Saving…' : 'Save changes'}
+            </Button>
+            {dirty && !saving && (
+              <button
+                onClick={() => {
+                  setName(fleet.name)
+                  setInterval(fleet.heartbeatIntervalSec)
+                  setThreshold(fleet.heartbeatMissThreshold)
+                  setReclaim(fleet.defaultReclaimPolicy)
+                }}
+                className="font-mono text-[11px] text-[var(--color-fg-dim)] underline-offset-4 hover:text-[var(--color-fg)] hover:underline"
+              >
+                discard
+              </button>
+            )}
+            {saved && !dirty && (
+              <span className="font-mono text-[11px] text-[var(--color-signal)]">saved</span>
+            )}
+          </div>
+        ) : (
+          <p className="font-mono text-[11px] text-[var(--color-fg-dim)]">
+            Changing these needs admin. Ask an owner of this fleet.
+          </p>
+        )}
+
+        <div className="flex items-center gap-3 border-t border-[var(--color-line)] pt-4">
+          <span className="mono-label shrink-0 text-[10px] text-[var(--color-fg-dim)]">FLEET ID</span>
+          {/* Kept because the CLI and every support question needs it, but as
+              one copyable line rather than a row competing with the settings. */}
+          <Copyable text={fleet.id} className="text-[11px]" />
+        </div>
+      </div>
+    </Panel>
+  )
 }
 
 export default function Settings() {
-  const { fleet, email } = useAuth()
+  const { fleet } = useAuth()
   const isAdmin = fleet?.role === 'owner' || fleet?.role === 'admin'
 
   const audit = usePoll(
@@ -398,56 +580,7 @@ export default function Settings() {
         <p className="mt-1 text-[13.5px] text-[var(--color-fg-muted)]">Fleet configuration and the audit trail.</p>
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-2">
-        <Panel title="fleet">
-          <dl className="divide-y divide-[var(--color-line)]">
-            {[
-              ['name', fleet?.name ?? '—'],
-              ['fleet id', fleet?.id ?? '—'],
-              ['your role', fleet?.role ?? '—'],
-              ['signed in as', email ?? '—'],
-              ['heartbeat interval', `${fleet?.heartbeatIntervalSec}s`],
-              ['missed beats before down', String(fleet?.heartbeatMissThreshold)],
-              [
-                'detection window',
-                `${(fleet?.heartbeatIntervalSec ?? 0) * (fleet?.heartbeatMissThreshold ?? 0)}s`,
-              ],
-              ['default reclaim', fleet?.defaultReclaimPolicy ?? '—'],
-            ].map(([k, v]) => (
-              <div key={k} className="flex items-center justify-between gap-4 px-5 py-2.5">
-                <dt className="font-mono text-[10.5px] uppercase tracking-[0.1em] text-[var(--color-fg-dim)]">{k}</dt>
-                <dd className="truncate font-mono text-[12px] text-[var(--color-fg-muted)]">{v}</dd>
-              </div>
-            ))}
-          </dl>
-        </Panel>
-
-        <Panel title="what your role can do">
-          <div className="space-y-3 p-5">
-            {Object.entries(ROLE_CAN).map(([role, can]) => (
-              <div
-                key={role}
-                className={`border-l-2 py-1.5 pl-3 ${
-                  role === fleet?.role ? 'border-[var(--color-signal)]' : 'border-[var(--color-line)]'
-                }`}
-              >
-                <div
-                  className={`font-mono text-[11.5px] ${
-                    role === fleet?.role ? 'text-[var(--color-signal)]' : 'text-[var(--color-fg-dim)]'
-                  }`}
-                >
-                  {role}
-                  {role === fleet?.role && ' ← you'}
-                </div>
-                <p className="mt-0.5 text-[12.5px] leading-relaxed text-[var(--color-fg-muted)]">{can}</p>
-              </div>
-            ))}
-            <p className="pt-2 font-mono text-[10.5px] leading-relaxed text-[var(--color-fg-dim)]">
-              Roles are enforced at the API, not just in this UI — hiding a button is not access control.
-            </p>
-          </div>
-        </Panel>
-      </div>
+      <FleetSettings />
 
       {isAdmin && fleet && <GitHubWorkspace fleet={fleet} />}
 

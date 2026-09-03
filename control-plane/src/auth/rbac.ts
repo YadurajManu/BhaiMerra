@@ -29,6 +29,10 @@ export const PERMISSIONS = {
   // credentials a fleet holds is itself worth not handing to a viewer.
   'secret.read': 'deployer',
 
+  // Changing the heartbeat interval decides when a node is called dead, so it
+  // is not a cosmetic preference — a deployer should not be able to widen the
+  // window that hides an outage.
+  'fleet.update': 'admin',
   'node.pair': 'admin',
   'node.cordon': 'admin',
   'node.drain': 'admin',

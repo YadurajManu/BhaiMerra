@@ -70,6 +70,77 @@ export async function fleetRoutes(app: FastifyInstance) {
   )
 
   /**
+   * Change a fleet's settings.
+   *
+   * These columns were always meant to be tuned per fleet — the schema says so
+   * — but nothing could write them, so the dashboard displayed four settings
+   * and offered no way to set any of them.
+   *
+   * The bounds matter more than they look. Detection time is interval ×
+   * threshold, and both ends are a real failure: a one-second interval times
+   * every node in a fleet is a self-inflicted load problem, and a wide window
+   * means an outage stays invisible for minutes. Rejecting a combination
+   * outright is kinder than accepting it and quietly being slow to notice.
+   */
+  app.patch(
+    '/fleets/:fleetId',
+    { preHandler: requireFleetPermission('fleet.update') },
+    async (req) => {
+      const { fleetId } = req.params as { fleetId: string }
+
+      const body = z
+        .object({
+          name: z.string().trim().min(1).max(64).optional(),
+          heartbeatIntervalSec: z.number().int().min(1).max(60).optional(),
+          heartbeatMissThreshold: z.number().int().min(1).max(10).optional(),
+          defaultReclaimPolicy: z.enum(['eager', 'idle', 'manual']).optional(),
+        })
+        .refine((v) => Object.keys(v).length > 0, { message: 'Nothing to change' })
+        .safeParse(req.body)
+
+      if (!body.success) {
+        throw ApiError.unprocessable('invalid_settings', 'Check the submitted fields', body.error.issues)
+      }
+
+      const [current] = await db.select().from(fleets).where(eq(fleets.id, fleetId)).limit(1)
+      if (!current) throw ApiError.notFound('Fleet')
+
+      const next = { ...current, ...body.data }
+      const detectionSec = next.heartbeatIntervalSec * next.heartbeatMissThreshold
+      if (detectionSec > 300) {
+        throw ApiError.unprocessable(
+          'detection_window_too_wide',
+          `That combination waits ${detectionSec}s before calling a node down. Keep interval × missed beats at 300s or less.`
+        )
+      }
+
+      const [updated] = await db.transaction(async (tx) => {
+        const rows = await tx.update(fleets).set(body.data).where(eq(fleets.id, fleetId)).returning()
+        await recordAudit(tx, {
+          orgId: req.orgId!,
+          actorUserId: req.userId!,
+          action: 'fleet.updated',
+          targetType: 'fleet',
+          targetId: fleetId,
+          // Before and after, because "settings changed" in an audit log is
+          // not something anyone can act on months later.
+          metadata: {
+            changed: Object.fromEntries(
+              Object.entries(body.data).map(([k, v]) => [
+                k,
+                { from: (current as Record<string, unknown>)[k], to: v },
+              ])
+            ),
+          },
+        })
+        return rows
+      })
+
+      return { fleet: updated }
+    }
+  )
+
+  /**
    * Node list, joined against live heartbeat state. The stored status column
    * is the durable record; Redis is what happened in the last few seconds.
    * Showing both means a stale status column is visible rather than hidden.
