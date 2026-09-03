@@ -1,7 +1,17 @@
-import { and, eq, desc } from 'drizzle-orm'
+import { and, desc, eq, gte, or } from 'drizzle-orm'
 import { z } from 'zod'
 import type { FastifyInstance } from 'fastify'
-import { nodes, fleets, pairingTokens, orgMembers, auditLog, alertRules } from '../db/schema.js'
+import {
+  alertRules,
+  auditLog,
+  deployments,
+  fleets,
+  nodes,
+  orgMembers,
+  pairingTokens,
+  placementEvents,
+  services,
+} from '../db/schema.js'
 import { newPairingToken, hashToken } from '../lib/tokens.js'
 import { recordAudit } from '../lib/audit.js'
 import { ApiError } from './errors.js'
@@ -190,6 +200,77 @@ export async function fleetRoutes(app: FastifyInstance) {
       ])
 
       return { grain: grainFor(sinceMs), sinceMinutes: minutes, retention: RETAIN_MS, peaks, samples }
+    }
+  )
+
+  /**
+   * What happened on this node, for annotating the charts.
+   *
+   * Deploys and placement decisions on the same time axis as the metrics is
+   * what turns "memory climbed at 14:03" into "memory climbed because a deploy
+   * landed at 14:02". Both tables already carry timestamps; nothing new is
+   * stored to make this work.
+   */
+  app.get(
+    '/fleets/:fleetId/nodes/:nodeId/events',
+    { preHandler: requireFleetPermission('node.read') },
+    async (req) => {
+      const { nodeId } = req.params as { nodeId: string }
+      const q = z
+        .object({ since: z.coerce.number().int().min(1).max(43_200).default(360) })
+        .safeParse(req.query ?? {})
+      const since = new Date(Date.now() - (q.success ? q.data.since : 360) * 60_000)
+
+      const [deploys, placements] = await Promise.all([
+        app.ctx.db
+          .select({
+            at: deployments.startedAt,
+            status: deployments.status,
+            service: services.name,
+          })
+          .from(deployments)
+          .innerJoin(services, eq(services.id, deployments.serviceId))
+          .where(and(eq(deployments.nodeId, nodeId), gte(deployments.startedAt, since)))
+          .orderBy(desc(deployments.startedAt))
+          .limit(60),
+        app.ctx.db
+          .select({
+            at: placementEvents.createdAt,
+            reason: placementEvents.reason,
+            service: services.name,
+            from: placementEvents.fromNodeId,
+            to: placementEvents.toNodeId,
+          })
+          .from(placementEvents)
+          .innerJoin(services, eq(services.id, placementEvents.serviceId))
+          .where(
+            and(
+              gte(placementEvents.createdAt, since),
+              or(eq(placementEvents.toNodeId, nodeId), eq(placementEvents.fromNodeId, nodeId))
+            )
+          )
+          .orderBy(desc(placementEvents.createdAt))
+          .limit(60),
+      ])
+
+      return {
+        events: [
+          ...deploys.map((d) => ({
+            at: d.at,
+            kind: 'deploy' as const,
+            label: `deploy · ${d.service}`,
+            // A failed deploy is the annotation someone is looking for, so it
+            // gets the colour that draws the eye.
+            tone: d.status === 'failed' ? ('down' as const) : ('info' as const),
+          })),
+          ...placements.map((p) => ({
+            at: p.at,
+            kind: 'placement' as const,
+            label: `${p.to === nodeId ? 'arrived' : 'left'} · ${p.service}`,
+            tone: p.reason === 'failover' ? ('warn' as const) : ('info' as const),
+          })),
+        ].sort((a, b) => +new Date(b.at) - +new Date(a.at)),
+      }
     }
   )
 

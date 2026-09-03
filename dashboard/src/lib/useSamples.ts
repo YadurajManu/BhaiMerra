@@ -4,10 +4,21 @@ import { api } from './api'
 export type NodeSample = {
   at: string
   cpuPct: number | null
+  /** Absent on rows written before the peak columns existed. */
+  cpuMax?: number | null
+  cpuMin?: number | null
   ramUsedMb: number | null
+  ramMaxMb?: number | null
   diskUsedMb: number | null
   diskTotalMb: number | null
   containers: number | null
+  /** Only present from agents new enough to measure them. */
+  netRxKbps?: number | null
+  netTxKbps?: number | null
+  load1?: number | null
+  tempC?: number | null
+  swapUsedMb?: number | null
+  dockerOk?: boolean | null
 }
 
 type Response = {

@@ -436,9 +436,17 @@ export default function Nodes() {
                         <span className="text-[14px]" title={osInfo.name}>
                           {osInfo.icon}
                         </span>
-                        <span className="font-mono text-[15px] font-semibold text-[var(--color-fg)]">
+                        {/* The name is the way in. A whole-card link would
+                            swallow Cordon and Remove, which sit inside it. */}
+                        <Link
+                          to={`/nodes/${n.id}`}
+                          className="group/name font-mono text-[15px] font-semibold text-[var(--color-fg)] transition-colors duration-300 hover:text-[var(--color-signal)]"
+                        >
                           {n.name}
-                        </span>
+                          <span className="ml-1.5 inline-block text-[11px] text-[var(--color-fg-dim)] opacity-0 transition-opacity duration-300 group-hover/name:opacity-100">
+                            →
+                          </span>
+                        </Link>
 
                         {/* Reverse Tunnel Status Badge */}
                         {isOnline && (

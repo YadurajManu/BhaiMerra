@@ -6,6 +6,7 @@ import Shell from './components/Shell'
 import SignIn from './pages/SignIn'
 import Overview from './pages/Overview'
 import Nodes from './pages/Nodes'
+import NodeDetail from './pages/NodeDetail'
 import Services from './pages/Services'
 import ServiceDetail from './pages/ServiceDetail'
 import Events from './pages/Events'
@@ -54,6 +55,7 @@ function Gate() {
       <Route element={<Shell />}>
         <Route index element={<Overview />} />
         <Route path="nodes" element={<Nodes />} />
+        <Route path="nodes/:nodeId" element={<NodeDetail />} />
         <Route path="services" element={<Services />} />
         <Route path="services/:serviceId" element={<ServiceDetail />} />
         <Route path="events" element={<Events />} />
