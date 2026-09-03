@@ -247,7 +247,12 @@ export function Copyable({ text, className = '' }: { text: string; className?: s
       title="copy"
       className={`group inline-flex max-w-full items-center gap-2 truncate font-mono text-[11.5px] text-[var(--color-fg-muted)] transition-colors duration-300 hover:text-[var(--color-fg)] ${className}`}
     >
-      <span className="truncate">{text}</span>
+      {/* min-w-0 because a flex item defaults to min-width:auto, which means
+          "never shrink below my content". Without it `truncate` has nothing to
+          truncate to: the span holds its full width, the button holds the
+          span, and a long value — an install command, a fleet id — pushes its
+          whole panel wider than the viewport instead of ellipsising. */}
+      <span className="min-w-0 truncate">{text}</span>
       <span className="shrink-0 text-[10px] text-[var(--color-fg-dim)] opacity-0 transition-opacity group-hover:opacity-100">copy</span>
     </button>
   )

@@ -145,6 +145,10 @@ export function usePoll<T>(fn: () => Promise<T>, deps: unknown[], intervalMs = 4
   const [data, setData] = useState<T | null>(null)
   const [error, setError] = useState<Error | null>(null)
   const [loading, setLoading] = useState(true)
+  // Bumped by refetch(). Sitting in the dependency list means asking for fresh
+  // data cancels the pending timer and ticks immediately, rather than adding a
+  // second request racing the scheduled one.
+  const [nonce, setNonce] = useState(0)
 
   useEffect(() => {
     let alive = true
@@ -172,7 +176,7 @@ export function usePoll<T>(fn: () => Promise<T>, deps: unknown[], intervalMs = 4
       window.clearTimeout(timer)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps)
+  }, [...deps, nonce])
 
-  return { data, error, loading }
+  return { data, error, loading, refetch: () => setNonce((n) => n + 1) }
 }

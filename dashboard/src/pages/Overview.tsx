@@ -4,6 +4,7 @@ import { useAuth, usePoll } from '../lib/auth'
 import { mb, pct, since, toneOf } from '../lib/format'
 import { Dot, Empty, ErrorNote, GridFiller, Meter, Panel, StatusPill, Button } from '../components/ui'
 import ClusterMeshVisualizer from '../components/ClusterMeshVisualizer'
+import FirstRun from '../components/FirstRun'
 
 export default function Overview() {
   const { fleet } = useAuth()
@@ -28,17 +29,26 @@ export default function Overview() {
   const mapNodes = map.data?.nodes ?? []
   const all = nodes.data?.nodes ?? []
 
-  if (!map.loading && !mapNodes.length) {
+  // An empty fleet gets the guide rather than a dead end. The old state named
+  // the problem and offered one button, and everything after that button -
+  // mint a token, find the installer, learn a manifest format, apply it, then
+  // deploy - was left to be discovered.
+  if (!map.loading && fleet && (!mapNodes.length || !(services.data?.services ?? []).length)) {
     return (
-      <Empty
-        title="No nodes in this fleet yet"
-        hint="Pair a machine you own — a Pi, an old laptop, a mini PC — and it will appear here within seconds of the agent starting."
-        action={
-          <Link to="/nodes">
-            <Button variant="primary">Add your first node</Button>
-          </Link>
-        }
-      />
+      <div className="space-y-5">
+        <div>
+          <h1 className="text-[22px] font-semibold tracking-[-0.03em]">Welcome to {fleet.name}</h1>
+          <p className="mt-1 text-[13.5px] text-[var(--color-fg-muted)]">
+            Two steps to something of your own running on hardware you control.
+          </p>
+        </div>
+        <FirstRun
+          fleet={fleet}
+          nodes={all}
+          services={services.data?.services ?? []}
+          onChanged={() => services.refetch()}
+        />
+      </div>
     )
   }
 
