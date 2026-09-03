@@ -18,6 +18,7 @@ import {
   recordSamples,
   compactSamples,
   samplesFor,
+  peaksFor,
   grainFor,
   latestSample,
   RETAIN_MS,
@@ -220,5 +221,97 @@ describe('latest sample', () => {
 
   test('is null for a node that never reported', async () => {
     assert.equal(await latestSample(ctx, nodeId), null)
+  })
+})
+
+describe('peaks survive the roll-up', () => {
+  test('a spike is still the peak after folding into minutes', async () => {
+    // This is the whole point of the min/max columns. Averaging alone turned a
+    // twenty-second spike to 100% into roughly 17% at minute grain, so "did it
+    // ever run out" became unanswerable while "how busy on average" survived.
+    const old = Math.floor((Date.now() - RETAIN_MS.fine - 5 * MIN) / MIN) * MIN
+    await recordSamples(ctx, [
+      { ...sample(new Date(old), { cpuPct: 10 }) },
+      { ...sample(new Date(old + 10_000), { cpuPct: 100 }) },
+      { ...sample(new Date(old + 20_000), { cpuPct: 10 }) },
+    ])
+
+    await compactSamples(ctx)
+
+    const [row] = await ctx.db
+      .select()
+      .from(nodeSamples)
+      .where(and(eq(nodeSamples.nodeId, nodeId), eq(nodeSamples.grain, 'minute')))
+
+    assert.equal(Math.round(row!.cpuMax!), 100, 'the spike survives')
+    assert.equal(Math.round(row!.cpuMin!), 10, 'so does the floor')
+    assert.equal(Math.round(row!.cpuPct!), 40, 'and the mean is still the mean')
+  })
+
+  test('max of maxima holds through a second fold', async () => {
+    // minute -> hour is the fold that used to lose whatever the first one left.
+    const old = Math.floor((Date.now() - RETAIN_MS.minute - 10 * MIN) / MIN) * MIN
+    await ctx.db.insert(nodeSamples).values([
+      { nodeId, at: new Date(old), grain: 'minute', cpuPct: 20, cpuMax: 97, cpuMin: 5,
+        ramUsedMb: 2048, ramMaxMb: 4000, diskUsedMb: 10, diskTotalMb: 100, containers: 1 },
+      { nodeId, at: new Date(old + MIN), grain: 'minute', cpuPct: 30, cpuMax: 44, cpuMin: 12,
+        ramUsedMb: 2048, ramMaxMb: 3000, diskUsedMb: 11, diskTotalMb: 100, containers: 1 },
+    ] as never)
+
+    await compactSamples(ctx)
+
+    const [row] = await ctx.db
+      .select()
+      .from(nodeSamples)
+      .where(and(eq(nodeSamples.nodeId, nodeId), eq(nodeSamples.grain, 'hour')))
+    assert.equal(Math.round(row!.cpuMax!), 97, 'the highest minute peak is the hour peak')
+    assert.equal(Math.round(row!.cpuMin!), 5)
+    assert.equal(row!.ramMaxMb, 4000)
+  })
+
+  test('docker down for any part of a bucket marks the whole bucket down', async () => {
+    // A bucket that was healthy on average is not a bucket that was healthy.
+    const old = Math.floor((Date.now() - RETAIN_MS.fine - 5 * MIN) / MIN) * MIN
+    await recordSamples(ctx, [
+      { ...sample(new Date(old)), dockerOk: true },
+      { ...sample(new Date(old + 10_000)), dockerOk: false },
+      { ...sample(new Date(old + 20_000)), dockerOk: true },
+    ])
+    await compactSamples(ctx)
+
+    const [row] = await ctx.db
+      .select()
+      .from(nodeSamples)
+      .where(and(eq(nodeSamples.nodeId, nodeId), eq(nodeSamples.grain, 'minute')))
+    assert.equal(row!.dockerOk, false)
+  })
+})
+
+describe('the peaks summary', () => {
+  test('reports max and mean separately', async () => {
+    await recordSamples(ctx, [
+      sample(ago(3 * MIN), { cpuPct: 10 }),
+      sample(ago(2 * MIN), { cpuPct: 90 }),
+      sample(ago(1 * MIN), { cpuPct: 20 }),
+    ])
+    const p = await peaksFor(ctx, nodeId, 10 * MIN)
+    assert.equal(Math.round(p.cpuMax!), 90)
+    assert.equal(Math.round(p.cpuAvg!), 40)
+    assert.equal(p.samples, 3)
+  })
+
+  test('coverage says how much of the window has data', async () => {
+    // A node that reported for thirty seconds of a ten-minute window should not
+    // present those thirty seconds as if they described the whole window.
+    await recordSamples(ctx, [sample(ago(MIN))])
+    const p = await peaksFor(ctx, nodeId, 10 * MIN)
+    assert.ok(p.coverage! < 0.05, `expected sparse coverage, got ${p.coverage}`)
+  })
+
+  test('an empty window reports nothing rather than zero', async () => {
+    const p = await peaksFor(ctx, nodeId, 10 * MIN)
+    assert.equal(p.cpuMax, null, 'null, not 0 - there was no reading')
+    assert.equal(p.samples, 0)
+    assert.equal(p.coverage, 0)
   })
 })

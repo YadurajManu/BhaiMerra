@@ -27,6 +27,17 @@ type Host struct {
 	Containers  ContainerLister
 	Diagnostics Diagnostics
 	totalRAMMb  int
+
+	prevNet netMark
+}
+
+// Network arrives from the OS as bytes-since-boot, so a rate needs two
+// readings and the time between them. Keeping the previous pair on the Host is
+// what turns a counter into the kbps a chart can draw — and a counter would
+// reset to zero on reboot and draw a cliff.
+type netMark struct {
+	rx, tx uint64
+	at     time.Time
 }
 
 func New(version string, containers ContainerLister, diagnostics Diagnostics) *Host {
@@ -44,10 +55,15 @@ func (h *Host) Sample(ctx context.Context) (client.Heartbeat, error) {
 		RAMUsedMb:     h.usedRAMMb(),
 		DiskUsedMb:    usedDiskMb("/"),
 		DiskTotalMb:   totalDiskMb("/"),
+		Load1:         load1(),
+		TempC:         tempC(),
+		SwapUsedMb:    swapUsedMb(),
+		UptimeSec:     machineUptimeSec(),
 		AgentVersion:  h.Version,
 		AdvertiseAddr: capability.AdvertiseAddr(),
 		Containers:    []client.Container{},
 	}
+	hb.NetRxKbps, hb.NetTxKbps = h.sampleNet()
 	if h.Diagnostics != nil {
 		hb.Runtime, hb.Logs = h.Diagnostics.Snapshot(ctx), h.Diagnostics.Logs()
 	}
@@ -95,4 +111,38 @@ func (h *Host) usedRAMMb() int {
 		return 0
 	}
 	return used
+}
+
+// load1 is the raw one-minute load average. loadPercent normalises it against
+// core count for the CPU gauge; this is the unnormalised figure, because a load
+// of 12 on 4 cores and 12 on 32 cores are different situations that the
+// percentage flattens into the same number.
+func load1() float64 {
+	v, err := loadAvg1()
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+// sampleNet converts the OS byte counters into a rate.
+//
+// Returns zero on the first call, because a rate needs two readings and there
+// is no honest number to report from one. Also returns zero when the counters
+// go backwards, which happens on reboot and on interface churn - a negative
+// delta would otherwise draw a spike that never happened.
+func (h *Host) sampleNet() (rxKbps, txKbps int) {
+	rx, tx := netCounters()
+	now := time.Now()
+	prev := h.prevNet
+	h.prevNet = netMark{rx: rx, tx: tx, at: now}
+
+	if prev.at.IsZero() || rx < prev.rx || tx < prev.tx {
+		return 0, 0
+	}
+	secs := now.Sub(prev.at).Seconds()
+	if secs <= 0 {
+		return 0, 0
+	}
+	return int(float64(rx-prev.rx) / secs / 1024), int(float64(tx-prev.tx) / secs / 1024)
 }

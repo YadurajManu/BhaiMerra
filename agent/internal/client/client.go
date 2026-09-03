@@ -56,13 +56,22 @@ type Container struct {
 }
 
 type Heartbeat struct {
-	CPUPct        float64     `json:"cpu_pct"`
-	RAMUsedMb     int         `json:"ram_used_mb"`
-	DiskUsedMb    int         `json:"disk_used_mb"`
+	CPUPct     float64 `json:"cpu_pct"`
+	RAMUsedMb  int     `json:"ram_used_mb"`
+	DiskUsedMb int     `json:"disk_used_mb"`
 	// Capacity, not what is left. The capability report's disk_mb is FREE
 	// space and is what the scheduler places against; this is the denominator
 	// a "used of total" reading needs.
-	DiskTotalMb   int         `json:"disk_total_mb"`
+	DiskTotalMb int `json:"disk_total_mb"`
+	// Optional host metrics. Omitted rather than zeroed when a platform cannot
+	// measure one - a fabricated number is what made the Windows disk figure
+	// wrong for months, in the dashboard and in the scheduler.
+	NetRxKbps     int         `json:"net_rx_kbps,omitempty"`
+	NetTxKbps     int         `json:"net_tx_kbps,omitempty"`
+	Load1         float64     `json:"load1,omitempty"`
+	TempC         float64     `json:"temp_c,omitempty"`
+	SwapUsedMb    int         `json:"swap_used_mb,omitempty"`
+	UptimeSec     int         `json:"uptime_sec,omitempty"`
 	MeshConnected bool        `json:"mesh_connected"`
 	AgentVersion  string      `json:"agent_version,omitempty"`
 	AdvertiseAddr string      `json:"advertise_addr,omitempty"`

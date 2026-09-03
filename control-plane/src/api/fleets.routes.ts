@@ -7,7 +7,7 @@ import { recordAudit } from '../lib/audit.js'
 import { ApiError } from './errors.js'
 import { requireUser, requireFleetPermission, invalidateAgentAuth } from './guards.js'
 import { dispatchEvent } from '../alerting/dispatch.js'
-import { samplesFor, grainFor, RETAIN_MS } from '../heartbeat/samples.js'
+import { samplesFor, peaksFor, grainFor, RETAIN_MS } from '../heartbeat/samples.js'
 import { rescheduleFromNode } from '../scheduler/reschedule.js'
 import { publicApiOrigin } from './install.routes.js'
 import { FLEET_EVENTS } from '../lib/events.js'
@@ -182,12 +182,14 @@ export async function fleetRoutes(app: FastifyInstance) {
       const minutes = q.success ? q.data.since : 60
       const sinceMs = minutes * 60_000
 
-      return {
-        grain: grainFor(sinceMs),
-        sinceMinutes: minutes,
-        retention: RETAIN_MS,
-        samples: await samplesFor(app.ctx, nodeId, sinceMs),
-      }
+      // Peaks are computed in the database rather than over the returned
+      // points: a month-long window is 720 rows and the peak is one number.
+      const [samples, peaks] = await Promise.all([
+        samplesFor(app.ctx, nodeId, sinceMs),
+        peaksFor(app.ctx, nodeId, sinceMs),
+      ])
+
+      return { grain: grainFor(sinceMs), sinceMinutes: minutes, retention: RETAIN_MS, peaks, samples }
     }
   )
 

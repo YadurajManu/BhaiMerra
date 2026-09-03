@@ -37,6 +37,16 @@ const heartbeat = z.object({
   // required field here would reject every heartbeat from a node that has
   // not been updated yet.
   disk_total_mb: z.number().int().min(0).optional(),
+  // All optional: a node running an older agent sends none of these, and a
+  // required field would reject its heartbeats entirely. A platform that cannot
+  // measure one omits it rather than sending a zero that reads as a real
+  // reading of nothing.
+  net_rx_kbps: z.number().int().min(0).optional(),
+  net_tx_kbps: z.number().int().min(0).optional(),
+  load1: z.number().min(0).optional(),
+  temp_c: z.number().min(0).max(150).optional(),
+  swap_used_mb: z.number().int().min(0).optional(),
+  uptime_sec: z.number().int().min(0).optional(),
   mesh_connected: z.boolean().default(false),
   agent_version: z.string().max(32).optional(),
   advertise_addr: z.string().max(255).optional(),
@@ -251,6 +261,14 @@ export async function agentRoutes(app: FastifyInstance) {
         diskUsedMb: hb.disk_used_mb,
         diskTotalMb: hb.disk_total_mb ?? null,
         containers: hb.containers.length,
+        netRxKbps: hb.net_rx_kbps ?? null,
+        netTxKbps: hb.net_tx_kbps ?? null,
+        load1: hb.load1 ?? null,
+        // Zero means "not measured" on platforms that decline, so it is stored
+        // as null rather than as a reading of absolute zero.
+        tempC: hb.temp_c ? hb.temp_c : null,
+        swapUsedMb: hb.swap_used_mb ?? null,
+        dockerOk: hb.runtime.docker_available,
       },
     ]).catch((err) => req.log.warn({ err, nodeId }, 'telemetry sample not stored'))
 

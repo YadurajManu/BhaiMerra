@@ -443,6 +443,21 @@ export const nodeSamples = pgTable(
     diskUsedMb: integer('disk_used_mb'),
     diskTotalMb: integer('disk_total_mb'),
     containers: integer('containers'),
+    /**
+     * Peaks, preserved through every roll-up. The mean alone answers "how busy
+     * on average"; only the max answers "did it ever run out", which is the
+     * question someone is actually asking.
+     */
+    cpuMax: real('cpu_max'),
+    cpuMin: real('cpu_min'),
+    ramMaxMb: integer('ram_max_mb'),
+    /** A rate the agent computes by differencing byte counters, not a counter. */
+    netRxKbps: integer('net_rx_kbps'),
+    netTxKbps: integer('net_tx_kbps'),
+    load1: real('load1'),
+    tempC: real('temp_c'),
+    swapUsedMb: integer('swap_used_mb'),
+    dockerOk: boolean('docker_ok'),
     /** 'fine' (10s), 'minute', or 'hour'. Coarser grains outlive finer ones. */
     grain: text('grain').$type<'fine' | 'minute' | 'hour'>().notNull().default('fine'),
   },
