@@ -1,6 +1,6 @@
 import { parse as parseYaml } from 'yaml'
 import { safeDatabaseName } from './dbnames.js'
-import { injectedUrl, pointsAt } from './dburl.js'
+import { pointsAt } from './dburl.js'
 
 /**
  * docker-compose.yml → fleet.yaml.
@@ -356,11 +356,18 @@ export function composeToFleet(
       if (target) {
         const [composeName, fleetName] = target
         const engine = dbEngines.get(composeName)
-        const url = engine ? injectedUrl(fleetName, engine) : null
-        if (url) {
-          plain.push([k, url])
+        if (engine) {
+          // A reference, not a computed URL.
+          //
+          // This used to build the connection string here, which meant the CLI
+          // carrying a copy of the control plane's engine table — ports,
+          // schemes, default users — kept honest by a test that caught it
+          // getting postgres's user wrong. The control plane resolves this at
+          // apply time from the table it owns, so the copy is gone and the
+          // manifest says what it means rather than a value that has to match.
+          plain.push([k, `\${db:${fleetName}.url}`])
           notes.push(
-            `${name}: ${k} now points at the managed ${engine} — it named the compose service "${composeName}", which Fleet runs as "${fleetName}" with a password it generates.`
+            `${name}: ${k} now points at the managed ${engine} — it named the compose service "${composeName}", which Fleet runs as "${fleetName}" and fills in when the manifest is applied.`
           )
           continue
         }

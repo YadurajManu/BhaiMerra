@@ -253,6 +253,15 @@ const serviceSchema = serviceFields
  * scheduled away from its own data. Making the user say where it lives is the
  * one decision that cannot be defaulted.
  */
+/**
+ * `${db:name.field}` — the value `uses:` would have injected, under your name.
+ *
+ * Lower case because a database is named in lower case throughout a manifest,
+ * and the fields are the suffixes of what clientEnv emits: url, host, port,
+ * name, user, password.
+ */
+const DB_REF = /\$\{db:([a-z0-9-]+)\.([a-z]+)\}/g
+
 const databaseSchema = z.object({
   engine: z.string().min(1, 'name an engine, such as postgres@16'),
   node: z.string().min(1, 'a database must say which node holds its data'),
@@ -470,6 +479,40 @@ export function parseManifest(source: string, project?: string): ParsedManifest 
       // and silently replacing it would be the worst kind of magic.
       for (const [key, value] of Object.entries(injected)) {
         if (!(key in svc.env)) svc.env[key] = value
+      }
+
+      // `${db:name.url}` in a value the manifest wrote itself.
+      //
+      // `uses:` gives a service DATABASE_URL, and applications rarely read
+      // that name: one wants MONGODB_URI, another REDIS_HOST. Without a way
+      // to say "the same thing, under my name", the choices were to copy the
+      // URL into the manifest by hand — which means writing the password
+      // somewhere — or to have the CLI compute it, which meant duplicating
+      // this engine table across a package boundary and a test to catch what
+      // the copy got wrong. It got postgres's default user wrong.
+      //
+      // Resolved here rather than at deploy time because this is where the
+      // database declarations are in scope. The password stays a
+      // `${secret:...}` reference inside the value, which the deploy path
+      // already resolves, so no credential is written into the manifest.
+      for (const [key, value] of Object.entries(svc.env)) {
+        if (typeof value !== 'string' || !value.includes('${db:')) continue
+        svc.env[key] = value.replace(DB_REF, (whole, name: string, field: string) => {
+          if (name !== db.name) return whole
+          const wanted = injected[`${prefixFor(db.name, db.name === primary)}_${field.toUpperCase()}`]
+          if (wanted === undefined) {
+            issues.push({
+              path: `services.${svc.name}.env.${key}`,
+              message:
+                `"${whole}" — ${db.engine} databases have no ${field}. ` +
+                `Available: ${Object.keys(injected)
+                  .map((k) => k.split('_').pop()!.toLowerCase())
+                  .join(', ')}.`,
+            })
+            return whole
+          }
+          return wanted
+        })
       }
 
       // A service reaches its database by name on the node's fleet network,

@@ -272,7 +272,7 @@ describe('a connection string that names a converted database', () => {
       { node: 'homelab-1' }
     )
 
-    assert.match(manifest, /MONGODB_URI: "mongodb:\/\/app:\$\{secret:DB_PASSWORD\}@db:27017\/db"/)
+    assert.match(manifest, /MONGODB_URI: "\$\{db:db\.url\}"/)
     assert.ok(
       !/secrets: \[[^\]]*MONGODB_URI/.test(manifest),
       'it is a value Fleet knows, not one the user has to invent'
@@ -311,6 +311,8 @@ describe('a connection string that names a converted database', () => {
       { node: 'homelab-1' }
     )
     assert.ok(!manifest.includes('hunter2'), 'the compose password must not survive into the manifest')
-    assert.match(manifest, /postgres:\/\/postgres:\$\{secret:[A-Z_]+_PASSWORD\}@/)
+    // A reference the control plane fills in, rather than a URL the CLI built
+    // from its own copy of the engine table.
+    assert.match(manifest, /\$\{db:[a-z0-9-]+\.url\}/)
   })
 })

@@ -237,3 +237,62 @@ services:
     assert.ok(m.warnings.some((w) => /single copy/.test(w)))
   })
 })
+
+describe('${db:...} references', () => {
+  const withRef = (value: string) => `fleet: homelab
+
+services:
+  api:
+    build: ./api
+    container_port: 3000
+    resources: { ram: 512Mi, cpu: 0.5 }
+    env:
+      MONGODB_URI: "${value}"
+    uses: [db]
+
+databases:
+  db:
+    engine: mongo
+    node: n1
+`
+
+  test('a url reference becomes the value uses: would have injected', () => {
+    // An app that reads MONGODB_URI cannot use DATABASE_URL, and the choices
+    // without this were to paste the URL — password and all — into a file
+    // people commit, or to have the CLI recompute it from a copy of the engine
+    // table. The copy got postgres's default user wrong on its first run.
+    const parsed = parseManifest(withRef('${db:db.url}'))
+    const api = parsed.services.find((s) => s.name === 'api')!
+    assert.equal(api.env.MONGODB_URI, api.env.DATABASE_URL, 'the same value, under the app’s name')
+    assert.match(String(api.env.MONGODB_URI), /^mongodb:\/\//)
+  })
+
+  test('the password stays a reference, never a value', () => {
+    // A manifest is a file people commit. The deploy path already resolves
+    // ${secret:...}, so the credential never has to appear here.
+    const parsed = parseManifest(withRef('${db:db.url}'))
+    const api = parsed.services.find((s) => s.name === 'api')!
+    assert.match(String(api.env.MONGODB_URI), /\$\{secret:DB_PASSWORD\}/)
+  })
+
+  test('individual fields resolve too', () => {
+    const parsed = parseManifest(withRef('${db:db.host}:${db:db.port}'))
+    const api = parsed.services.find((s) => s.name === 'api')!
+    assert.equal(api.env.MONGODB_URI, 'db:27017')
+  })
+
+  test('a field the engine does not have is an error, and says what there is', () => {
+    // Silently leaving ${db:db.schema} in place would deploy an app whose
+    // connection string contains a literal dollar-brace.
+    assert.throws(
+      () => parseManifest(withRef('${db:db.schema}')),
+      (err: unknown) => {
+        assert.ok(err instanceof ManifestError)
+        const text = err.issues.map((i) => i.message).join(' ')
+        assert.match(text, /no schema/)
+        assert.match(text, /url|host|port/, 'and lists what is available')
+        return true
+      }
+    )
+  })
+})
