@@ -20,6 +20,7 @@ const GROUPS: Array<[string, Array<[string, string]>]> = [
     [
       ['up [service]', 'Deploy the whole fleet.yaml, in dependency order'],
       ['init', 'Scaffold a fleet.yaml and Dockerfile from this repository'],
+      ['import [file]', 'Convert a docker-compose.yml into a fleet.yaml'],
       ['config show', 'Show the saved control plane and selected fleet'],
       ['use <fleet>', 'Select the default fleet for later commands'],
       ['auth login', 'Sign in and save a secure local session'],

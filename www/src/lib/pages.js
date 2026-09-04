@@ -111,6 +111,17 @@ export const PAGES = {
         '$ fleet up            # apply, build, deploy, print the URL',
       ]},
 
+      H('Already have a docker-compose.yml?'),
+      P('Then you have already described your services, ports, environment and volumes, and there is nothing to write by hand. `fleet import` converts that file. It runs entirely on your machine — no account, no network, no model — so the same input always produces the same output.'),
+      { t: 'code', lang: 'sh', lines: [
+        '$ fleet import                          # reads ./docker-compose.yml',
+        '$ fleet import compose.prod.yml --node kakashi',
+        '$ fleet import --dry-run                # print it, write nothing',
+      ]},
+      P('It is not a line-for-line translation. A `postgres:16` or `redis:7` service becomes a managed database rather than a container you look after, so Fleet owns its volume, its credentials and its backups — which also means the password in your compose file is not carried into a file you commit. Anything that looks like a credential moves to `secrets`, and a value Compose left to `${VAR}` interpolation is not a value at all, so it moves there too.'),
+      P('It prints every decision it made and every question it could not answer. Bind mounts of your own machine are dropped, because they mean nothing on a node that has never seen that directory. A database has to say which node holds its data, and if you did not pass --node it writes CHANGE_ME and tells you rather than choosing a machine on your behalf.'),
+      { t: 'note', text: 'Compose orders startup with depends_on. Fleet works out deploy order from the manifest itself, so a dependency on another service is dropped — `uses` names databases only.' },
+
       H('Top level'),
       { t: 'kv', rows: [
         ['fleet', 'string · required. The fleet this repository deploys into.'],
@@ -337,6 +348,7 @@ export const PAGES = {
       { t: 'table', head: ['Command', 'What it does'], rows: [
         ['fleet up [service]', 'Detect framework, scaffold, apply, build, deploy and print URL in one command.'],
         ['fleet init', 'Scaffold a fleet.yaml and optimised Dockerfile from the repository contents.'],
+        ['fleet import [file]', 'Convert a docker-compose.yml into a fleet.yaml. Runs locally; recognised database images become managed databases, and credentials become secrets. --node names the node a database lives on, --dry-run prints without writing.'],
         ['fleet config show', 'Show the saved control plane and selected fleet without exposing tokens.'],
         ['fleet use <fleet>', 'Choose the default fleet for later commands.'],
         ['fleet doctor', 'Check login, fleet access, nodes, deployments, HTTPS ingress, and GitHub.'],

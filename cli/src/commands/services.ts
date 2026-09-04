@@ -597,3 +597,69 @@ export const removeServiceCommand = {
     if (body.note) console.log(c.dim(`  ${body.note}`))
   },
 }
+
+/**
+ * docker-compose.yml → fleet.yaml.
+ *
+ * The most common way to arrive at Fleet with several services, two languages
+ * and a database is to already have a compose file describing exactly that.
+ * Reading it is a transform rather than a guess, so this needs no network, no
+ * account, and no model — it works before you have signed in.
+ *
+ * It prints what it decided and what it could not answer. A converter that
+ * silently drops a bind mount or invents a node is worse than one that refuses,
+ * because the reader only finds out at deploy time.
+ */
+export const importCommand = {
+  async run(args: string[], flags: Flags) {
+    const { composeToFleet } = await import('../compose.js')
+
+    const source = args[0] ?? 'docker-compose.yml'
+    let text: string
+    try {
+      text = await readFile(source, 'utf8')
+    } catch {
+      throw new CliError(
+        `could not read ${source}\n  pass a path: fleet import path/to/docker-compose.yml`,
+        EXIT.usage
+      )
+    }
+
+    const out = manifestPath(typeof flags.out === 'string' ? flags.out : undefined)
+    const force = flags.force === true
+    if (!force) {
+      try {
+        await access(out)
+        throw new CliError(`${out} already exists — pass --force to overwrite it.`, EXIT.usage)
+      } catch (err) {
+        if (err instanceof CliError) throw err
+      }
+    }
+
+    let result: { manifest: string; notes: string[]; questions: string[] }
+    try {
+      result = composeToFleet(text, {
+        fleet: typeof flags.fleet === 'string' ? flags.fleet : undefined,
+        node: typeof flags.node === 'string' ? flags.node : undefined,
+      })
+    } catch (err) {
+      throw new CliError((err as Error).message, EXIT.usage)
+    }
+
+    // --dry-run prints and writes nothing, so the output can be piped or read
+    // before it lands next to the file it was derived from.
+    if (flags['dry-run'] === true) {
+      process.stdout.write(result.manifest)
+    } else {
+      await writeFile(out, result.manifest)
+      console.log(`${c.green('created')} ${out}  ${c.dim(`from ${source}`)}`)
+    }
+
+    for (const note of result.notes) console.log(`  ${c.dim('·')} ${c.dim(note)}`)
+    for (const q of result.questions) console.log(`  ${c.yellow('?')} ${q}`)
+
+    if (!result.questions.length) {
+      console.log(c.dim(`\n  check it with: fleet apply --dry-run`))
+    }
+  },
+}
