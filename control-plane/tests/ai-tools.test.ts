@@ -21,6 +21,9 @@ import { callTool } from '../src/ai/tools.js'
 let ctx: AppContext
 let fleetId: string
 let otherFleetId: string
+/** Hostnames are unique across the whole table, and this database is not reset
+    between runs — a fixed one works exactly once and then fails for ever. */
+const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
 before(async () => {
   ctx = createContext(loadConfig())
@@ -43,7 +46,7 @@ before(async () => {
     .insert(services)
     .values({
       fleetId, name: 'api', project: 'demo', placementPolicy: 'flexible',
-      requestRamMb: 512, compatibleArches: ['amd64'], hostname: 'api.example.invalid',
+      requestRamMb: 512, compatibleArches: ['amd64'], hostname: `api-${runId}.example.invalid`,
     })
     .returning()
 

@@ -746,6 +746,75 @@ async function answerQuestions(
   return Object.keys(answers).length ? answers : null
 }
 
+/**
+ * Ask the control plane why something is wrong.
+ *
+ * Distinct from `explain`, which reads a failure log you already have. This
+ * goes and finds the evidence: the deployment history, what the node says it
+ * is running, the container's output, whether the public address answers.
+ */
+export const diagnoseCommand = {
+  async run(args: string[], flags: Flags) {
+    const fleetId = await requireFleet(typeof flags.fleet === 'string' ? flags.fleet : undefined)
+    const question = args.join(' ').trim()
+    if (!question) {
+      throw new CliError(
+        'usage: fleet diagnose "<what is wrong>"\n' +
+          '   eg: fleet diagnose "why is backend returning 502?"',
+        EXIT.usage
+      )
+    }
+
+    type Result =
+      | {
+          status: 'ok'
+          summary: string
+          findings: Array<{ claim: string; evidence: string }>
+          next: string[]
+          calls: Array<{ tool: string; args: Record<string, unknown> }>
+          model: string
+        }
+      | { status: 'disabled'; reason: string }
+      | { status: 'inconclusive'; reason: string; calls: Array<{ tool: string; args: Record<string, unknown> }> }
+
+    const { body } = await task(
+      'looking',
+      async () => request<Result>('POST', `/fleets/${fleetId}/diagnose`, { body: { question } }),
+      // What it looked at, so the wait is legible rather than a spinner.
+      { done: (r) => ('calls' in r.body ? `looked at ${r.body.calls.length} thing(s)` : 'done') }
+    )
+
+    if (flags.json) return console.log(JSON.stringify(body, null, 2))
+
+    if (body.status === 'disabled') {
+      return console.log(`${glyph.warn} ${c.yellow('unavailable')}  ${body.reason}`)
+    }
+
+    // What it looked at, always — the reader can repeat any of it by hand, and
+    // a diagnosis you cannot retrace is a diagnosis you have to take on faith.
+    for (const call of body.calls) {
+      const detail = Object.values(call.args)[0]
+      console.log(c.dim(`  · ${call.tool}${detail ? ` ${String(detail)}` : ''}`))
+    }
+
+    if (body.status === 'inconclusive') {
+      console.log(`\n${glyph.warn} ${c.yellow('inconclusive')}  ${body.reason}`)
+      return
+    }
+
+    console.log(`\n${body.summary}\n`)
+    for (const f of body.findings) {
+      console.log(`  ${c.bold(f.claim)}`)
+      console.log(c.dim(`    ${f.evidence}`))
+    }
+    if (body.next.length) {
+      console.log(`\n  ${c.dim('next')}`)
+      for (const n of body.next) console.log(`  ${glyph.info ?? '·'} ${n}`)
+    }
+    console.log(c.dim(`\n  ${body.model}`))
+  },
+}
+
 export const initCommand = {
   async run(args: string[], flags: Flags) {
     const { detect, manifestTemplate } = await import('../detect.js')

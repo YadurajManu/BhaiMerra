@@ -101,7 +101,7 @@ function waitHint(res: Response, message: string): number | null {
  */
 export async function chat(
   config: ProviderConfig,
-  messages: Array<{ role: 'system' | 'user'; content: string }>,
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
   opts: { maxTokens?: number; temperature?: number; noRetry?: boolean } = {},
   fetchImpl: typeof fetch = fetch
 ): Promise<{ content: string; tokensIn: number; tokensOut: number }> {

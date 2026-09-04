@@ -529,6 +529,26 @@ export async function serviceRoutes(app: FastifyInstance) {
     }
   )
 
+  /**
+   * Work out why something is wrong, by looking.
+   *
+   * A write method for a read-only operation, because it takes a question and
+   * spends a model call — GET would be cached and retried by things that
+   * assume neither costs anything.
+   */
+  app.post(
+    '/fleets/:fleetId/diagnose',
+    { preHandler: requireFleetPermission('service.read') },
+    async (req, reply) => {
+      const { fleetId } = req.params as { fleetId: string }
+      const body = z.object({ question: z.string().min(1).max(500) }).parse(req.body ?? {})
+
+      const { diagnose } = await import('../ai/diagnose.js')
+      const out = await diagnose(app.ctx, { fleetId, question: body.question })
+      return reply.send(out)
+    }
+  )
+
   app.post(
     '/services/:serviceId/deploy',
     { preHandler: requireServicePermission('service.deploy') },
