@@ -5,7 +5,7 @@ import { eq, inArray } from 'drizzle-orm'
 
 import { loadConfig } from '../src/config.js'
 import { createContext, closeContext, type AppContext } from '../src/api/context.js'
-import { sweepOnce } from '../src/heartbeat/sweeper.js'
+import { sweepOnce, STARTUP_GRACE_MS } from '../src/heartbeat/sweeper.js'
 import { orgs, fleets, nodes } from '../src/db/schema.js'
 import { hashToken, newAgentToken } from '../src/lib/tokens.js'
 import type { FleetEventPayload } from '../src/lib/events.js'
@@ -30,6 +30,11 @@ describe('heartbeat failure detection (FR-5)', () => {
 
   before(async () => {
     ctx = createContext(loadConfig())
+    // Failure detection ignores node silence for the first few minutes after
+    // the control plane starts: during a restart every node looks equally
+    // quiet. These tests are about what happens once it has been listening
+    // long enough for silence to mean something, so say so explicitly.
+    ctx.startedAt = new Date(Date.now() - STARTUP_GRACE_MS - 60_000)
 
     const [org] = await ctx.db.insert(orgs).values({ name: 'failover-test-org' }).returning()
     orgId = org!.id
@@ -139,6 +144,53 @@ describe('heartbeat failure detection (FR-5)', () => {
     assert.equal(await ctx.redis.get(`node:${nodeIds['flaky']}:down`), '1')
   })
 
+  test('a control plane that just restarted marks nothing down', async () => {
+    // The outage this prevents, twice in one afternoon. While the control
+    // plane is restarting it can receive no heartbeat from anyone, so every
+    // node in the fleet looks exactly as quiet as one that has been unplugged.
+    // The first sweep after the restart marked the whole fleet down and ran
+    // failover on all of it: services rescheduled, one stranded with nowhere
+    // to go, and their containers reaped by the agents that came back to find
+    // them absent from desired state. A database was deleted this way.
+    //
+    // Silence is only evidence if somebody was listening.
+    // These tests share a fleet and run in order, so flaky may already be
+    // offline from an earlier one. Put it back, or this proves nothing.
+    await ctx.db
+      .update(nodes)
+      .set({ status: 'online' })
+      .where(eq(nodes.id, nodeIds['flaky']!))
+
+    await wait(1300)
+    await Promise.all([beat('always-on'), beat('vps')])
+
+    const wasStartedAt = ctx.startedAt
+    ctx.startedAt = new Date() // as if this process had just come up
+    try {
+      const markedDown = await sweep()
+      assert.equal(
+        markedDown.length,
+        0,
+        'nothing may be marked down while the silence is as easily explained by our own absence'
+      )
+      const [row] = await ctx.db
+        .select({ status: nodes.status })
+        .from(nodes)
+        .where(eq(nodes.id, nodeIds['flaky']!))
+        .limit(1)
+      assert.equal(row?.status, 'online', 'a genuinely dead node is caught later, not never')
+    } finally {
+      ctx.startedAt = wasStartedAt
+    }
+
+    // And the grace is not an amnesty: once it has been listening long enough,
+    // the same silent node is marked down as usual.
+    await Promise.all([beat('always-on'), beat('vps')])
+    const markedDown = await sweep()
+    assert.equal(markedDown.length, 1, 'detection resumes once silence means something')
+    assert.equal(markedDown[0]!.name, 'flaky')
+  })
+
   test('a cordoned node is never swept', async () => {
     await ctx.db
       .update(nodes)
@@ -175,6 +227,11 @@ describe('a node that registers but never heartbeats', () => {
 
   before(async () => {
     ctx = createContext(loadConfig())
+    // Failure detection ignores node silence for the first few minutes after
+    // the control plane starts: during a restart every node looks equally
+    // quiet. These tests are about what happens once it has been listening
+    // long enough for silence to mean something, so say so explicitly.
+    ctx.startedAt = new Date(Date.now() - STARTUP_GRACE_MS - 60_000)
     const [org] = await ctx.db.insert(orgs).values({ name: 'silent-node-test' }).returning()
     orgId = org!.id
     const [fleet] = await ctx.db

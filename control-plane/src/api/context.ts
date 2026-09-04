@@ -33,6 +33,16 @@ export type AppContext = {
    * nothing". Entries remove themselves when they settle.
    */
   deploysInFlight: Map<string, Promise<void>>
+  /**
+   * When this control plane process started serving.
+   *
+   * Failure detection needs it. A node is declared down because it has gone
+   * quiet, but silence is only evidence if somebody was listening: while this
+   * process was restarting, every node in the fleet looked exactly as silent
+   * as a node that had been unplugged. Without this, a control plane restart
+   * marked the entire fleet down and triggered failover for all of it.
+   */
+  startedAt: Date
 }
 
 /** Wait for every in-flight deploy. Used on shutdown, and by tests. */
@@ -75,6 +85,7 @@ export function createContext(
   const ctx: Partial<AppContext> = {
     config, db, sql, redis, heartbeats, builds, github, email,
     deploysInFlight: new Map(),
+    startedAt: new Date(),
   }
   ctx.tunnels = new TunnelRegistry(ctx as AppContext)
 

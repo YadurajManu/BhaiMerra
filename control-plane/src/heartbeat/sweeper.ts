@@ -80,6 +80,29 @@ export async function failStaleBuilds(ctx: AppContext, opts: SweepOptions = {}):
 export const ROLLOUT_TIMEOUT_MS = 10 * 60_000
 
 /**
+ * How long after this process starts before a node may be declared down.
+ *
+ * Silence is only evidence if somebody was listening. While the control plane
+ * is restarting no heartbeat can be received from anyone, so every node in the
+ * fleet looks exactly as quiet as one that has been unplugged -- and the first
+ * sweep after a restart marked all of them down and ran failover on the lot.
+ * Twice in one afternoon that took down a healthy fleet, and the damage was
+ * done downstream: services rescheduled, stranded, and their containers reaped.
+ *
+ * Three minutes, and the number is not arbitrary. An agent that cannot reach
+ * the control plane backs off exponentially up to two minutes between attempts
+ * (agent/internal/heartbeat/loop.go), deliberately, so a fleet does not become
+ * a thundering herd on recovery. A live node may therefore stay quiet for a
+ * full two minutes after the control plane returns. A grace shorter than that
+ * would mark healthy nodes down for obeying their own backoff.
+ *
+ * The cost is that a node which genuinely died during the restart is noticed
+ * up to three minutes late. That is the right trade: late detection delays a
+ * failover, premature detection causes one that was never needed.
+ */
+export const STARTUP_GRACE_MS = 3 * 60_000
+
+/**
  * A rollout that never became healthy.
  *
  * The previous release is deliberately left alone. That is the whole point of
@@ -245,7 +268,16 @@ export async function sweepOnce(ctx: AppContext, opts: SweepOptions = {}): Promi
   } catch (err) {
     opts.log?.error({ err }, 'stalled rollout sweep failed')
   }
-  {
+  // Failure detection, once this process has been listening long enough for
+  // silence to mean something. Everything above is about deployments and is
+  // safe to run immediately; this is the part that acts on node liveness.
+  const listeningFor = Date.now() - ctx.startedAt.getTime()
+  if (listeningFor < STARTUP_GRACE_MS) {
+    opts.log?.info(
+      { listeningForMs: listeningFor, graceMs: STARTUP_GRACE_MS },
+      'skipping failure detection: this control plane has not been listening long enough for silence to mean a node is down'
+    )
+  } else {
     {
       const allFleets = await ctx.db
         .select({

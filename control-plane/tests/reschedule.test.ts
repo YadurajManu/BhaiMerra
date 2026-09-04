@@ -5,7 +5,7 @@ import { eq, and, inArray } from 'drizzle-orm'
 
 import { loadConfig } from '../src/config.js'
 import { createContext, closeContext, type AppContext } from '../src/api/context.js'
-import { sweepOnce } from '../src/heartbeat/sweeper.js'
+import { sweepOnce, STARTUP_GRACE_MS } from '../src/heartbeat/sweeper.js'
 import { orgs, fleets, nodes, services, deployments, placementEvents } from '../src/db/schema.js'
 import { hashToken, newAgentToken } from '../src/lib/tokens.js'
 import type { FleetEventPayload } from '../src/lib/events.js'
@@ -27,6 +27,11 @@ describe('failover rescheduling (FR-6, FR-7)', () => {
 
   before(async () => {
     ctx = createContext(loadConfig())
+    // Failure detection ignores node silence for the first few minutes after
+    // the control plane starts: during a restart every node looks equally
+    // quiet. These tests are about what happens once it has been listening
+    // long enough for silence to mean something, so say so explicitly.
+    ctx.startedAt = new Date(Date.now() - STARTUP_GRACE_MS - 60_000)
 
     const [org] = await ctx.db.insert(orgs).values({ name: 'reschedule-test' }).returning()
     orgId = org!.id
