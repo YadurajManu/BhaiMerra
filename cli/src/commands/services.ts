@@ -85,6 +85,44 @@ export const applyCommand = {
     const fleetId = await requireFleet(typeof flags.fleet === 'string' ? flags.fleet : undefined)
     const manifest = await readManifest(manifestPath(args[0]))
 
+    // --dry-run used to be accepted and ignored, so `fleet apply --dry-run`
+    // applied. `fleet init` prints that exact command as the safe way to check
+    // its output, which made the one command the tool recommends for looking
+    // before you leap the command that leapt. The control plane has always had
+    // an endpoint for this, labelled "validate without touching anything"; the
+    // CLI simply never called it.
+    if (flags['dry-run'] || flags.plan) {
+      const { body } = await request<{
+        valid: boolean
+        fleet?: string
+        services?: Array<{ name: string; placement: string; ramMb: number; arch: string[] }>
+        warnings?: string[]
+        issues?: string[]
+      }>('POST', `/fleets/${fleetId}/services/validate`, { body: { manifest } })
+
+      if (flags.json) return console.log(JSON.stringify(body, null, 2))
+
+      if (!body.valid) {
+        for (const issue of body.issues ?? []) {
+          console.log(`${glyph.fail} ${c.red('invalid')}  ${issue}`)
+        }
+        throw new CliError('The manifest was not applied.', EXIT.usage)
+      }
+
+      console.log(`${glyph.ok} ${c.green('valid')}  fleet ${c.bold(body.fleet ?? '?')}`)
+      for (const svc of body.services ?? []) {
+        // arch is empty when the manifest does not constrain it, which is the
+        // common case; printing a trailing separator for nothing reads like a
+        // value failed to load.
+        const facts = [svc.placement, `${svc.ramMb}Mi`, svc.arch?.join(', ')].filter(Boolean)
+        console.log(`  ${c.bold(svc.name)}  ${c.dim(facts.join(' · '))}`)
+      }
+      for (const w of body.warnings ?? []) {
+        console.log(`${glyph.warn} ${c.yellow('warning')}  ${w}`)
+      }
+      return console.log(c.dim('\nnothing was changed. Drop --dry-run to apply.'))
+    }
+
     const body = await task(
       `applying ${manifestPath(args[0])}`,
       async () =>
@@ -496,6 +534,74 @@ export const logsCommand = {
   },
 }
 
+/**
+ * A second opinion on the draft, when --ai is given.
+ *
+ * Opt-in, because it sends a description of the repository to whatever
+ * provider the control plane is configured with, and that should never be a
+ * surprise. Never fatal: the draft is what `init` produced without it, so any
+ * failure here leaves the user exactly where they would have been anyway.
+ *
+ * The changes are printed rather than applied silently. A manifest that
+ * appeared with different ports and no explanation is worse than one with a
+ * mistake in it -- at least the mistake is yours to find.
+ */
+async function reviewed(draft: string, flags: Flags): Promise<string> {
+  const { repoMap } = await import('../repomap.js')
+  const fleetId = await requireFleet(typeof flags.fleet === 'string' ? flags.fleet : undefined)
+
+  type Assist =
+    | { status: 'ok'; manifest: string; notes: string[]; changed: boolean; model: string; usage: { used: number; limit: number } }
+    | { status: 'disabled'; reason: string }
+    | { status: 'rate_limited'; limit: number; resetsInSec: number }
+    | { status: 'kept_draft'; reason: string }
+
+  let out: Assist
+  try {
+    const map = await repoMap()
+    out = (
+      await task(
+        'reading the repository for a second opinion',
+        async () =>
+          request<Assist>('POST', `/fleets/${fleetId}/manifest/assist`, {
+            body: { draft, repoMap: map },
+          }),
+        { done: () => 'reviewed' }
+      )
+    ).body
+  } catch (err) {
+    console.log(
+      `${glyph.warn} ${c.yellow('review skipped')}  ${err instanceof Error ? err.message : 'the control plane could not be reached'}`
+    )
+    return draft
+  }
+
+  if (out.status === 'disabled') {
+    console.log(`${glyph.warn} ${c.yellow('review skipped')}  ${out.reason}`)
+    return draft
+  }
+  if (out.status === 'rate_limited') {
+    console.log(
+      `${glyph.warn} ${c.yellow('review skipped')}  ${out.limit} reviews a day is the limit; it resets in ${Math.ceil(out.resetsInSec / 3600)}h.`
+    )
+    return draft
+  }
+  if (out.status === 'kept_draft') {
+    // Worth saying out loud: silence here would read as "the review agreed".
+    console.log(`${glyph.warn} ${c.yellow('kept the draft')}  ${out.reason}`)
+    return draft
+  }
+  if (!out.changed) {
+    console.log(`${glyph.ok} ${c.green('reviewed')}  ${c.dim('nothing to change')}`)
+    return out.manifest
+  }
+
+  console.log(`${glyph.ok} ${c.green('reviewed')}  ${c.dim(out.model)}`)
+  for (const note of out.notes) console.log(c.dim(`  · ${note}`))
+  console.log(c.dim(`  ${out.usage.used}/${out.usage.limit} reviews used today`))
+  return out.manifest
+}
+
 export const initCommand = {
   async run(args: string[], flags: Flags) {
     const { detect, manifestTemplate } = await import('../detect.js')
@@ -522,10 +628,12 @@ export const initCommand = {
     const found = await discover()
 
     if (found.services.length > 1 || found.databases.length) {
-      const { manifest, questions } = manifestFromDiscovery(found, {
+      const drafted = manifestFromDiscovery(found, {
         fleet: typeof flags.fleet === 'string' ? flags.fleet : undefined,
         node: typeof flags.node === 'string' ? flags.node : undefined,
       })
+      const questions = drafted.questions
+      const manifest = flags.ai ? await reviewed(drafted.manifest, flags) : drafted.manifest
       await writeFile(path, manifest)
       console.log(`${c.green('created')} ${path}`)
       if (found.layout) console.log(c.dim(`  ${found.layout}`))

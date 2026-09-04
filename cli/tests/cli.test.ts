@@ -2,6 +2,7 @@ import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 import { parseArgs } from '../src/args.js'
 import { table, relativeTime, mb, visibleLength, truncate, c } from '../src/render.js'
+import { readFileSync } from 'node:fs'
 
 describe('argument parsing', () => {
   test('separates positionals from flags', () => {
@@ -77,5 +78,29 @@ describe('rendering', () => {
     // acquire a control sequence just because it was shortened.
     assert.equal(visibleLength('e\u0301'), 1)
     assert.equal(truncate('abcdefgh', 4), 'abc…')
+  })
+})
+
+describe('apply --dry-run', () => {
+  test('is wired to the validate endpoint, not the apply one', () => {
+    // It used to be accepted and ignored, so `fleet apply --dry-run` applied.
+    // `fleet init` prints that exact command as the safe way to check its
+    // output, which made the one command the tool recommends for looking
+    // before you leap the command that leapt. This asserts the source, because
+    // the failure mode is a flag silently doing nothing — which no output
+    // assertion would have caught either.
+    const src = readFileSync(new URL('../src/commands/services.ts', import.meta.url), 'utf8')
+    const apply = src.slice(src.indexOf('export const applyCommand'))
+
+    const dryRunAt = apply.indexOf("flags['dry-run']")
+    const validateAt = apply.indexOf('/services/validate')
+    const postAt = apply.indexOf("'POST', `/fleets/${fleetId}/services`")
+
+    assert.ok(dryRunAt > -1, 'apply must read the dry-run flag')
+    assert.ok(validateAt > -1, 'and send the manifest to the validate endpoint')
+    assert.ok(
+      validateAt < postAt,
+      'the validate path must return before the applying one is reached'
+    )
   })
 })

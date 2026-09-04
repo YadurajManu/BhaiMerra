@@ -292,3 +292,30 @@ describe('generated container ports', () => {
     await rm(dir, { recursive: true, force: true })
   })
 })
+
+describe('what is a service and what is part of one', () => {
+  test("a project's own src/ is not proposed as a second service", async () => {
+    // A Vite app keeps src/ beside package.json. The immediate-children
+    // fallback proposed deploying it: a service built from the source
+    // directory of another service, serving raw .html and .ts while the real
+    // build sat one level up. Found on a real repository, not imagined.
+    const dir = await mkdtemp(join(tmpdir(), 'fleet-src-'))
+    await writeFile(
+      join(dir, 'package.json'),
+      JSON.stringify({ name: 'portfolio', scripts: { build: 'vite build' }, dependencies: { vite: '^5' } })
+    )
+    await mkdir(join(dir, 'src'), { recursive: true })
+    await writeFile(join(dir, 'src', 'index.html'), '<!doctype html><title>hi</title>')
+    await mkdir(join(dir, 'server'), { recursive: true })
+    await writeFile(
+      join(dir, 'server', 'package.json'),
+      JSON.stringify({ name: 'server', scripts: { start: 'node server.js' }, dependencies: { express: '^4' } })
+    )
+
+    const d = await discover(dir)
+    const names = d.services.map((s) => s.name)
+    assert.ok(!names.includes('src'), `src should not be a service, got ${names.join(', ')}`)
+    assert.ok(names.includes('server'), 'a real sibling service is still found')
+    await rm(dir, { recursive: true, force: true })
+  })
+})

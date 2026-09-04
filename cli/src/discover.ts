@@ -77,6 +77,17 @@ const readJson = async (p: string): Promise<Record<string, unknown> | null> => {
 const IGNORED = new Set([
   'node_modules', '.git', 'dist', 'build', 'target', 'vendor', '.next',
   'coverage', '__pycache__', '.venv', 'venv', 'tmp', '.turbo', '.cache',
+  // Parts of a project rather than projects of their own.
+  //
+  // These are picked up by the immediate-children fallback, which exists for
+  // repositories that keep their services in plain top-level folders. A Vite
+  // app has src/ next to package.json, and the fallback happily proposed
+  // deploying it: a second service, built from the source directory of the
+  // first, serving raw .ts and .html instead of the built site — while the
+  // real build sat one level up. `src` is never a deployable unit on its own,
+  // and neither are the rest of these.
+  'src', 'public', 'static', 'assets', 'test', 'tests', '__tests__',
+  'migrations', 'fixtures', 'examples',
 ])
 
 /**

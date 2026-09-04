@@ -452,6 +452,38 @@ export async function serviceRoutes(app: FastifyInstance) {
     }
   )
 
+  /**
+   * A second opinion on a generated fleet.yaml.
+   *
+   * Sits beside the validate endpoint deliberately: both answer "is this
+   * right?" before anything is applied, and neither writes.
+   */
+  app.post(
+    '/fleets/:fleetId/manifest/assist',
+    // Same permission the apply it precedes requires: this only ever suggests,
+    // but suggesting a manifest to somebody who could not apply one is noise.
+    { preHandler: requireFleetPermission('service.create') },
+    async (req, reply) => {
+      const body = z
+        .object({
+          draft: z.string().min(1).max(64_000),
+          // Bounded because it is pasted into a prompt: a repository that
+          // large has more to say than a model can read anyway, and the CLI
+          // trims it to the evidence before sending.
+          repoMap: z.string().min(1).max(64_000),
+        })
+        .parse(req.body ?? {})
+
+      const { assistManifest } = await import('../ai/manifest.js')
+      const out = await assistManifest(app.ctx, {
+        userId: req.userId!,
+        draft: body.draft,
+        repoMap: body.repoMap,
+      })
+      return reply.send(out)
+    }
+  )
+
   app.post(
     '/services/:serviceId/deploy',
     { preHandler: requireServicePermission('service.deploy') },

@@ -69,14 +69,21 @@ function parseReply(content: string): { summary: string; steps: string[] } {
   return { summary, steps }
 }
 
-export async function explainWith(
+/**
+ * One chat completion, with the failure modes this codebase has actually hit.
+ *
+ * Extracted so every caller gets them. Both were found the hard way and both
+ * reported as "provider returned no content" until they were told apart: a
+ * gateway answering HTTP 200 with an HTML bot-detection page, and a reasoning
+ * model spending its whole completion budget thinking. A second caller writing
+ * its own fetch would rediscover both.
+ */
+export async function chat(
   config: ProviderConfig,
-  context: { log: string; manifest?: string | null; service?: string },
+  messages: Array<{ role: 'system' | 'user'; content: string }>,
+  opts: { maxTokens?: number; temperature?: number } = {},
   fetchImpl: typeof fetch = fetch
-): Promise<Explanation> {
-  const parts = [`Service: ${context.service ?? 'unknown'}`, '', 'Failure log (tail):', context.log]
-  if (context.manifest) parts.push('', 'Its fleet.yaml entry:', context.manifest)
-
+): Promise<{ content: string; tokensIn: number; tokensOut: number }> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
 
@@ -89,35 +96,15 @@ export async function explainWith(
       },
       body: JSON.stringify({
         model: config.model,
-        // Low, because this is reading a log rather than writing prose: the
-        // same failure should not produce a different answer each time.
-        temperature: 0.1,
-        // Headroom for a reasoning model, not for a long answer.
-        //
-        // The reply itself is a sentence and a few steps -- a few hundred
-        // tokens. But models like gpt-oss spend completion tokens thinking
-        // before they write, and that budget is shared: when reasoning
-        // exhausts it the response comes back finish_reason "length" with an
-        // empty content field. At 700 a real 1.1kB build log left only a
-        // little to spare, and the logs worth explaining are the long ones.
-        max_tokens: 1500,
-        messages: [
-          { role: 'system', content: SYSTEM },
-          { role: 'user', content: parts.join('\n') },
-        ],
+        temperature: opts.temperature ?? 0.1,
+        max_tokens: opts.maxTokens ?? 1500,
+        messages,
       }),
       signal: controller.signal,
     })
 
     // Read as text first, so a reply that is not JSON can be described rather
     // than silently becoming {}.
-    //
-    // It used to be res.json().catch(() => ({})), which turned any non-JSON
-    // response into an empty object and then reported "provider returned no
-    // content" -- true, and useless. An endpoint behind a bot-detection WAF
-    // answers HTTP 200 with an HTML challenge page, and that message sends
-    // whoever reads it looking at the model name and the API key, neither of
-    // which is the problem. Say what actually came back.
     const raw = await res.text()
     let body: ChatResponse = {}
     let parsed = true
@@ -151,10 +138,6 @@ export async function explainWith(
     const choice = body.choices?.[0]
     const content = choice?.message?.content
 
-    // Truncation is not emptiness, and saying so saves the next person the
-    // hour it cost to work out the first time. A reasoning model that spends
-    // its whole budget thinking returns exactly this: a 200, valid JSON, and
-    // nothing to read.
     if (!content && choice?.finish_reason === 'length') {
       throw new Error(
         'the model ran out of tokens before writing an answer' +
@@ -165,15 +148,34 @@ export async function explainWith(
 
     if (!content) throw new Error('provider returned no content')
 
-    const { summary, steps } = parseReply(content)
     return {
-      summary,
-      steps,
+      content,
       tokensIn: body.usage?.prompt_tokens ?? 0,
       tokensOut: body.usage?.completion_tokens ?? 0,
-      model: config.model,
     }
   } finally {
     clearTimeout(timer)
   }
+}
+
+export async function explainWith(
+  config: ProviderConfig,
+  context: { log: string; manifest?: string | null; service?: string },
+  fetchImpl: typeof fetch = fetch
+): Promise<Explanation> {
+  const parts = [`Service: ${context.service ?? 'unknown'}`, '', 'Failure log (tail):', context.log]
+  if (context.manifest) parts.push('', 'Its fleet.yaml entry:', context.manifest)
+
+  const { content, tokensIn, tokensOut } = await chat(
+    config,
+    [
+      { role: 'system', content: SYSTEM },
+      { role: 'user', content: parts.join('\n') },
+    ],
+    { maxTokens: 1500 },
+    fetchImpl
+  )
+
+  const { summary, steps } = parseReply(content)
+  return { summary, steps, tokensIn, tokensOut, model: config.model }
 }
