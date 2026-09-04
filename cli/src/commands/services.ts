@@ -821,7 +821,12 @@ export const importCommand = {
     try {
       result = composeToFleet(text, {
         fleet: typeof flags.fleet === 'string' ? flags.fleet : undefined,
-        node: typeof flags.node === 'string' ? flags.node : undefined,
+        // Same reasoning as init: a compose file that runs a database becomes
+        // a manifest that must name a node, and on a one-node fleet there is
+        // nothing to choose. Without this, import wrote a placeholder and the
+        // very next command failed on it.
+        node:
+          (typeof flags.node === 'string' ? flags.node : undefined) ?? (await theOnlyNode(flags)),
       })
     } catch (err) {
       throw new CliError((err as Error).message, EXIT.usage)

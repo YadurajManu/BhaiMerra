@@ -1,5 +1,6 @@
 import { parse as parseYaml } from 'yaml'
 import { safeDatabaseName } from './dbnames.js'
+import { injectedUrl, pointsAt } from './dburl.js'
 
 /**
  * docker-compose.yml → fleet.yaml.
@@ -228,6 +229,8 @@ export function composeToFleet(
   /** Compose name -> the name the database is declared under, which differs
       whenever the compose name would collide with its engine's own env vars. */
   const dbNames = new Map<string, string>()
+  /** Compose name -> engine, so a connection string can be rewritten to it. */
+  const dbEngines = new Map<string, string>()
   const takenDbNames = new Set<string>()
 
   // Databases first, so a service's `uses` can reference one by name.
@@ -241,6 +244,7 @@ export function composeToFleet(
     // service declared before it in the file still has to point at the name it
     // ends up with, and the main loop would not know it yet.
     dbNames.set(name, safeDatabaseName(name, engine, takenDbNames))
+    dbEngines.set(name, engine)
   }
 
   for (const [name, raw] of Object.entries(servicesRaw)) {
@@ -339,6 +343,29 @@ export function composeToFleet(
         notes.push(`${name}: dropped env key "${k}" — not a usable variable name.`)
         continue
       }
+
+      // A connection string aimed at a service that just became a managed
+      // database is rewritten to the URL Fleet will actually inject.
+      //
+      // Left alone it goes one of two wrong ways: copied verbatim, so the app
+      // dials `mongo:27017` which no longer exists, or swept into `secrets`
+      // because the key matches _URI, so the user is asked to supply a value
+      // Fleet already knows. Both deploy cleanly and fail to connect, which is
+      // the worst kind of wrong — nothing in the manifest looks suspicious.
+      const target = [...dbNames.entries()].find(([composeName]) => pointsAt(v, composeName))
+      if (target) {
+        const [composeName, fleetName] = target
+        const engine = dbEngines.get(composeName)
+        const url = engine ? injectedUrl(fleetName, engine) : null
+        if (url) {
+          plain.push([k, url])
+          notes.push(
+            `${name}: ${k} now points at the managed ${engine} — it named the compose service "${composeName}", which Fleet runs as "${fleetName}" with a password it generates.`
+          )
+          continue
+        }
+      }
+
       const unresolved = v === '' || /^\$\{?[A-Za-z_]/.test(v)
       if (SECRET_HINT.test(k) || unresolved) secrets.push(k)
       else plain.push([k, v])
