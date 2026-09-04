@@ -51,6 +51,7 @@ export async function fleetRoutes(app: FastifyInstance) {
         defaultReclaimPolicy: fleets.defaultReclaimPolicy,
         heartbeatIntervalSec: fleets.heartbeatIntervalSec,
         heartbeatMissThreshold: fleets.heartbeatMissThreshold,
+        agentAutoUpgrade: fleets.agentAutoUpgrade,
       })
       .from(fleets)
       .innerJoin(orgMembers, eq(orgMembers.orgId, fleets.orgId))
@@ -94,6 +95,7 @@ export async function fleetRoutes(app: FastifyInstance) {
           heartbeatIntervalSec: z.number().int().min(1).max(60).optional(),
           heartbeatMissThreshold: z.number().int().min(1).max(10).optional(),
           defaultReclaimPolicy: z.enum(['eager', 'idle', 'manual']).optional(),
+          agentAutoUpgrade: z.boolean().optional(),
         })
         .refine((v) => Object.keys(v).length > 0, { message: 'Nothing to change' })
         .safeParse(req.body)

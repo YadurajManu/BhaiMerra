@@ -131,6 +131,10 @@ type DesiredState struct {
 	NodeID      string           `json:"node_id"`
 	GeneratedAt string           `json:"generated_at"`
 	Services    []DesiredService `json:"services"`
+	// Whether this fleet permits the agent to replace its own binary. Absent
+	// means false: a control plane too old to send it is one that was never
+	// asked, and defaulting to true would upgrade nodes nobody opted in.
+	AgentAutoUpgrade bool `json:"agent_auto_upgrade"`
 	// Docker's X-Registry-Auth payload for the fleet registry, or empty when it
 	// needs no credentials. A registry reachable from outside the LAN has to
 	// require them, and without this the pull fails with a 401 the node cannot
@@ -330,4 +334,56 @@ func (c *Client) CompleteRestore(ctx context.Context, id string) error {
 // FailRestore reports why a restore could not be completed.
 func (c *Client) FailRestore(ctx context.Context, id, reason string) error {
 	return c.do(ctx, http.MethodPost, "/agent/restores/"+id+"/fail", map[string]string{"reason": reason}, nil)
+}
+
+// PublishedSums fetches the checksums the control plane publishes beside the
+// agent binaries it serves.
+//
+// Plain text, not JSON, and deliberately unauthenticated on the server: it is
+// the same file the install script reads before anyone has a token. It uses a
+// longer deadline than c.http allows, because this is not on the heartbeat
+// path and a slow link should not turn into "no upgrade available".
+func (c *Client) PublishedSums(ctx context.Context) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/install/SHA256SUMS", nil)
+	if err != nil {
+		return "", err
+	}
+	res, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("SHA256SUMS: unexpected status %d", res.StatusCode)
+	}
+	// Bounded: a checksum file is a few hundred bytes, and anything vastly
+	// larger is not one.
+	body, err := io.ReadAll(io.LimitReader(res.Body, 64*1024))
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+// DownloadAgent streams one published binary.
+//
+// The caller closes the body, and verifies the checksum before the bytes are
+// allowed anywhere near disk as an executable. Nothing here trusts the
+// download; the transport is only a transport.
+func (c *Client) DownloadAgent(ctx context.Context, binary string) (io.ReadCloser, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/install/"+binary, nil)
+	if err != nil {
+		return nil, err
+	}
+	// Several minutes, not seconds: this is ~7 MB to a Raspberry Pi on a
+	// domestic connection, and a timeout here means the node never upgrades.
+	res, err := (&http.Client{Timeout: 10 * time.Minute}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if res.StatusCode != http.StatusOK {
+		res.Body.Close()
+		return nil, fmt.Errorf("download %s: unexpected status %d", binary, res.StatusCode)
+	}
+	return res.Body, nil
 }

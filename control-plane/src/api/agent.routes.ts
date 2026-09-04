@@ -466,9 +466,19 @@ export async function agentRoutes(app: FastifyInstance) {
       })
     )
 
+    // Whether this fleet's agents may replace themselves with the build we
+    // serve. Sent every time rather than assumed, so turning it off takes
+    // effect on the next poll instead of needing anything pushed to a node.
+    const [fleetRow] = await db
+      .select({ autoUpgrade: fleets.agentAutoUpgrade })
+      .from(fleets)
+      .where(eq(fleets.id, fleetId))
+      .limit(1)
+
     return {
       node_id: nodeId,
       generated_at: new Date().toISOString(),
+      agent_auto_upgrade: fleetRow?.autoUpgrade ?? false,
       // Volume backups waiting on this node. A backup can only be taken where
       // the volume is, and the control plane never reaches into a node — so it
       // travels with the desired state and the node collects it.

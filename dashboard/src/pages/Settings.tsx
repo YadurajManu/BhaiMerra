@@ -392,6 +392,7 @@ function FleetSettings() {
   const [interval, setInterval] = useState(5)
   const [threshold, setThreshold] = useState(3)
   const [reclaim, setReclaim] = useState('idle')
+  const [autoUpgrade, setAutoUpgrade] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState<unknown>(null)
@@ -404,6 +405,7 @@ function FleetSettings() {
     setInterval(fleet.heartbeatIntervalSec)
     setThreshold(fleet.heartbeatMissThreshold)
     setReclaim(fleet.defaultReclaimPolicy)
+    setAutoUpgrade(fleet.agentAutoUpgrade)
     setError(null)
     setSaved(false)
   }, [fleet?.id, fleet?.name, fleet?.heartbeatIntervalSec, fleet?.heartbeatMissThreshold, fleet?.defaultReclaimPolicy]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -414,7 +416,8 @@ function FleetSettings() {
     (name !== fleet.name ||
       interval !== fleet.heartbeatIntervalSec ||
       threshold !== fleet.heartbeatMissThreshold ||
-      reclaim !== fleet.defaultReclaimPolicy)
+      reclaim !== fleet.defaultReclaimPolicy ||
+      autoUpgrade !== fleet.agentAutoUpgrade)
 
   // Mirrors the server's rule rather than trusting the button to be enough.
   const tooWide = detection > 300
@@ -433,6 +436,7 @@ function FleetSettings() {
           heartbeatIntervalSec: interval,
           heartbeatMissThreshold: threshold,
           defaultReclaimPolicy: reclaim,
+          agentAutoUpgrade: autoUpgrade,
         },
       })
       await refreshFleets()
@@ -521,6 +525,27 @@ function FleetSettings() {
               : `A node is called down after ${detection}s of silence.`}
           </p>
         </div>
+
+        <label className="flex cursor-pointer items-start gap-3 border-t border-[var(--color-line)] pt-4">
+          <input
+            type="checkbox"
+            checked={autoUpgrade}
+            disabled={!canEdit}
+            onChange={(e) => setAutoUpgrade(e.target.checked)}
+            className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-[var(--color-signal)]"
+          />
+          <span className="min-w-0">
+            <span className="mono-label block text-[10px] text-[var(--color-fg-dim)]">
+              KEEP AGENTS UP TO DATE
+            </span>
+            <span className="mt-1 block text-[12.5px] leading-relaxed text-[var(--color-fg-muted)]">
+              Nodes in this fleet replace their own agent with the build this control plane
+              serves, verifying its checksum first and restarting to install it. Off by default:
+              on for everyone would mean one bad build reaching every node at once, so turn it on
+              for the fleet you are willing to move first.
+            </span>
+          </span>
+        </label>
 
         {error != null && <ErrorNote error={error} />}
 

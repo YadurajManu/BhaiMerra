@@ -1,0 +1,12 @@
+-- Whether a fleet's agents may replace themselves with the published build.
+--
+-- Off by default, and deliberately so. Auto-upgrade that is on for everyone
+-- means one bad build reaches every node in every fleet at once, with no
+-- staging and no way to hold a fleet back while a problem is understood. Opt-in
+-- makes the blast radius a choice: turn it on for the fleet you are willing to
+-- lose first, watch it, then widen.
+--
+-- It is per fleet rather than global because that is the unit an operator
+-- actually owns. A homelab and the fleet running someone's business should not
+-- be obliged to move together.
+ALTER TABLE fleets ADD COLUMN IF NOT EXISTS agent_auto_upgrade boolean NOT NULL DEFAULT false;

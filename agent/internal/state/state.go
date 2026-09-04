@@ -19,6 +19,14 @@ type State struct {
 	AgentToken           string `json:"agent_token"`
 	ControlPlaneURL      string `json:"control_plane_url"`
 	HeartbeatIntervalSec int    `json:"heartbeat_interval_sec"`
+
+	// The build most recently staged for install, and how many times it has
+	// been staged without becoming the running binary. Remembered across
+	// restarts because that is the only way to tell "waiting for a restart"
+	// from "the install is not working" - and without the difference, a broken
+	// upgrade re-downloads the same bytes every reconcile forever.
+	UpgradeStaged   string `json:"upgrade_staged,omitempty"`
+	UpgradeAttempts int    `json:"upgrade_attempts,omitempty"`
 }
 
 func DefaultPath() string {

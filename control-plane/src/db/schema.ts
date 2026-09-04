@@ -158,6 +158,10 @@ export const fleets = pgTable(
     // differ enough that one global default will be wrong for someone.
     heartbeatIntervalSec: integer('heartbeat_interval_sec').notNull().default(5),
     heartbeatMissThreshold: integer('heartbeat_miss_threshold').notNull().default(3),
+    // Opt-in, per fleet: an agent may replace itself with the build the
+    // control plane serves. Off by default, because on-by-default means one
+    // bad build reaches every node everywhere at once.
+    agentAutoUpgrade: boolean('agent_auto_upgrade').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex('fleets_org_name_key').on(t.orgId, t.name)]

@@ -107,6 +107,7 @@ export type Fleet = {
   defaultReclaimPolicy: string
   heartbeatIntervalSec: number
   heartbeatMissThreshold: number
+  agentAutoUpgrade: boolean
 }
 
 export type Node = {

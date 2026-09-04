@@ -363,6 +363,19 @@ Wants=network-online.target docker.service
 
 [Service]
 Type=simple
+# Install a binary the agent has staged, before starting.
+#
+# The agent downloads its replacement and verifies its checksum, but it runs
+# under ProtectSystem=strict and cannot write to ${BIN_DIR} - deliberately,
+# because an agent that can rewrite /usr/local/bin is a much larger thing to
+# trust. The "+" runs this one step outside that sandbox, so the privilege to
+# replace the binary belongs to systemd rather than to the agent.
+#
+# Copy then rename, both inside ${BIN_DIR}: the rename is atomic and on one
+# filesystem, so a machine that loses power mid-upgrade finds either the old
+# binary or the new one, never half of either. The staged file is removed only
+# once the rename has succeeded, so a failure leaves it in place to retry.
+ExecStartPre=+/bin/sh -c 'if [ -x "${STATE_DIR}/agent.staged" ]; then cp -f "${STATE_DIR}/agent.staged" "${BIN_DIR}/.$bin_name.new" && chmod 0755 "${BIN_DIR}/.$bin_name.new" && mv -f "${BIN_DIR}/.$bin_name.new" "${BIN_DIR}/$bin_name" && rm -f "${STATE_DIR}/agent.staged"; fi'
 ExecStart=${BIN_DIR}/$bin_name --control-plane ${CONTROL_PLANE}
 Environment=FLEET_STATE_DIR=${STATE_DIR}
 Environment=FLEET_DOCKER_AUTOSTART=${DOCKER_AUTOSTART}

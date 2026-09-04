@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -28,13 +29,24 @@ import (
 	"github.com/fleet-os/fleet-os/agent/internal/sampler"
 	"github.com/fleet-os/fleet-os/agent/internal/state"
 	"github.com/fleet-os/fleet-os/agent/internal/tunnel"
+	"github.com/fleet-os/fleet-os/agent/internal/upgrade"
 )
 
 // Version is stamped at build time: -ldflags "-X main.Version=0.1.0"
 var Version = "dev"
 
+// errUpgradeStaged is not a failure. It is the only way to ask a supervisor to
+// restart us, which is what installs the binary waiting in the state
+// directory.
+var errUpgradeStaged = errors.New("a verified agent upgrade is staged")
+
 func main() {
-	if err := run(); err != nil && !errors.Is(err, context.Canceled) {
+	err := run()
+	if errors.Is(err, errUpgradeStaged) {
+		// Non-zero on purpose: Restart=on-failure. See ExitUpgradeStaged.
+		os.Exit(ExitUpgradeStaged)
+	}
+	if err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintf(os.Stderr, "fleet-agent: %v\n", err)
 		os.Exit(1)
 	}
@@ -143,13 +155,34 @@ func run() error {
 	tunnelClient := tunnel.New(saved.ControlPlaneURL, saved.AgentToken, log)
 	go tunnelClient.Run(ctx)
 
+	// Self-upgrade. Cancelling runCtx - and only runCtx - is how a staged
+	// build stops the loop without being mistaken for a shutdown: the outer ctx
+	// stays live, which is what distinguishes the two below.
+	runCtx, stopForUpgrade := context.WithCancel(ctx)
+	defer stopForUpgrade()
+	stagedCh := make(chan struct{}, 1)
+	go runUpgradeChecks(runCtx, api, saved, *statePath, log, stagedCh)
+	go func() {
+		select {
+		case <-stagedCh:
+			stopForUpgrade()
+		case <-runCtx.Done():
+		}
+	}()
+
 	log.Info("agent started",
 		"version", Version,
 		"node", saved.Name,
 		"control_plane", saved.ControlPlaneURL,
 		"interval", interval)
 
-	err = loop.Run(ctx)
+	err = loop.Run(runCtx)
+	// An upgrade cancelled runCtx while the process is otherwise healthy; a
+	// real shutdown cancels the outer ctx too. Only the first should restart.
+	if ctx.Err() == nil && runCtx.Err() != nil {
+		log.Info("restarting to install a staged upgrade")
+		return errUpgradeStaged
+	}
 	if errors.Is(err, context.Canceled) {
 		log.Info("agent stopped")
 		return nil
@@ -299,4 +332,162 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// ExitUpgradeStaged tells the supervisor to restart us so a staged binary is
+// installed.
+//
+// Deliberately non-zero: the unit is Restart=on-failure, because exit 0 means
+// "the control plane rejected this credential" and restarting that produced a
+// loop. A clean exit here would simply stop the agent, and the upgrade would
+// land whenever somebody happened to reboot the machine.
+const ExitUpgradeStaged = 70
+
+// UpgradeCheckInterval is how often the agent asks whether it is the build
+// being served.
+//
+// Half-hourly rather than per-reconcile: reconciliation runs every ten seconds
+// and this reads the whole binary to hash it. An agent being one build behind
+// for half an hour costs nothing; hashing seven megabytes every ten seconds on
+// a Raspberry Pi is not nothing.
+const UpgradeCheckInterval = 30 * time.Minute
+
+/*
+ * Replace this binary with the one the control plane serves.
+ *
+ * Returns true when a verified binary is waiting and the process should exit
+ * so the supervisor can install it. Every failure is logged and returns false:
+ * a node that cannot upgrade must keep running the version it has, because the
+ * alternative is a fleet that goes down when a download does.
+ */
+func checkForUpgrade(
+	ctx context.Context,
+	api *client.Client,
+	saved *state.State,
+	statePath string,
+	log *slog.Logger,
+) bool {
+	// The fleet has to have opted in. Checked here, on every attempt, so
+	// turning it off in the dashboard stops the next one rather than only
+	// applying to nodes that have not started yet.
+	desired, err := api.DesiredState(ctx)
+	if err != nil {
+		log.Debug("could not read desired state, skipping upgrade check", "err", err)
+		return false
+	}
+	if !desired.AgentAutoUpgrade {
+		return false
+	}
+
+	self, err := os.Executable()
+	if err != nil {
+		log.Debug("cannot locate own binary, skipping upgrade check", "err", err)
+		return false
+	}
+
+	runningSum, err := upgrade.HashFile(self)
+	if err != nil {
+		log.Debug("cannot hash own binary, skipping upgrade check", "err", err)
+		return false
+	}
+
+	body, err := api.PublishedSums(ctx)
+	if err != nil {
+		// The control plane being unreachable is not an upgrade failure worth
+		// shouting about; the heartbeat already reports that far more loudly.
+		log.Debug("could not fetch published checksums", "err", err)
+		return false
+	}
+
+	binary := upgrade.BinaryName(runtime.GOOS, runtime.GOARCH)
+	publishedSum, err := upgrade.Published(upgrade.ParseSums(body), binary)
+	if err != nil {
+		log.Debug("no published build for this platform", "binary", binary)
+		return false
+	}
+
+	st := upgrade.State{LastStaged: saved.UpgradeStaged, Attempts: saved.UpgradeAttempts}
+	switch upgrade.Decide(runningSum, publishedSum, st) {
+	case upgrade.UpToDate:
+		return false
+
+	case upgrade.AlreadyStaged:
+		// Staged but still running the old binary: the restart has not happened
+		// yet. Count it, so a swap that silently does nothing is eventually
+		// recognised rather than retried forever.
+		saved.UpgradeAttempts++
+		if err := state.Save(statePath, saved); err != nil {
+			log.Warn("could not record upgrade attempt", "err", err)
+		}
+		log.Info("an upgrade is staged and waiting for a restart",
+			"attempts", saved.UpgradeAttempts, "build", publishedSum[:12])
+		return false
+
+	case upgrade.Failed:
+		log.Warn("staged build is not being installed — leaving this node on its current version",
+			"build", publishedSum[:12], "attempts", saved.UpgradeAttempts,
+			"hint", "the service unit may predate self-upgrade; re-run install.sh --configure")
+		return false
+	}
+
+	log.Info("a newer agent is published, downloading",
+		"binary", binary, "from", runningSum[:12], "to", publishedSum[:12])
+
+	rc, err := api.DownloadAgent(ctx, binary)
+	if err != nil {
+		log.Warn("agent download failed, staying on the current version", "err", err)
+		return false
+	}
+	defer rc.Close()
+
+	if _, err := upgrade.Stage(filepath.Dir(statePath), rc, publishedSum); err != nil {
+		// Includes the checksum mismatch, which is the one that matters: a
+		// binary that does not match what was published is never staged.
+		log.Warn("agent upgrade rejected, staying on the current version", "err", err)
+		return false
+	}
+
+	saved.UpgradeStaged = publishedSum
+	saved.UpgradeAttempts = 1
+	if err := state.Save(statePath, saved); err != nil {
+		// Without this the agent would forget it staged anything and download
+		// the same bytes on the next tick, forever.
+		log.Warn("could not record staged upgrade", "err", err)
+		return false
+	}
+
+	log.Info("verified and staged; restarting to install", "build", publishedSum[:12])
+	return true
+}
+
+// runUpgradeChecks polls for a newer build and signals when one is ready.
+func runUpgradeChecks(
+	ctx context.Context,
+	api *client.Client,
+	saved *state.State,
+	statePath string,
+	log *slog.Logger,
+	staged chan<- struct{},
+) {
+	// Once shortly after start, so a node that has been offline picks up a
+	// waiting build without waiting out a whole interval - but not instantly,
+	// so a crash-looping agent does not download on every restart.
+	timer := time.NewTimer(2 * time.Minute)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		if checkForUpgrade(ctx, api, saved, statePath, log) {
+			select {
+			case staged <- struct{}{}:
+			default:
+			}
+			return
+		}
+		timer.Reset(UpgradeCheckInterval)
+	}
 }
