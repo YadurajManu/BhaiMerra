@@ -16,7 +16,7 @@ import type { FastifyInstance } from 'fastify'
 import { loadConfig } from '../src/config.js'
 import { createContext, closeContext, settleDeploys, type AppContext } from '../src/api/context.js'
 import { buildServer } from '../src/server.js'
-import { orgs, users, services, deployments } from '../src/db/schema.js'
+import { orgs, users, services, deployments, nodes } from '../src/db/schema.js'
 import { resolveRoute } from '../src/ingress/routes.js'
 import { failStalledRollouts, ROLLOUT_TIMEOUT_MS } from '../src/heartbeat/sweeper.js'
 
@@ -346,6 +346,60 @@ services:
       'it must stay visible to the node-down path, which is what actually owns this case'
     )
   })
+
+    test('is written to the node, not only into Redis', async () => {
+      // An agent that upgrades itself keeps its identity and never registers
+      // again. Registration was the only thing that wrote this column, so a node
+      // went on reporting the version it first paired with indefinitely -- and
+      // the dashboard, the CLI and `fleet status` all read it, so every one of
+      // them named the wrong build with total confidence. That is worse than
+      // saying nothing, because knowing what is actually deployed is the entire
+      // point of an agent that can upgrade itself.
+      await app.inject({
+        method: 'POST',
+        url: '/agent/heartbeat',
+        headers: { authorization: `Bearer ${agentToken}` },
+        payload: {
+          cpu_pct: 5,
+          ram_used_mb: 1024,
+          disk_used_mb: 20_000,
+          agent_version: '9.9.9',
+          runtime: { docker_available: true },
+          containers: [],
+        },
+      })
+
+      const [row] = await ctx.db
+        .select({ agentVersion: nodes.agentVersion })
+        .from(nodes)
+        .where(eq(nodes.id, nodeId))
+        .limit(1)
+      assert.equal(row?.agentVersion, '9.9.9', 'the node should report what it is actually running')
+    })
+
+    test('a heartbeat without one leaves the last known version alone', async () => {
+      // Older agents omit it. Blanking the column on their behalf would replace
+      // a true answer with no answer.
+      await app.inject({
+        method: 'POST',
+        url: '/agent/heartbeat',
+        headers: { authorization: `Bearer ${agentToken}` },
+        payload: {
+          cpu_pct: 5,
+          ram_used_mb: 1024,
+          disk_used_mb: 20_000,
+          runtime: { docker_available: true },
+          containers: [],
+        },
+      })
+
+      const [row] = await ctx.db
+        .select({ agentVersion: nodes.agentVersion })
+        .from(nodes)
+        .where(eq(nodes.id, nodeId))
+        .limit(1)
+      assert.equal(row?.agentVersion, '9.9.9')
+    })
 
   test('the failure says what happened', async () => {
     const [row] = await ctx.db

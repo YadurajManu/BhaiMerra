@@ -1,4 +1,4 @@
-import { and, eq, isNull, gt, inArray, ne } from 'drizzle-orm'
+import { and, eq, isNull, gt, inArray, ne, or } from 'drizzle-orm'
 import { z } from 'zod'
 import type { FastifyInstance } from 'fastify'
 import { nodes, fleets, pairingTokens, deployments, services } from '../db/schema.js'
@@ -247,6 +247,32 @@ export async function agentRoutes(app: FastifyInstance) {
       },
       logs: hb.logs,
     })
+
+    // Keep the stored version honest.
+    //
+    // heartbeats.record puts this in Redis; the nodes table was only ever
+    // written at registration. An agent that upgrades itself keeps its
+    // identity and never registers again, so the column kept reporting the
+    // version the node first paired with -- indefinitely. The dashboard, the
+    // CLI and `fleet status` all read it, so every one of them confidently
+    // named the wrong build, which is worse than saying nothing: the whole
+    // point of self-upgrade is knowing what is actually out there.
+    //
+    // Only on change. Heartbeats arrive every few seconds per node, and an
+    // UPDATE per beat to keep a string identical is write traffic for nothing.
+    if (hb.agent_version) {
+      await db
+        .update(nodes)
+        .set({ agentVersion: hb.agent_version })
+        .where(
+          and(
+            eq(nodes.id, nodeId),
+            // A null has to match too: ne(null, x) is null in SQL, not true,
+            // so a node that never reported a version would never get one.
+            or(isNull(nodes.agentVersion), ne(nodes.agentVersion, hb.agent_version))
+          )
+        )
+    }
 
     // History, alongside the Redis copy. Redis answers "is it alive right now"
     // and expires; this answers "what has it been doing" and does not. Failing
