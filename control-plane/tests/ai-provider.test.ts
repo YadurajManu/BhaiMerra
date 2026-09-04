@@ -128,6 +128,28 @@ describe('explainWith', () => {
     )
   })
 
+  test('truncation is reported as truncation, not as emptiness', async () => {
+    // A reasoning model that spends its whole completion budget thinking
+    // returns HTTP 200, valid JSON, finish_reason "length", and an empty
+    // content field. gpt-oss-120b on Groq does exactly this: 25 of 30 tokens
+    // went to reasoning on a trivial prompt. "provider returned no content"
+    // describes it accurately and explains nothing.
+    const impl = (async () =>
+      new Response(
+        JSON.stringify({ choices: [{ message: { content: '', reasoning: 'thinking…' }, finish_reason: 'length' }] }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      )) as unknown as typeof fetch
+
+    await assert.rejects(
+      () => explainWith(CONFIG, CONTEXT, impl),
+      (err: Error) => {
+        assert.match(err.message, /ran out of tokens/, 'name the actual cause')
+        assert.match(err.message, /max_tokens|reasoning/i, 'and what to do about it')
+        return true
+      }
+    )
+  })
+
   test('refuses a reply that is not JSON rather than inventing one', async () => {
     const { impl } = stub(reply('I think your lockfile is probably out of date.'))
     await assert.rejects(() => explainWith(CONFIG, CONTEXT, impl), /did not return JSON/)

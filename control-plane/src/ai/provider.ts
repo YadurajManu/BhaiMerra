@@ -45,7 +45,7 @@ steps: the shortest sequence of concrete actions that fixes it. Shell commands w
 If the log is truncated or the cause is genuinely unclear, say so in summary and return no steps. Guessing costs the reader more time than admitting the log is not enough.`
 
 type ChatResponse = {
-  choices?: Array<{ message?: { content?: string } }>
+  choices?: Array<{ message?: { content?: string }; finish_reason?: string }>
   usage?: { prompt_tokens?: number; completion_tokens?: number }
   error?: { message?: string }
 }
@@ -92,7 +92,15 @@ export async function explainWith(
         // Low, because this is reading a log rather than writing prose: the
         // same failure should not produce a different answer each time.
         temperature: 0.1,
-        max_tokens: 700,
+        // Headroom for a reasoning model, not for a long answer.
+        //
+        // The reply itself is a sentence and a few steps -- a few hundred
+        // tokens. But models like gpt-oss spend completion tokens thinking
+        // before they write, and that budget is shared: when reasoning
+        // exhausts it the response comes back finish_reason "length" with an
+        // empty content field. At 700 a real 1.1kB build log left only a
+        // little to spare, and the logs worth explaining are the long ones.
+        max_tokens: 1500,
         messages: [
           { role: 'system', content: SYSTEM },
           { role: 'user', content: parts.join('\n') },
@@ -140,7 +148,21 @@ export async function explainWith(
       throw new Error(`provider returned ${res.status}: ${body.error?.message ?? 'no detail'}`)
     }
 
-    const content = body.choices?.[0]?.message?.content
+    const choice = body.choices?.[0]
+    const content = choice?.message?.content
+
+    // Truncation is not emptiness, and saying so saves the next person the
+    // hour it cost to work out the first time. A reasoning model that spends
+    // its whole budget thinking returns exactly this: a 200, valid JSON, and
+    // nothing to read.
+    if (!content && choice?.finish_reason === 'length') {
+      throw new Error(
+        'the model ran out of tokens before writing an answer' +
+          ' — it is likely a reasoning model spending the completion budget on' +
+          ' thinking. Raise max_tokens or choose a model that does not reason.'
+      )
+    }
+
     if (!content) throw new Error('provider returned no content')
 
     const { summary, steps } = parseReply(content)
