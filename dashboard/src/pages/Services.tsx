@@ -69,6 +69,7 @@ import { Button, ConfirmDialog, Copyable, Dot, Empty, ErrorNote, Panel, StatusPi
 import DeployProgress from '../components/DeployProgress'
 import ExplainFailure from '../components/ExplainFailure'
 import PastFailures from '../components/PastFailures'
+import { helpFor } from '../lib/failureReasons'
 
 const TEMPLATES: Record<string, string> = {
   nginx: `fleet: homelab
@@ -781,6 +782,19 @@ export default function Services() {
                             )}
                           </>
                         )}
+                        {/* What Fleet means by its own code, where a short
+                            reason would otherwise be a dead end. */}
+                        {helpFor(state.detail) && (
+                          <div className="mt-2 border-t border-[var(--color-line)] pt-2">
+                            <p className="font-mono text-[11px] leading-relaxed text-[var(--color-fg-muted)]">
+                              {helpFor(state.detail)!.what}
+                            </p>
+                            <p className="mt-1.5 font-mono text-[11px] leading-relaxed text-[var(--color-fg-dim)]">
+                              {helpFor(state.detail)!.next}
+                            </p>
+                          </div>
+                        )}
+
                         <Link
                           to={`/logs?service=${s.id}`}
                           className="mt-2.5 inline-block font-mono text-[10.5px] text-[var(--color-fg-muted)] underline underline-offset-2 hover:text-[var(--color-fg)]"

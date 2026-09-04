@@ -5,6 +5,7 @@ import { mb, since } from '../lib/format'
 import { Button, ConfirmDialog, Copyable, ErrorNote, Panel, StatusPill } from '../components/ui'
 import LogTerminal from '../components/LogTerminal'
 import ExplainFailure from '../components/ExplainFailure'
+import { helpFor } from '../lib/failureReasons'
 import { useState } from 'react'
 
 type Preview = {
@@ -298,8 +299,31 @@ export default function ServiceDetail() {
                 <span className="ml-auto truncate font-mono text-[10px] text-[var(--color-fg-dim)]">{d.imageTags[0]}</span>
               </div>
 
-              {/* A one-word status is its own explanation and stays inline
-                  above. A build log is not, and gets read rather than dumped. */}
+              {/* Fleet's own vocabulary, explained by Fleet.
+                  
+                  `drift` and `no_eligible_node` were left inline and bare on
+                  the theory that a short code is its own explanation. It is —
+                  to whoever wrote it. To everyone else `drift` is a word, not
+                  a diagnosis, and there was nothing on the page to ask.
+
+                  Not a model call: these strings come from a fixed vocabulary
+                  this system generates itself, so the answer is known in
+                  advance. Sending one to a model would be slower, spend a
+                  daily allowance, and risk explaining the English word rather
+                  than what Fleet does. */}
+              {helpFor(d.failureReason) && (
+                <div className="mt-2.5 rounded-[3px] border-l-2 border-[var(--color-line-2)] bg-[var(--color-ink-900)] px-3.5 py-2.5">
+                  <p className="font-mono text-[11px] leading-relaxed text-[var(--color-fg-muted)]">
+                    {helpFor(d.failureReason)!.what}
+                  </p>
+                  <p className="mt-1.5 font-mono text-[11px] leading-relaxed text-[var(--color-fg-dim)]">
+                    {helpFor(d.failureReason)!.next}
+                  </p>
+                </div>
+              )}
+
+              {/* A build log is not self-explanatory, and gets read rather
+                  than dumped. */}
               {d.failureReason && isReadable(d.failureReason) && fleet?.id && (
                 <div className="mt-3">
                   <ExplainFailure

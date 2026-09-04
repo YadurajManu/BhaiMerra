@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../lib/api'
 import ExplainFailure from './ExplainFailure'
 import { ErrorNote } from './ui'
+import { helpFor } from '../lib/failureReasons'
 
 /**
  * The failures a service has already recovered from.
@@ -110,6 +111,11 @@ export default function PastFailures({
           <p className="mt-1.5 break-all font-mono text-[10.5px] leading-relaxed text-[var(--color-fg-muted)]">
             {headline(d.failureReason!)}
           </p>
+          {helpFor(d.failureReason) && (
+            <p className="mt-1.5 font-mono text-[10.5px] leading-relaxed text-[var(--color-fg-dim)]">
+              {helpFor(d.failureReason)!.what}
+            </p>
+          )}
           {worthExplaining(d.failureReason) && (
             <div className="mt-2.5">
               <ExplainFailure
