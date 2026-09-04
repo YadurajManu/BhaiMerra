@@ -181,6 +181,7 @@ export type Service = {
    * exactly that case, which is why it cannot answer this on its own.
    */
   last: {
+    id: string
     status: string
     failureReason: string | null
     startedAt: string

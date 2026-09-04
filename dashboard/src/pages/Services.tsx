@@ -67,6 +67,7 @@ function summarise(reason: string): { head: string; rest: string | null } {
 }
 import { Button, ConfirmDialog, Copyable, Dot, Empty, ErrorNote, Panel, StatusPill } from '../components/ui'
 import DeployProgress from '../components/DeployProgress'
+import ExplainFailure from '../components/ExplainFailure'
 
 const TEMPLATES: Record<string, string> = {
   nginx: `fleet: homelab
@@ -125,6 +126,17 @@ services:
 }
 
 type FilterStatus = 'ALL' | 'RUNNING' | 'STOPPED' | 'FLEXIBLE' | 'PINNED'
+
+/**
+ * Whether a failure is worth spending a model call on.
+ *
+ * Mirrors worthExplaining in the control plane: more than a line, and long
+ * enough that restating it would add something. Duplicated rather than
+ * imported because the two live in different packages, and a button that
+ * appears for a request the server will refuse is worse than no button.
+ */
+const worthExplaining = (reason: string | null | undefined): reason is string =>
+  Boolean(reason) && reason!.length > 40 && reason!.includes('\n')
 
 export default function Services() {
   const { fleet } = useAuth()
@@ -760,6 +772,35 @@ export default function Services() {
                         >
                           open the container logs →
                         </Link>
+
+                        {/* A reading of the failure, beside the failure.
+                            
+                            It used to live only on the service detail page, a
+                            navigation away from where anyone actually notices
+                            something has broken — while this card carried a
+                            "why?" link that expands the raw text and looks
+                            exactly like the thing people were hunting for. Two
+                            meanings for one word, and the useful one hidden.
+
+                            Below the output, never instead of it: an
+                            explanation is an interpretation, and the evidence
+                            has to stay where it can be checked.
+
+                            Only for failures long enough to be worth reading.
+                            A one-liner like `no_eligible_node` is already its
+                            own explanation and a model call would just restate
+                            it — the same rule the server enforces, applied
+                            here so the button never appears where it would be
+                            refused. */}
+                        {worthExplaining(state.detail) && s.last?.id && fleet?.id && (
+                          <div className="mt-3 border-t border-[var(--color-line)] pt-3">
+                            <ExplainFailure
+                              fleetId={fleet.id}
+                              deploymentId={s.last.id}
+                              failureReason={state.detail}
+                            />
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>

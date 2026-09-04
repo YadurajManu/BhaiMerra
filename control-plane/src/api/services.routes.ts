@@ -149,6 +149,9 @@ export async function serviceRoutes(app: FastifyInstance) {
         ? await db
             .selectDistinctOn([deployments.serviceId], {
               serviceId: deployments.serviceId,
+              // The id, so the dashboard can ask for a reading of this exact
+              // failure without navigating to the detail page first.
+              id: deployments.id,
               status: deployments.status,
               failureReason: deployments.failureReason,
               startedAt: deployments.startedAt,
