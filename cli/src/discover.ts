@@ -395,7 +395,11 @@ export function manifestFromDiscovery(
     lines.push(`  ${s.name}:`)
     lines.push(`    build: ${s.dir}`)
     lines.push('    placement: flexible')
-    if (s.detection.port !== 80) lines.push(`    container_port: ${s.detection.port}`)
+    // Always written, never omitted as "the default". Leaving it out does not
+    // mean 80: an unset container port becomes 8080 on the node, so an nginx
+    // image serving 80 got its traffic forwarded to a closed port and answered
+    // 502 while every status in the system said running.
+    lines.push(`    container_port: ${s.detection.port}`)
     lines.push(`    resources: { ram: ${s.ramMb}Mi, cpu: 0.5 }`)
     // Only where the framework genuinely answers at the path. A guessed one
     // that is wrong does not fall back to "no check" — it fails for ever and

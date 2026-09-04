@@ -275,3 +275,20 @@ describe('generated health checks', () => {
     await rm(dir, { recursive: true, force: true })
   })
 })
+
+describe('generated container ports', () => {
+  test('port 80 is written out rather than left to a default that is not 80', async () => {
+    // Omitting it does not mean 80. An unset container port becomes 8080 on
+    // the node, so an nginx image serving 80 had its traffic forwarded to a
+    // closed port: a 502 behind a service every status called "running".
+    const dir = await mkdtemp(join(tmpdir(), 'fleet-port-'))
+    await mkdir(join(dir, 'site'), { recursive: true })
+    await writeFile(join(dir, 'site', 'index.html'), '<!doctype html><title>hi</title>')
+
+    const d = await discover(dir)
+    const { manifest } = manifestFromDiscovery(d, {})
+
+    assert.match(manifest, /^\s+container_port: 80$/m)
+    await rm(dir, { recursive: true, force: true })
+  })
+})
