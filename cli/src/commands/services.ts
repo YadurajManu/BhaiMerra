@@ -97,14 +97,21 @@ export const applyCommand = {
         fleet?: string
         services?: Array<{ name: string; placement: string; ramMb: number; arch: string[] }>
         warnings?: string[]
-        issues?: string[]
+        // {path, message} — both the parser and the node check report this
+        // shape. Rendered as strings it printed "[object Object]", which is
+        // the least useful thing a validator can say.
+        issues?: Array<{ path?: string; message?: string } | string>
       }>('POST', `/fleets/${fleetId}/services/validate`, { body: { manifest } })
 
       if (flags.json) return console.log(JSON.stringify(body, null, 2))
 
       if (!body.valid) {
         for (const issue of body.issues ?? []) {
-          console.log(`${glyph.fail} ${c.red('invalid')}  ${issue}`)
+          const text =
+            typeof issue === 'string'
+              ? issue
+              : [issue.path, issue.message].filter(Boolean).join(': ')
+          console.log(`${glyph.fail} ${c.red('invalid')}  ${text}`)
         }
         throw new CliError('The manifest was not applied.', EXIT.usage)
       }
