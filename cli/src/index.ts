@@ -5,7 +5,7 @@ import { CliError, EXIT } from './api.js'
 import { c } from './render.js'
 import { banner } from './mark.js'
 import { commands, type Command } from './commands/index.js'
-import { parseArgs, type Flags } from './args.js'
+import { parseArgs, KNOWN_FLAGS, nearestFlag, type Flags } from './args.js'
 
 export type { Flags }
 export { parseArgs }
@@ -126,6 +126,19 @@ async function main() {
     console.log(usage())
     // A bare `fleet` is someone asking what this is, not a malformed command.
     process.exit(EXIT.ok)
+  }
+
+  // A flag this build does not know is refused, not ignored. Checked after
+  // --help so `fleet --oops --help` still explains itself.
+  for (const flag of Object.keys(flags)) {
+    if (KNOWN_FLAGS.has(flag)) continue
+    const near = nearestFlag(flag)
+    console.error(
+      `${c.red('unknown option')} "--${flag}"` +
+        (near ? `\n  did you mean: --${near}?` : '') +
+        `\n  ${c.dim('if it is a newer flag, upgrade: npm i -g @yadurajfleetos/cli@latest')}`
+    )
+    process.exit(EXIT.usage)
   }
 
   const command: Command | undefined = commands[name]

@@ -1,8 +1,8 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseArgs } from '../src/args.js'
+import { parseArgs, KNOWN_FLAGS, nearestFlag } from '../src/args.js'
 import { table, relativeTime, mb, visibleLength, truncate, c } from '../src/render.js'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 
 describe('argument parsing', () => {
   test('separates positionals from flags', () => {
@@ -102,5 +102,44 @@ describe('apply --dry-run', () => {
       validateAt < postAt,
       'the validate path must return before the applying one is reached'
     )
+  })
+})
+
+describe('unknown flags', () => {
+  test('every flag the CLI reads is in the registry', () => {
+    // The registry only helps while it is complete. A flag added to a command
+    // and forgotten here would be refused for everyone — worse than the
+    // silence it replaced — so this reads the source rather than trusting it.
+    const dir = new URL('../src/', import.meta.url)
+    const files = readdirSync(dir, { recursive: true }) as string[]
+    const used = new Set<string>()
+
+    for (const f of files) {
+      if (!String(f).endsWith('.ts')) continue
+      const src = readFileSync(new URL(String(f), dir), 'utf8')
+      for (const m of src.matchAll(/flags\.([a-zA-Z][a-zA-Z0-9]*)/g)) used.add(m[1]!)
+      for (const m of src.matchAll(/flags\['([a-z-]+)'\]/g)) used.add(m[1]!)
+    }
+
+    const missing = [...used].filter((f) => !KNOWN_FLAGS.has(f))
+    assert.deepEqual(missing, [], `these flags are read but not registered: ${missing.join(', ')}`)
+  })
+
+  test('a truncated or extended flag suggests the real one', () => {
+    // `fleet init --ai` on a build without --ai was silently ignored, and read
+    // as the feature being broken. The same shape of mistake — a flag with
+    // something on the end — must point at the real one.
+    assert.equal(nearestFlag('ai-typo'), 'ai')
+    assert.equal(nearestFlag('node2'), 'node')
+  })
+
+  test('a mistyped flag suggests the real one', () => {
+    assert.equal(nearestFlag('jsno'), 'json')
+    assert.equal(nearestFlag('drt-run'), 'dry-run')
+  })
+
+  test('something with no relation suggests nothing', () => {
+    // A confident wrong suggestion is worse than none.
+    assert.equal(nearestFlag('nonsense'), null)
   })
 })
