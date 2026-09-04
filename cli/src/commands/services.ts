@@ -603,12 +603,20 @@ async function reviewed(draft: string, flags: Flags): Promise<string> {
     | { status: 'rate_limited'; limit: number; resetsInSec: number }
     | { status: 'kept_draft'; reason: string }
 
-  const review = (map: string, answers?: Record<string, string>) =>
+  // The second pass is a different, smaller question.
+  //
+  // It used to resend the original draft and the whole repository map, which
+  // on this project meant ~6,000 tokens seconds after the first call had spent
+  // ~3,000 — straight through a per-minute budget, and the answer the user had
+  // just given was discarded. Applying an answer needs the manifest it applies
+  // to and the answer, not the evidence that produced it: the model has
+  // already read the repository and written its conclusions down.
+  const review = (base: string, map: string, answers?: Record<string, string>) =>
     task(
       answers ? 'applying your answers' : 'reading the repository for a second opinion',
       async () =>
         request<Assist>('POST', `/fleets/${fleetId}/manifest/assist`, {
-          body: { draft, repoMap: map, ...(answers ? { answers } : {}) },
+          body: { draft: base, repoMap: map, ...(answers ? { answers } : {}) },
         }),
       { done: () => (answers ? 'done' : 'reviewed') }
     )
@@ -617,7 +625,7 @@ async function reviewed(draft: string, flags: Flags): Promise<string> {
   let out: Assist
   try {
     map = await repoMap()
-    out = (await review(map)).body
+    out = (await review(draft, map)).body
   } catch (err) {
     console.log(
       `${glyph.warn} ${c.yellow('review skipped')}  ${err instanceof Error ? err.message : 'the control plane could not be reached'}`
@@ -657,7 +665,9 @@ async function reviewed(draft: string, flags: Flags): Promise<string> {
   const answered = await answerQuestions(out.questions, flags)
   if (answered) {
     try {
-      const second = (await review(map, answered)).body
+      // The reviewed manifest is what the answer applies to, and the tree
+      // alone is enough context to keep names straight.
+      const second = (await review(out.manifest, map.split('\n## ')[0] ?? map, answered)).body
       if (second.status === 'ok') {
         for (const note of second.notes) console.log(c.dim(`  · ${note}`))
         console.log(c.dim(`  ${second.usage.used}/${second.usage.limit} reviews used today`))

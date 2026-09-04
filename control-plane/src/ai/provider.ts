@@ -70,6 +70,27 @@ function parseReply(content: string): { summary: string; steps: string[] } {
 }
 
 /**
+ * How long a provider asked us to wait, in milliseconds, or null.
+ *
+ * The header where there is one, the prose where there is not: Groq answers
+ * 429 with "Please try again in 8.25s" and no Retry-After at all, and a wait
+ * the provider stated is better than a number we invented.
+ */
+function waitHint(res: Response, message: string): number | null {
+  const header = res.headers.get('retry-after')
+  if (header) {
+    const seconds = Number(header)
+    if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000)
+  }
+  const prose = message.match(/try again in ([\d.]+)\s*s/i)
+  if (prose) {
+    const seconds = Number(prose[1])
+    if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000)
+  }
+  return null
+}
+
+/**
  * One chat completion, with the failure modes this codebase has actually hit.
  *
  * Extracted so every caller gets them. Both were found the hard way and both
@@ -81,7 +102,7 @@ function parseReply(content: string): { summary: string; steps: string[] } {
 export async function chat(
   config: ProviderConfig,
   messages: Array<{ role: 'system' | 'user'; content: string }>,
-  opts: { maxTokens?: number; temperature?: number } = {},
+  opts: { maxTokens?: number; temperature?: number; noRetry?: boolean } = {},
   fetchImpl: typeof fetch = fetch
 ): Promise<{ content: string; tokensIn: number; tokensOut: number }> {
   const controller = new AbortController()
@@ -130,6 +151,19 @@ export async function chat(
     }
 
     if (!res.ok) {
+      // A rate limit that says when to come back is worth waiting out.
+      //
+      // Per-minute budgets are the common case on a free tier, and the wait is
+      // usually seconds — the provider prints it, in the header or in prose.
+      // Failing instead throws away whatever the caller had just done: an
+      // interactive answer, a review somebody waited for. Once, and only when
+      // told a short wait; anything longer belongs to the caller to decide.
+      const retryAfter = waitHint(res, body.error?.message ?? '')
+      if (res.status === 429 && retryAfter !== null && retryAfter <= 30_000 && !opts.noRetry) {
+        await new Promise((resolve) => setTimeout(resolve, retryAfter + 250))
+        return chat(config, messages, { ...opts, noRetry: true }, fetchImpl)
+      }
+
       // The provider's own message, because "500" tells the operator nothing
       // about whether the key, the model name or the balance is the problem.
       throw new Error(`provider returned ${res.status}: ${body.error?.message ?? 'no detail'}`)

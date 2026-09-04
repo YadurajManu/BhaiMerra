@@ -184,3 +184,68 @@ describe('explainWith', () => {
     assert.equal(out.tokensOut, 0)
   })
 })
+
+describe('a rate limit that says when to come back', () => {
+  test('is waited out once, from the prose when there is no header', async () => {
+    // Groq answers 429 with "Please try again in 8.25s" and no Retry-After.
+    // Failing instead threw away an answer the user had just typed into an
+    // interactive prompt — the second call landed seconds after the first and
+    // both counted against the same per-minute budget.
+    let calls = 0
+    const impl = (async () => {
+      calls++
+      if (calls === 1) {
+        return new Response(
+          JSON.stringify({
+            error: { message: 'Rate limit reached ... Please try again in 0.05s.' },
+          }),
+          { status: 429, headers: { 'content-type': 'application/json' } }
+        )
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: '{"summary":"ok","steps":[]}' } }],
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      )
+    }) as unknown as typeof fetch
+
+    const out = await explainWith(CONFIG, CONTEXT, impl)
+    assert.equal(calls, 2, 'it should have waited and asked again')
+    assert.equal(out.summary, 'ok')
+  })
+
+  test('is waited out only once', async () => {
+    // A provider that is still limited after the wait is limited for longer
+    // than we should sit here. Retrying forever would hold an interactive
+    // command open with nothing to show for it.
+    let calls = 0
+    const impl = (async () => {
+      calls++
+      return new Response(
+        JSON.stringify({ error: { message: 'Rate limit reached. Please try again in 0.05s.' } }),
+        { status: 429, headers: { 'content-type': 'application/json' } }
+      )
+    }) as unknown as typeof fetch
+
+    await assert.rejects(() => explainWith(CONFIG, CONTEXT, impl), /429/)
+    assert.equal(calls, 2, 'one attempt, one retry, then report it')
+  })
+
+  test('a rate limit with no wait given is not retried', async () => {
+    // Without a stated wait there is no number to honour, and guessing one is
+    // how a command hangs for reasons nobody can see.
+    let calls = 0
+    const impl = (async () => {
+      calls++
+      return new Response(JSON.stringify({ error: { message: 'slow down' } }), {
+        status: 429,
+        headers: { 'content-type': 'application/json' },
+      })
+    }) as unknown as typeof fetch
+
+    await assert.rejects(() => explainWith(CONFIG, CONTEXT, impl))
+    assert.equal(calls, 1)
+  })
+})
