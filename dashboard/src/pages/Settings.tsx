@@ -588,6 +588,131 @@ function FleetSettings() {
   )
 }
 
+
+/**
+ * Explaining failed deploys, and who pays for it.
+ *
+ * Off by default and stated plainly. A product whose whole argument is "your
+ * own hardware" cannot quietly post build logs to somebody else's server, so
+ * the panel leads with what leaves the machine rather than burying it.
+ */
+function AiSettings() {
+  const { fleet, refreshFleets } = useAuth()
+  const [enabled, setEnabled] = useState(false)
+  const [baseUrl, setBaseUrl] = useState('')
+  const [model, setModel] = useState('')
+  const [keyRef, setKeyRef] = useState('')
+  const [apiKey, setApiKey] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [error, setError] = useState<unknown>(null)
+
+  useEffect(() => {
+    if (!fleet) return
+    setEnabled(fleet.aiEnabled)
+    setBaseUrl(fleet.aiBaseUrl ?? 'https://agentrouter.org/v1')
+    setModel(fleet.aiModel)
+    setKeyRef(fleet.aiKeyRef ?? 'AI_PROVIDER_KEY')
+    setApiKey('')
+    setSaved(false)
+  }, [fleet?.id, fleet?.aiEnabled, fleet?.aiBaseUrl, fleet?.aiModel, fleet?.aiKeyRef]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (!fleet) return null
+
+  const save = async () => {
+    setSaving(true)
+    setError(null)
+    try {
+      // The key goes to the secrets store, encrypted; only its name is kept on
+      // the fleet. Written first, so enabling never points at a key that is
+      // not there yet.
+      if (apiKey.trim()) {
+        await api(`/fleets/${fleet.id}/secrets`, {
+          method: 'POST',
+          body: { key: keyRef.trim(), value: apiKey.trim() },
+        })
+      }
+      await api(`/fleets/${fleet.id}`, {
+        method: 'PATCH',
+        body: {
+          aiEnabled: enabled,
+          aiBaseUrl: baseUrl.trim() || null,
+          aiModel: model.trim(),
+          aiKeyRef: keyRef.trim() || null,
+        },
+      })
+      await refreshFleets()
+      setApiKey('')
+      setSaved(true)
+    } catch (err) {
+      setError(err)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Panel title="explaining failures" right={<span className="normal-case">off unless you turn it on</span>}>
+      <div className="space-y-5 p-5">
+        <p className="text-[13px] leading-relaxed text-[var(--color-fg-muted)]">
+          When a deploy fails, Fleet can send the last 40 lines of the build log to a provider you
+          choose and show you what broke and what to do about it. Nothing is sent unless you ask for
+          an explanation, and answers are cached by failure — the same broken lockfile is only ever
+          paid for once, by whoever hit it first.
+        </p>
+        <p className="text-[13px] leading-relaxed text-[var(--color-fg-muted)]">
+          Five explanations per person per day. Reading one that already exists is free and does not
+          count. Point the base URL at a local Ollama if you would rather nothing left the machine
+          at all.
+        </p>
+
+        <label className="flex cursor-pointer items-center gap-3">
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={(e) => setEnabled(e.target.checked)}
+            className="h-3.5 w-3.5 accent-[var(--color-signal)]"
+          />
+          <span className="mono-label text-[10px] text-[var(--color-fg-dim)]">EXPLAIN FAILED DEPLOYS</span>
+        </label>
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field
+            label="base url"
+            hint="anything OpenAI-compatible"
+            value={baseUrl}
+            onChange={(e) => setBaseUrl(e.target.value)}
+          />
+          <Field label="model" value={model} onChange={(e) => setModel(e.target.value)} />
+          <Field
+            label="key is stored as"
+            hint="the name in your secrets"
+            value={keyRef}
+            onChange={(e) => setKeyRef(e.target.value)}
+          />
+          <Field
+            label={fleet.aiKeyRef ? 'replace the key' : 'provider key'}
+            hint={fleet.aiKeyRef ? 'leave blank to keep the current one' : 'stored encrypted, never shown again'}
+            type="password"
+            autoComplete="off"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+          />
+        </div>
+
+        {error != null && <ErrorNote error={error} />}
+
+        <div className="flex items-center gap-3">
+          <Button variant="primary" onClick={() => void save()} disabled={saving}>
+            {saving ? 'Saving…' : 'Save'}
+          </Button>
+          {saved && <span className="font-mono text-[11px] text-[var(--color-signal)]">saved</span>}
+        </div>
+      </div>
+    </Panel>
+  )
+}
+
 export default function Settings() {
   const { fleet } = useAuth()
   const isAdmin = fleet?.role === 'owner' || fleet?.role === 'admin'
@@ -606,6 +731,8 @@ export default function Settings() {
       </div>
 
       <FleetSettings />
+
+      {isAdmin && <AiSettings />}
 
       {isAdmin && fleet && <GitHubWorkspace fleet={fleet} />}
 

@@ -4,6 +4,7 @@ import { useAuth, usePoll } from '../lib/auth'
 import { mb, since } from '../lib/format'
 import { Button, ConfirmDialog, Copyable, ErrorNote, Panel, StatusPill } from '../components/ui'
 import LogTerminal from '../components/LogTerminal'
+import ExplainFailure from '../components/ExplainFailure'
 import { useState } from 'react'
 
 type Preview = {
@@ -16,6 +17,9 @@ type Preview = {
       }
     | { outcome: 'no_eligible_node'; summary: string; rejected: Array<{ nodeName: string; code: string; detail: string }> }
 }
+
+/** Whether a failure is a log worth reading, or already the whole answer. */
+const isReadable = (reason: string) => reason.length > 40 && reason.includes('\n')
 
 export default function ServiceDetail() {
   const { serviceId } = useParams()
@@ -282,15 +286,29 @@ export default function ServiceDetail() {
       <Panel title="deployments">
         <div className="divide-y divide-[var(--color-line)]">
           {(deployments.data?.deployments ?? []).map((d) => (
-            <div key={d.id} className="flex flex-wrap items-center gap-4 px-5 py-3">
-              <span className="min-w-[90px] font-mono text-[11px] text-[var(--color-fg-dim)]">{since(d.startedAt)}</span>
-              <span className="min-w-[70px] font-mono text-[11.5px]">{d.gitSha?.slice(0, 7) ?? '—'}</span>
-              <span className="min-w-[120px] font-mono text-[11.5px] text-[var(--color-fg-muted)]">{d.nodeName ?? '—'}</span>
-              <StatusPill status={d.status} />
-              {d.failureReason && (
-                <span className="font-mono text-[10.5px] text-[var(--color-down)]">{d.failureReason}</span>
+            <div key={d.id} className="px-5 py-3">
+              <div className="flex flex-wrap items-center gap-4">
+                <span className="min-w-[90px] font-mono text-[11px] text-[var(--color-fg-dim)]">{since(d.startedAt)}</span>
+                <span className="min-w-[70px] font-mono text-[11.5px]">{d.gitSha?.slice(0, 7) ?? '—'}</span>
+                <span className="min-w-[120px] font-mono text-[11.5px] text-[var(--color-fg-muted)]">{d.nodeName ?? '—'}</span>
+                <StatusPill status={d.status} />
+                {d.failureReason && !isReadable(d.failureReason) && (
+                  <span className="font-mono text-[10.5px] text-[var(--color-down)]">{d.failureReason}</span>
+                )}
+                <span className="ml-auto truncate font-mono text-[10px] text-[var(--color-fg-dim)]">{d.imageTags[0]}</span>
+              </div>
+
+              {/* A one-word status is its own explanation and stays inline
+                  above. A build log is not, and gets read rather than dumped. */}
+              {d.failureReason && isReadable(d.failureReason) && fleet?.id && (
+                <div className="mt-3">
+                  <ExplainFailure
+                    fleetId={fleet.id}
+                    deploymentId={d.id}
+                    failureReason={d.failureReason}
+                  />
+                </div>
               )}
-              <span className="ml-auto truncate font-mono text-[10px] text-[var(--color-fg-dim)]">{d.imageTags[0]}</span>
             </div>
           ))}
           {!deployments.data?.deployments.length && (

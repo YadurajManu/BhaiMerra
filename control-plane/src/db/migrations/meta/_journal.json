@@ -120,6 +120,13 @@
       "when": 1787401400000,
       "tag": "0016_agent_auto_upgrade",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1787487800000,
+      "tag": "0017_ai_explanations",
+      "breakpoints": true
     }
   ]
 }

@@ -28,6 +28,7 @@ const GROUPS: Array<[string, Array<[string, string]>]> = [
       ['doctor', 'Check the control plane, nodes, services, ingress, and GitHub'],
       ['apply [file]', 'Apply a fleet.yaml to the fleet'],
       ['deploy <service>', 'Build, schedule, and roll out'],
+      ['explain <service>', 'Read a failed deploy and say what to do about it'],
     ],
   ],
   [

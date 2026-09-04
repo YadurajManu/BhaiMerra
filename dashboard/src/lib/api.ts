@@ -108,6 +108,12 @@ export type Fleet = {
   heartbeatIntervalSec: number
   heartbeatMissThreshold: number
   agentAutoUpgrade: boolean
+  aiEnabled: boolean
+  aiBaseUrl: string | null
+  aiModel: string
+  /** The name the provider key is filed under. The key itself never leaves
+      the server. */
+  aiKeyRef: string | null
 }
 
 export type Node = {

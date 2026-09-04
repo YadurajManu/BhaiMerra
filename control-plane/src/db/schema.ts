@@ -162,6 +162,12 @@ export const fleets = pgTable(
     // control plane serves. Off by default, because on-by-default means one
     // bad build reaches every node everywhere at once.
     agentAutoUpgrade: boolean('agent_auto_upgrade').notNull().default(false),
+    /* Explaining a failed deploy. Off unless turned on; the key lives in the
+       secrets store and only its name is here. */
+    aiEnabled: boolean('ai_enabled').notNull().default(false),
+    aiBaseUrl: text('ai_base_url'),
+    aiModel: text('ai_model').notNull().default('claude-sonnet-4-8'),
+    aiKeyRef: text('ai_key_ref'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex('fleets_org_name_key').on(t.orgId, t.name)]
@@ -644,3 +650,20 @@ export const restores = pgTable(
     index('restores_pending_idx').on(t.nodeId, t.status),
   ]
 )
+
+/**
+ * Cached explanations, keyed by failure signature.
+ *
+ * Shared across fleets on purpose: a missing base image is the same problem
+ * for everybody, and the log it was derived from is not kept here.
+ */
+export const deploymentExplanations = pgTable('deployment_explanations', {
+  signature: text('signature').primaryKey(),
+  summary: text('summary').notNull(),
+  steps: jsonb('steps').$type<string[]>().notNull().default([]),
+  model: text('model').notNull(),
+  tokensIn: integer('tokens_in').notNull().default(0),
+  tokensOut: integer('tokens_out').notNull().default(0),
+  hits: integer('hits').notNull().default(1),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+})

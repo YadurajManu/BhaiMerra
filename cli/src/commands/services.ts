@@ -688,3 +688,99 @@ export const importCommand = {
     }
   },
 }
+
+/**
+ * Ask why a deployment failed.
+ *
+ * The wall of Docker output is still there underneath — this adds a reading of
+ * it, it does not replace the evidence. Printed at the moment of failure is the
+ * point; `fleet explain` exists for when you have come back to it later.
+ */
+export const explainCommand = {
+  async run(args: string[], flags: Flags) {
+    const id = await requireFleet(typeof flags.fleet === 'string' ? flags.fleet : undefined)
+
+    let deploymentId = typeof flags.deploy === 'string' ? flags.deploy : ''
+    if (!deploymentId) {
+      const name = args[0]
+      if (!name) throw new CliError('name a service, or pass --deploy <id>', EXIT.usage)
+      const service = await findService(id, name)
+      const { body } = await request<{ deployments: Array<{ id: string; status: string }> }>(
+        'GET',
+        `/services/${service.id}/deployments`
+      )
+      // The most recent failure, which is what someone asking "why did that
+      // fail" means — not the most recent deployment, which may since have
+      // succeeded.
+      const failed = body.deployments.find((d) => d.status === 'failed')
+      if (!failed) {
+        throw new CliError(`"${name}" has no failed deployment to explain.`, EXIT.usage)
+      }
+      deploymentId = failed.id
+    }
+
+    const out = await task('reading the failure', () =>
+      request<ExplainResponse>('POST', `/fleets/${id}/deployments/${deploymentId}/explain`)
+    )
+    printExplanation(out.body)
+  },
+}
+
+type ExplainResponse = {
+  status: 'ok' | 'not_worth_it' | 'disabled' | 'rate_limited' | 'failed'
+  summary?: string
+  steps?: string[]
+  cached?: boolean
+  hits?: number
+  reason?: string
+  used?: number
+  limit?: number
+  resetsInSec?: number
+  usage?: { used: number; limit: number }
+}
+
+/** Shared by `fleet explain` and by a deploy that just failed. */
+export function printExplanation(r: ExplainResponse): void {
+  if (r.status === 'ok') {
+    console.log()
+    for (const line of wrapText(r.summary ?? '', 76)) console.log(`  ${line}`)
+    if (r.steps?.length) {
+      console.log()
+      r.steps.forEach((step, i) => console.log(`  ${c.dim(`${i + 1}.`)} ${step}`))
+    }
+    const seen = (r.hits ?? 1) > 1 ? `seen ${r.hits}× before` : 'first time this failure has been seen'
+    console.log(`\n  ${c.dim(`${r.cached ? 'cached' : 'explained'} · ${seen}`)}`)
+    if (r.usage) console.log(`  ${c.dim(`${r.usage.used}/${r.usage.limit} explanations used today`)}`)
+    return
+  }
+
+  if (r.status === 'rate_limited') {
+    const hours = Math.ceil((r.resetsInSec ?? 0) / 3600)
+    console.log(
+      `\n  ${c.yellow('daily limit reached')} ${c.dim(`— ${r.limit} explanations a day, resets in ${hours}h.`)}`
+    )
+    console.log(c.dim('  Answers already generated are still free to read.'))
+    return
+  }
+
+  // disabled / not_worth_it / failed all carry a reason worth printing as-is.
+  if (r.reason) console.log(`\n  ${c.dim(r.reason)}`)
+}
+
+/** Wrap to a width, on spaces, so a paragraph reads in a terminal. */
+function wrapText(text: string, width: number): string[] {
+  const out: string[] = []
+  for (const paragraph of text.split('\n')) {
+    let line = ''
+    for (const word of paragraph.split(/\s+/).filter(Boolean)) {
+      if (line && line.length + word.length + 1 > width) {
+        out.push(line)
+        line = word
+      } else {
+        line = line ? `${line} ${word}` : word
+      }
+    }
+    if (line) out.push(line)
+  }
+  return out
+}

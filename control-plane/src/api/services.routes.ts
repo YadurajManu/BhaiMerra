@@ -400,6 +400,29 @@ export async function serviceRoutes(app: FastifyInstance) {
   )
 
   /** POST /services/:id/deploy — schedule a deployment (FR-3 build is Phase 2). */
+  /**
+   * Explain why a deployment failed.
+   *
+   * A POST because it may spend money and consume an allowance, even though it
+   * reads. Answers are cached by failure signature, so the common case - the
+   * same broken lockfile twice - costs nothing and is not counted.
+   */
+  app.post(
+    '/fleets/:fleetId/deployments/:deploymentId/explain',
+    { preHandler: requireFleetPermission('service.read') },
+    async (req, reply) => {
+      const { fleetId, deploymentId } = req.params as { fleetId: string; deploymentId: string }
+      const { explainDeployment, usageToday, DAILY_LIMIT } = await import('../ai/explain.js')
+
+      const out = await explainDeployment(app.ctx, { fleetId, deploymentId, userId: req.userId! })
+      const used = await usageToday(app.ctx, req.userId!)
+
+      // The meter travels with every answer, so the limit is never a surprise
+      // that only appears at the moment it stops you.
+      return reply.send({ ...out, usage: { used, limit: DAILY_LIMIT } })
+    }
+  )
+
   app.post(
     '/services/:serviceId/deploy',
     { preHandler: requireServicePermission('service.deploy') },
