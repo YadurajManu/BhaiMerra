@@ -213,7 +213,18 @@ async function deployOne(
             body: { gitSha: opts.gitSha, contextId },
           })
         ).body
-        walker.finish(`scheduled onto ${result.placedOn.name}`)
+        // Deliberately not walker.finish().
+        //
+        // The control plane answers as soon as a node is chosen and builds
+        // afterwards, so this response arrives before the build starts.
+        // Finishing here marked build, push, schedule and container as "not
+        // needed" — while the build ran for three minutes — and left a silent
+        // counter that reads as a hang. The steps are real; only the reply is
+        // early. Progress keeps driving the ladder until the phases are
+        // genuinely done.
+        walker.advance(2, `scheduled onto ${result.placedOn.name}`)
+        await progress.untilSettled({ deadlineMs: 45 * 60_000 })
+        walker.finish()
         return result
       } finally {
         await progress.stop()

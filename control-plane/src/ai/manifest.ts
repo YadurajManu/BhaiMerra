@@ -98,6 +98,8 @@ Rules, in order of importance:
 
 5. Databases only when a driver appears in a dependency list (pg, mongoose, redis, mysql2, prisma...). "uses:" names databases only, never other services.
 
+5b. Never replace a service's "build:" with an "image:". Source lives in the repository, not in a public image. A compose file may well say "image: nginx:alpine" and mount ./frontend into it — that mount is a host directory, it cannot exist on a node, and the same image there serves its own welcome page instead of the site. A service whose content comes from the repo must be built.
+
 5a. "node:" names a physical machine in the fleet. It is the one field no evidence in a repository can settle — a compose service called "mongo" is not a machine. You are told below which nodes exist; use one of those names or leave the draft's value exactly as it is. Never invent one.
 
 6. Keep service names kebab-case, and keep any part of the draft you have no evidence to change.
@@ -171,8 +173,9 @@ export async function assistManifest(
   // The draft has to survive whatever happens next, so it is validated first.
   // If the deterministic answer is already invalid there is a bug in `init`,
   // and quietly asking a model to paper over it would hide that.
+  let draftParsed: ReturnType<typeof parseManifest>
   try {
-    parseManifest(opts.draft)
+    draftParsed = parseManifest(opts.draft)
   } catch (err) {
     return {
       status: 'kept_draft',
@@ -258,6 +261,30 @@ export async function assistManifest(
     // repository can support: a container name is not a host. The manifest
     // parsed, `--dry-run` passed, and `fleet up` failed on a fleet with no
     // node called mongo.
+    // And it must not have thrown the source away.
+    //
+    // A compose file saying `image: nginx:alpine` with `./frontend` mounted
+    // into it is faithfully read as "this service is that image" — and it is,
+    // on one machine. On a node there is no ./frontend to mount, so the
+    // service came up serving nginx's welcome page while every status said
+    // running. The manifest was valid, the deploy succeeded, and the site was
+    // gone.
+    const draftBuilds = new Set(
+      draftParsed.services.filter((svc) => svc.build).map((svc) => svc.name)
+    )
+    const lostSource = suggested.services
+      .filter((svc) => draftBuilds.has(svc.name) && !svc.build)
+      .map((svc) => svc.name)
+    if (lostSource.length) {
+      await refund()
+      return {
+        status: 'kept_draft',
+        reason:
+          `The review replaced the build of ${lostSource.join(', ')} with a prebuilt image. ` +
+          `Source in this repository has to be built — a public image on a node cannot contain it.`,
+      }
+    }
+
     const known = new Set(nodeNames)
     const invented = suggested.services.filter((svc) => svc.node && !known.has(svc.node))
     if (invented.length) {

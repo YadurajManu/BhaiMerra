@@ -67,11 +67,16 @@ export function follow(
   serviceId: string,
   sink: (p: DeployProgress) => void,
   opts: { intervalMs?: number; onUnavailable?: () => void } = {}
-): { stop: () => Promise<void> } {
+): { stop: () => Promise<void>; untilSettled: (o?: { deadlineMs?: number }) => Promise<void> } {
   const interval = opts.intervalMs ?? 800
   let stopped = false
   let misses = 0
   let wake: (() => void) | null = null
+  /** Resolves once the deploy has left the phases this ladder draws. */
+  let settled: () => void = () => {}
+  const settledWhen = new Promise<void>((resolve) => {
+    settled = resolve
+  })
 
   const rest = (ms: number) =>
     new Promise<void>((resolve) => {
@@ -89,7 +94,22 @@ export function follow(
       try {
         const progress = await fetchProgress(serviceId)
         misses = 0
-        if (progress) sink(progress)
+        if (progress) {
+          sink(progress)
+          // `deploying` means the build and push are behind us and the node
+          // has been told; everything after that is the rollout, which the
+          // caller reports on separately.
+          // `status` carries the phase: queued → building → pushing →
+          // scheduling → deploying. Anything at or past `deploying` means the
+          // build and push are behind us; the rest is the rollout, which the
+          // caller reports on separately.
+          if (progress.status === 'deploying' || progress.status === 'running') settled()
+        } else {
+          // No progress row at all means the build phases are over: the row is
+          // dropped once a deploy leaves them, and a deploy that never wrote
+          // one had nothing to build.
+          settled()
+        }
       } catch {
         // A control plane that predates the endpoint answers 404 every time, so
         // give up rather than spend the whole build asking again.
@@ -101,11 +121,34 @@ export function follow(
     }
   })()
 
+  // The loop ending for any reason — including a control plane with no
+  // progress endpoint — has to release anybody waiting, or a missing feature
+  // becomes a hang.
+  void loop.then(() => settled()).catch(() => settled())
+
   return {
     stop: async () => {
       stopped = true
       wake?.()
       await loop.catch(() => {})
+    },
+    /**
+     * Wait until the build phases are done.
+     *
+     * Bounded: a deploy whose progress never arrives must not hold the ladder
+     * open for ever. On the deadline this returns rather than throwing — the
+     * caller's own wait is what decides whether the deploy failed, and two
+     * things reporting the same failure is worse than one.
+     */
+    untilSettled: async ({ deadlineMs = 45 * 60_000 } = {}) => {
+      let timer: NodeJS.Timeout | undefined
+      await Promise.race([
+        settledWhen,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, deadlineMs)
+        }),
+      ])
+      if (timer) clearTimeout(timer)
     },
   }
 }

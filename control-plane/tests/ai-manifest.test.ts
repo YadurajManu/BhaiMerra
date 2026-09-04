@@ -352,3 +352,60 @@ services:
     assert.match(sent, /real-node/, 'the fleet’s node names reach the prompt')
   })
 })
+
+describe('source in the repository has to stay built', () => {
+  test('a build replaced by a prebuilt image is refused', async () => {
+    // What happened to a real café site. docker-compose said
+    // `image: nginx:alpine` with `./frontend` mounted into it, and the review
+    // read that faithfully: the service *is* that image. On one machine it is.
+    // On a node there is no ./frontend to mount, so it came up serving nginx's
+    // welcome page — 896 bytes — while every status said running. The manifest
+    // was valid, the deploy succeeded, and the site was gone.
+    const user = `assist-build-${Date.now()}`
+    const { impl } = provider(
+      reply(`fleet: homelab
+
+services:
+  web:
+    image: nginx:alpine
+    placement: flexible
+    container_port: 80
+    resources: { ram: 512Mi, cpu: 0.5 }
+`)
+    )
+
+    const out = await assistManifest(ctx, { userId: user, fleetId, draft: DRAFT, repoMap: MAP }, impl)
+
+    assert.equal(out.status, 'kept_draft')
+    if (out.status === 'kept_draft') {
+      assert.match(out.reason, /web/, 'name the service it would have gutted')
+      assert.match(out.reason, /built/i)
+    }
+  })
+
+  test('a service that was already an image is left alone', async () => {
+    // The guard is about losing source, not about images. A manifest that
+    // never had a build has none to lose, and refusing that would ban a whole
+    // legitimate shape.
+    const user = `assist-imageok-${Date.now()}`
+    const imageDraft = `fleet: homelab
+
+services:
+  cache:
+    image: redis:7
+    placement: flexible
+    container_port: 6379
+    resources: { ram: 256Mi, cpu: 0.5 }
+`
+    const { impl } = provider(
+      reply(imageDraft.replace('ram: 256Mi', 'ram: 512Mi'), ['raised memory'])
+    )
+
+    const out = await assistManifest(
+      ctx,
+      { userId: user, fleetId, draft: imageDraft, repoMap: MAP },
+      impl
+    )
+    assert.equal(out.status, 'ok')
+  })
+})
