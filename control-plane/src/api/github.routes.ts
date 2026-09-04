@@ -158,6 +158,12 @@ export async function githubRoutes(app: FastifyInstance) {
       account = installations.find((i) => String(i.id) === installationId)?.account
     } catch (err) {
       req.log.error({ err }, 'could not read installations while completing GitHub setup')
+      // A key this process cannot read is not GitHub being unreachable, and
+      // telling somebody to check their network while the file sits there at
+      // mode 600 is how a two-minute fix becomes an evening.
+      if (err instanceof GitHubError && err.code === 'key_unreadable') {
+        return fail('github_key_unreadable')
+      }
       return fail('github_unreachable')
     }
     if (!account) {

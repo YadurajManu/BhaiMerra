@@ -19,7 +19,16 @@ export type GitHubConfig = {
 }
 
 export class GitHubError extends Error {
-  constructor(message: string, readonly status?: number) {
+  constructor(
+    message: string,
+    readonly status?: number,
+    /**
+     * A machine-readable cause, so a caller can tell a key it cannot read
+     * from GitHub it cannot reach. Those need opposite fixes and used to be
+     * reported as the same thing.
+     */
+    readonly code?: 'key_unreadable'
+  ) {
     super(message)
   }
 }
@@ -30,10 +39,24 @@ async function privateKey(path: string): Promise<string> {
   if (cachedKey) return cachedKey
   try {
     cachedKey = await readFile(path, 'utf8')
-  } catch {
+  } catch (err) {
+    // Which failure it was matters, and swallowing it cost an evening: a key
+    // that is present and unreadable looks identical to one that is absent,
+    // and the two have nothing to do with each other.
+    const cause = (err as NodeJS.ErrnoException)?.code
+    const detail =
+      cause === 'EACCES'
+        ? `The file exists but this process cannot read it. The control plane runs as uid 999 ` +
+          `inside its container, and a key downloaded from GitHub is usually root-owned at mode 600. ` +
+          `Fix with: chown 999:999 <the key> && chmod 600 <the key>`
+        : cause === 'ENOENT'
+          ? `No file at that path. Download the key from the App's settings page and mount it there.`
+          : `Reading it failed with ${cause ?? 'an unknown error'}.`
+
     throw new GitHubError(
-      `Could not read the GitHub App private key at "${path}". ` +
-        `Download it from the app's settings page and point GITHUB_APP_PRIVATE_KEY_PATH at it.`
+      `Could not read the GitHub App private key at "${path}". ${detail}`,
+      undefined,
+      'key_unreadable'
     )
   }
   return cachedKey

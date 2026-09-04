@@ -46,7 +46,9 @@ const SETUP_REASONS: Record<string, string> = {
   awaiting_owner_approval:
     'You requested the App on an organisation you do not own. An owner has to approve it first, then come back and connect.',
   installation_claimed: 'That GitHub account is already connected to a different Fleet organisation.',
-  github_unreachable: 'Could not reach GitHub to confirm the installation. Check the App private key, then try again.',
+  github_unreachable: 'Could not reach GitHub to confirm the installation. Check this server can reach api.github.com, then try again.',
+  github_key_unreadable:
+    'The GitHub App private key is there but this server cannot read it. It is usually root-owned at mode 600 while the control plane runs as uid 999 — chown 999:999 the key file and restart the control plane.',
   no_installation_id: 'GitHub returned from the install without an installation id.',
   github_not_configured: 'This control plane has no GitHub App configured.',
   malformed_callback: 'The callback from GitHub was malformed.',

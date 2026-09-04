@@ -161,7 +161,25 @@ else
   say "   htpasswd already present - keeping it"
 fi
 
-say "6. bringing the stack up"
+say "6. the GitHub App key, if there is one"
+# Same failure as the tunnel credential, different uid.
+#
+# The control plane runs as uid 999 inside its container and reads this key
+# through a read-only mount. Downloaded from GitHub it lands root-owned at
+# mode 600, so the app gets permission denied and reports "Could not reach
+# GitHub to confirm the installation" -- which sends whoever reads it to check
+# the key contents and the network, when the key is perfectly good and simply
+# unreadable by the process that needs it.
+GH_KEY="$REPO_DIR/deploy/github-app.pem"
+if [ -s "$GH_KEY" ]; then
+  chown 999:999 "$GH_KEY"
+  chmod 600 "$GH_KEY"
+  say "   $GH_KEY owned by uid 999"
+else
+  say "   none present - GitHub integration stays off until one is added"
+fi
+
+say "7. bringing the stack up"
 # registry-tls serves the registry from this box instead of through the tunnel.
 # Cloudflare's free plan rejects request bodies over 100MB, which every real
 # image push exceeds, so a registry behind the tunnel builds fine and then
@@ -170,7 +188,7 @@ say "6. bringing the stack up"
 # proxy OFF - see step 8.
 docker compose -f deploy/docker-compose.yml --profile tunnel --profile registry-tls up -d --build
 
-say "7. what is running"
+say "8. what is running"
 docker compose -f deploy/docker-compose.yml ps
 cat <<EOF
 
@@ -182,7 +200,7 @@ cat <<EOF
       docker logs fleet-tunnel --tail 40
 EOF
 
-say "8. one DNS record you must set by hand"
+say "9. one DNS record you must set by hand"
 cat <<EOF
   Every hostname above is a proxied CNAME to the tunnel. fleetregistry.$ZONE
   must NOT be, because Cloudflare's free plan caps request bodies at 100MB and
