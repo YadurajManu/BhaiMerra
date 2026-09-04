@@ -89,6 +89,45 @@ describe('explainWith', () => {
     )
   })
 
+  test('names a bot-detection page instead of calling it empty', async () => {
+    // What actually happened: agentrouter.org answered this control plane's
+    // requests with an Aliyun WAF challenge -- HTTP 200, text/html -- while
+    // the same key returned proper JSON from a laptop. The old code turned
+    // any non-JSON body into {} and reported "provider returned no content",
+    // which is true and sends whoever reads it to check the model name and
+    // the API key, neither of which was the problem.
+    const html = '<!doctype html>\n<meta name="aliyun_waf_aa" content="ff92">\n<script>...</script>'
+    const impl = (async () =>
+      new Response(html, { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } })) as unknown as typeof fetch
+
+    await assert.rejects(
+      () => explainWith(CONFIG, CONTEXT, impl),
+      (err: Error) => {
+        assert.match(err.message, /text\/html/, 'the operator needs to know what came back')
+        assert.match(err.message, /bot-detection|WAF/i, 'and what that usually means')
+        assert.ok(!/no content/.test(err.message), 'the old message pointed at the wrong thing')
+        return true
+      }
+    )
+  })
+
+  test('a non-JSON error body is still reported as itself', async () => {
+    // A proxy returning a plain-text 502 is not a challenge page, and should
+    // not be described as one.
+    const impl = (async () =>
+      new Response('upstream timed out', { status: 502, headers: { 'content-type': 'text/plain' } })) as unknown as typeof fetch
+
+    await assert.rejects(
+      () => explainWith(CONFIG, CONTEXT, impl),
+      (err: Error) => {
+        assert.match(err.message, /text\/plain/)
+        assert.match(err.message, /upstream timed out/)
+        assert.ok(!/bot-detection/i.test(err.message), 'no diagnosis that was not earned')
+        return true
+      }
+    )
+  })
+
   test('refuses a reply that is not JSON rather than inventing one', async () => {
     const { impl } = stub(reply('I think your lockfile is probably out of date.'))
     await assert.rejects(() => explainWith(CONFIG, CONTEXT, impl), /did not return JSON/)

@@ -101,7 +101,39 @@ export async function explainWith(
       signal: controller.signal,
     })
 
-    const body = (await res.json().catch(() => ({}))) as ChatResponse
+    // Read as text first, so a reply that is not JSON can be described rather
+    // than silently becoming {}.
+    //
+    // It used to be res.json().catch(() => ({})), which turned any non-JSON
+    // response into an empty object and then reported "provider returned no
+    // content" -- true, and useless. An endpoint behind a bot-detection WAF
+    // answers HTTP 200 with an HTML challenge page, and that message sends
+    // whoever reads it looking at the model name and the API key, neither of
+    // which is the problem. Say what actually came back.
+    const raw = await res.text()
+    let body: ChatResponse = {}
+    let parsed = true
+    try {
+      body = JSON.parse(raw) as ChatResponse
+    } catch {
+      parsed = false
+    }
+
+    if (!parsed) {
+      const type = res.headers.get('content-type') ?? 'no content-type'
+      const looksLikeChallenge = /<!doctype html|<html|waf|captcha/i.test(raw.slice(0, 500))
+      const snippet = raw.slice(0, 140).replace(/\s+/g, ' ').trim()
+      throw new Error(
+        `provider replied with ${type} instead of JSON (HTTP ${res.status})` +
+          (looksLikeChallenge
+            ? ' — this looks like a bot-detection or WAF challenge page, which usually means the' +
+              ' provider is refusing requests from this server rather than from you. The same key' +
+              ' often works from a laptop and not from a datacenter address.'
+            : '') +
+          ` First bytes: ${snippet}`
+      )
+    }
+
     if (!res.ok) {
       // The provider's own message, because "500" tells the operator nothing
       // about whether the key, the model name or the balance is the problem.
