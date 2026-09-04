@@ -104,6 +104,19 @@ if [ "$os" = windows ]; then
   STATE_DIR="${FLEET_STATE_DIR_WINDOWS:-${FLEET_STATE_DIR:-$HOME/.fleet-os}}"
 elif [ "$os" = darwin ]; then
   STATE_DIR="${FLEET_STATE_DIR_DARWIN:-${FLEET_STATE_DIR:-$HOME/Library/Application Support/fleet-os}}"
+  # Beside the state directory, not in /usr/local/bin.
+  #
+  # The agent here is a per-user LaunchAgent: it runs as you. Installed into
+  # /usr/local/bin it belongs to root, so the agent cannot replace its own
+  # binary and self-upgrade is impossible however well the rest of it works —
+  # the download succeeds, the checksum verifies, and the install fails on a
+  # permission error at the last step.
+  #
+  # An earlier install left a root-owned copy at /usr/local/bin/fleet-agent.
+  # This rewrites the plist to the new path, so that one stops being used; it
+  # is left in place because removing it needs a password this script should
+  # not be asking for.
+  BIN_DIR="${FLEET_BIN_DIR:-$STATE_DIR/bin}"
 fi
 
 bin_name="fleet-agent${ext}"
@@ -280,15 +293,20 @@ else
 fi
 
 chmod +x "$tmp/$bin_name"
-$SUDO mkdir -p "$BIN_DIR"
+# On macOS and Windows the agent runs as you, so both directories must belong
+# to you as well. Installed as root the agent cannot replace its own binary and
+# self-upgrade fails at the last step, after a successful download and a
+# verified checksum — which is exactly how it failed silently before.
 if [ "$os" = darwin ] || [ "$os" = windows ]; then
-  mkdir -p "$STATE_DIR"
+  mkdir -p "$BIN_DIR" "$STATE_DIR"
   chmod 700 "$STATE_DIR" 2>/dev/null || true
+  mv "$tmp/$bin_name" "$BIN_DIR/$bin_name"
 else
+  $SUDO mkdir -p "$BIN_DIR"
   $SUDO mkdir -p "$STATE_DIR"
   $SUDO chmod 700 "$STATE_DIR"
+  $SUDO mv "$tmp/$bin_name" "$BIN_DIR/$bin_name"
 fi
-$SUDO mv "$tmp/$bin_name" "$BIN_DIR/$bin_name"
 info "binary installed to ${BIN_DIR}/$bin_name"
 
 step "capability detection"

@@ -621,6 +621,14 @@ export default function Services() {
             const state = describeState(s)
             // An endpoint is only a link while something is answering on it.
             const reachable = isRunning && Boolean(url)
+            // Deploying from here is impossible for a service whose source is
+            // a directory on somebody's machine. The CLI uploads that context
+            // per deploy and the control plane discards it once the build
+            // finishes, so this button posted a deploy with no source and the
+            // build failed every time with `build context "./x" does not exist
+            // in the checkout`. A button that can only fail is worse than no
+            // button: it reads as a broken deploy rather than a missing step.
+            const needsLocalSource = !s.repoUrl && Boolean(s.buildContext)
             const expanded = openReason === s.id
 
             return (
@@ -912,7 +920,16 @@ export default function Services() {
                       <Button
                         variant={isRunning ? 'ghost' : 'primary'}
                         onClick={() => void deploy(s)}
-                        disabled={busy !== null}
+                        disabled={busy !== null || needsLocalSource}
+                        // A disabled control with no explanation is
+                        // indistinguishable from a broken one.
+                        title={
+                          needsLocalSource
+                            ? `${s.name} builds from ${s.buildContext} on your machine, which the control plane has no copy of. Run "fleet up ${s.name}" from the project directory to deploy it.`
+                            : isRunning
+                              ? 'Build and roll out a new release'
+                              : 'Build and start this service'
+                        }
                         className={`press h-[30px] px-3.5 text-[11px] ${isDeploying ? 'shimmer' : ''}`}
                       >
                         {isDeploying ? <span className="breathe">Deploying…</span> : isRunning ? '🚀 Redeploy' : '🚀 Deploy'}

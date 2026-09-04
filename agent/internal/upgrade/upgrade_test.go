@@ -187,3 +187,62 @@ func TestHashFile(t *testing.T) {
 		t.Fatal("a missing file must be an error, not an empty hash that matches nothing")
 	}
 }
+
+func TestInstallStagedReplacesTheRunningBinary(t *testing.T) {
+	dir := t.TempDir()
+	staged := filepath.Join(dir, StagedName)
+	if err := os.WriteFile(staged, []byte("#!/bin/sh\necho new\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// A destination of our own, so the test does not overwrite the binary it
+	// is currently running as.
+	self := filepath.Join(dir, "fleet-agent")
+	if err := os.WriteFile(self, []byte("#!/bin/sh\necho old\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	installed, err := installStagedInto(staged, self)
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if !installed {
+		t.Fatal("a staged binary should have been installed")
+	}
+	got, err := os.ReadFile(self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "echo new") {
+		t.Errorf("the running binary was not replaced: %q", got)
+	}
+	// The staged file is removed only after the replacement is in place: while
+	// it exists, the upgrade is still owed and would be retried.
+	if _, err := os.Stat(staged); !os.IsNotExist(err) {
+		t.Error("the staged file should be gone once it has been installed")
+	}
+}
+
+func TestInstallStagedIsANoOpWithNothingStaged(t *testing.T) {
+	// The overwhelmingly common case, and emphatically not an error — this
+	// runs on every single agent start.
+	installed, err := InstallStaged(t.TempDir())
+	if err != nil {
+		t.Fatalf("nothing staged must not be an error, got %v", err)
+	}
+	if installed {
+		t.Error("nothing was staged, so nothing should have been installed")
+	}
+}
+
+func TestInstallStagedRefusesANonExecutableFile(t *testing.T) {
+	// Something that cannot be executed is not an upgrade, and renaming it
+	// over the running agent would take the node down until someone noticed.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, StagedName), []byte("not a binary"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InstallStaged(dir); err == nil {
+		t.Fatal("a non-executable staged file should be refused, not installed")
+	}
+}

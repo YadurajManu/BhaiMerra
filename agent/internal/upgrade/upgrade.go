@@ -202,3 +202,74 @@ func Stage(stateDir string, body io.Reader, wantSum string) (string, error) {
 	}
 	return staged, nil
 }
+
+// InstallStaged replaces the running binary with the one Stage left behind,
+// and reports whether it did.
+//
+// The systemd unit does this in an ExecStartPre that runs as root, which is
+// better where it exists. It does not exist on launchd: macOS nodes staged a
+// verified binary that nothing ever installed, so the agent exited asking to
+// be restarted, came back as the same version, staged again, and after
+// MaxAttempts marked the upgrade failed and stayed on the old build for ever.
+// Bounded rather than a loop, and completely silent — the one shape of bug
+// this codebase is most prone to.
+//
+// Doing it here covers every supervisor, including none at all. Where the
+// pre-start step already ran there is no staged file left and this is a no-op.
+//
+// The destination is os.Executable() rather than a configured directory: the
+// binary that should be replaced is the one actually running, and a path
+// written down somewhere else can be stale or simply wrong.
+func InstallStaged(stateDir string) (bool, error) {
+	staged := filepath.Join(stateDir, StagedName)
+	info, err := os.Stat(staged)
+	if err != nil {
+		// Nothing staged is the overwhelmingly common case, and not an error.
+		return false, nil
+	}
+	if info.Mode()&0o111 == 0 {
+		return false, fmt.Errorf("%s is not executable", staged)
+	}
+
+	self, err := os.Executable()
+	if err != nil {
+		return false, err
+	}
+	// Through any symlink, so the real file is replaced rather than the link.
+	if resolved, err := filepath.EvalSymlinks(self); err == nil {
+		self = resolved
+	}
+	return installStagedInto(staged, self)
+}
+
+// installStagedInto is the part that can be tested without a test binary
+// overwriting itself, which is what happens when the destination is always
+// os.Executable().
+func installStagedInto(staged, self string) (bool, error) {
+	body, err := os.ReadFile(staged)
+	if err != nil {
+		return false, err
+	}
+
+	// Written beside the target and renamed over it, because rename is atomic
+	// within a directory: a supervisor that restarts us mid-write must find
+	// either the old binary or the new one, never half of either. Writing
+	// directly to `self` would also fail with ETXTBSY on some systems.
+	tmp := filepath.Join(filepath.Dir(self), "."+filepath.Base(self)+".new")
+	if err := os.WriteFile(tmp, body, 0o755); err != nil {
+		// The usual cause, and worth saying plainly: the agent runs
+		// unprivileged and the binary belongs to root. An upgrade cannot
+		// install itself into a directory the agent cannot write.
+		return false, fmt.Errorf("write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, self); err != nil {
+		os.Remove(tmp)
+		return false, fmt.Errorf("replace %s: %w", self, err)
+	}
+
+	// Only now: while this file exists the upgrade is still owed.
+	if err := os.Remove(staged); err != nil {
+		return true, fmt.Errorf("installed, but could not remove %s: %w", staged, err)
+	}
+	return true, nil
+}

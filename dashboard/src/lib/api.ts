@@ -154,6 +154,15 @@ export type Service = {
   /** The manifest these services came from; the dashboard groups by it. */
   project: string
   repoUrl: string | null
+  /**
+   * The directory this service builds from, when it builds from source.
+   *
+   * With no repoUrl, that source only exists on whoever ran `fleet up`: the
+   * CLI uploads it per deploy and the control plane discards it once the build
+   * finishes. So the dashboard cannot deploy such a service — there is nothing
+   * on the server to build.
+   */
+  buildContext: string | null
   placementPolicy: 'pinned' | 'preferred' | 'flexible'
   pinnedNodeId: string | null
   requestRamMb: number

@@ -78,6 +78,24 @@ func run() error {
 		return printJSON(capability.Detect(Version))
 	}
 
+	// Before anything else: a binary staged by a previous run is installed
+	// here, and we restart onto it.
+	//
+	// On systemd the unit's ExecStartPre has already done this as root and
+	// there is nothing left to find. launchd has no equivalent, so without
+	// this a macOS node staged a verified upgrade that was never installed —
+	// it restarted, came back the same version, staged again, and after
+	// MaxAttempts gave up and stayed on the old build silently.
+	if installed, err := upgrade.InstallStaged(filepath.Dir(*statePath)); err != nil {
+		// Not fatal: an agent that cannot upgrade itself is still an agent
+		// that works. But it must say so, because the alternative is a node
+		// that quietly never updates again.
+		log.Warn("could not install the staged upgrade — this node will keep running its current version", "err", err)
+	} else if installed {
+		log.Info("installed a staged upgrade, restarting onto it", "was", Version)
+		return errUpgradeStaged
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
