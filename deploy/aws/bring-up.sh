@@ -162,7 +162,13 @@ else
 fi
 
 say "6. bringing the stack up"
-docker compose -f deploy/docker-compose.yml --profile tunnel up -d --build
+# registry-tls serves the registry from this box instead of through the tunnel.
+# Cloudflare's free plan rejects request bodies over 100MB, which every real
+# image push exceeds, so a registry behind the tunnel builds fine and then
+# fails at the push with a 413 that never reaches the registry at all.
+# It needs fleetregistry.$ZONE to be a plain A record to this box with the
+# proxy OFF - see step 8.
+docker compose -f deploy/docker-compose.yml --profile tunnel --profile registry-tls up -d --build
 
 say "7. what is running"
 docker compose -f deploy/docker-compose.yml ps
@@ -174,4 +180,24 @@ cat <<EOF
   A 530 means Cloudflare has no origin - the tunnel container is not connected.
   Read why with:
       docker logs fleet-tunnel --tail 40
+EOF
+
+say "8. one DNS record you must set by hand"
+cat <<EOF
+  Every hostname above is a proxied CNAME to the tunnel. fleetregistry.$ZONE
+  must NOT be, because Cloudflare's free plan caps request bodies at 100MB and
+  image layers routinely exceed that. Left proxied, builds succeed and pushes
+  fail with "413 Payload Too Large" - from the edge, not from the registry.
+
+  In the Cloudflare dashboard, DNS for $ZONE, set:
+
+      Name     fleetregistry
+      Type     A
+      Content  $(curl -s --max-time 10 https://api.ipify.org || echo "<this box's public IP>")
+      Proxy    DNS only (grey cloud)   <- the part that matters
+
+  Caddy then gets a certificate over ACME automatically. Confirm with:
+      curl -s -o /dev/null -w '%{http_code}\n' https://fleetregistry.$ZONE/v2/
+
+  401 is the healthy answer: the registry is up and asking for credentials.
 EOF
