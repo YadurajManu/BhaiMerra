@@ -25,6 +25,16 @@ const schema = z.object({
    * log instead of sending, which is the right default for a self-hoster who
    * never wanted mail in the first place.
    */
+  /* Explaining failed deploys.
+   *
+   * Operator-configured, not per fleet. Whoever runs the control plane holds
+   * the key and pays for the calls; a user should not have to find a provider
+   * and paste a credential to be told why their build broke. Absent means the
+   * feature is simply off. */
+  AI_API_KEY: z.string().optional(),
+  AI_BASE_URL: z.string().url().default('https://agentrouter.org/v1'),
+  AI_MODEL: z.string().default('claude-sonnet-4-8'),
+
   RESEND_API_KEY: z.string().optional(),
   /** Envelope sender. Must be on a domain verified in Resend, or every send 403s. */
   MAIL_FROM: z.string().optional(),

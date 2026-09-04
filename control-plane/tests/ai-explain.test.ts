@@ -15,7 +15,6 @@ import { eq } from 'drizzle-orm'
 import { loadConfig } from '../src/config.js'
 import { createContext, closeContext, type AppContext } from '../src/api/context.js'
 import { deploymentExplanations, deployments, fleets, orgs, services } from '../src/db/schema.js'
-import { setSecret } from '../src/secrets/store.js'
 import { explainDeployment, usageToday, DAILY_LIMIT } from '../src/ai/explain.js'
 import { signatureOf } from '../src/ai/signature.js'
 
@@ -85,35 +84,22 @@ after(async () => {
 beforeEach(async () => {
   await ctx.db.delete(deploymentExplanations).where(eq(deploymentExplanations.signature, signatureOf(FAILURE)))
   await ctx.redis.del(`ai:explain:${userId}:${new Date().toISOString().slice(0, 10)}`)
-  await setSecret(ctx, { fleetId }, 'AI_PROVIDER_KEY', 'sk-test')
-  await ctx.db
-    .update(fleets)
-    .set({
-      aiEnabled: true,
-      aiBaseUrl: 'https://agentrouter.org/v1',
-      aiModel: 'claude-sonnet-4-8',
-      aiKeyRef: 'AI_PROVIDER_KEY',
-    })
-    .where(eq(fleets.id, fleetId))
+  // Operator config, not fleet config: whoever runs the control plane holds
+  // the key.
+  ctx.config.AI_API_KEY = 'sk-test'
+  ctx.config.AI_BASE_URL = 'https://agentrouter.org/v1'
+  ctx.config.AI_MODEL = 'claude-sonnet-4-8'
 })
 
-describe('nothing reaches a provider unless it was switched on', () => {
-  test('a fleet with the feature off never calls out', async () => {
-    await ctx.db.update(fleets).set({ aiEnabled: false }).where(eq(fleets.id, fleetId))
+describe('nothing reaches a provider unless one is configured', () => {
+  test('a control plane with no key never calls out', async () => {
+    ctx.config.AI_API_KEY = undefined
     const p = provider(answer)
 
     const out = await explainDeployment(ctx, { fleetId, deploymentId, userId }, p.impl)
     assert.equal(out.status, 'disabled')
-    assert.equal(p.calls(), 0, 'a disabled fleet must not reach a provider')
+    assert.equal(p.calls(), 0, 'an unconfigured control plane must not reach a provider')
     assert.equal(await usageToday(ctx, userId), 0, 'and must not consume an allowance')
-  })
-
-  test('a fleet with no key configured does not either', async () => {
-    await ctx.db.update(fleets).set({ aiKeyRef: null }).where(eq(fleets.id, fleetId))
-    const p = provider(answer)
-    const out = await explainDeployment(ctx, { fleetId, deploymentId, userId }, p.impl)
-    assert.equal(out.status, 'disabled')
-    assert.equal(p.calls(), 0)
   })
 })
 

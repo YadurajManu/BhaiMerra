@@ -114,6 +114,12 @@ services:
       # failing, so an unconfigured control plane still runs normally.
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       MAIL_FROM: ${MAIL_FROM:-}
+      # Explaining failed deploys. The operator holds one key and pays for the
+      # calls; users are bounded by a per-person daily limit rather than being
+      # asked to find a provider of their own. Absent means the feature is off.
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_BASE_URL: ${AI_BASE_URL:-https://agentrouter.org/v1}
+      AI_MODEL: ${AI_MODEL:-claude-sonnet-4-8}
       BUILDX_BUILDER: ${BUILDX_BUILDER:-}
       # "min" when the registry is behind a proxy with a request size limit —
       # Cloudflare's free plan rejects bodies over 100MB, and "max" exports

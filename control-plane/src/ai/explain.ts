@@ -1,7 +1,6 @@
-import { and, eq, isNull, sql } from 'drizzle-orm'
+import { and, eq, sql } from 'drizzle-orm'
 import type { AppContext } from '../api/context.js'
-import { deployments, deploymentExplanations, fleets, secrets, services } from '../db/schema.js'
-import { openSecret, type SealedSecret } from '../lib/crypto.js'
+import { deployments, deploymentExplanations, services } from '../db/schema.js'
 import { signatureOf, tail, worthExplaining } from './signature.js'
 import { explainWith, type Explanation } from './provider.js'
 
@@ -106,42 +105,18 @@ export async function explainDeployment(
     }
   }
 
-  // 2. Is this fleet configured to ask anybody?
-  const [fleet] = await ctx.db
-    .select({
-      enabled: fleets.aiEnabled,
-      baseUrl: fleets.aiBaseUrl,
-      model: fleets.aiModel,
-      keyRef: fleets.aiKeyRef,
-    })
-    .from(fleets)
-    .where(eq(fleets.id, opts.fleetId))
-    .limit(1)
-
-  if (!fleet?.enabled) {
+  // 2. Has whoever runs this control plane configured a provider?
+  //
+  //    Operator-level rather than per fleet: the person who deployed Fleet
+  //    holds the key and pays for the calls. Asking a user to go and find a
+  //    provider before they can be told why their build failed would mean
+  //    almost nobody ever sees this.
+  const { AI_API_KEY: apiKey, AI_BASE_URL: baseUrl, AI_MODEL: model } = ctx.config
+  if (!apiKey) {
     return {
       status: 'disabled',
-      reason: 'Explaining failures is off for this fleet. Turn it on in Settings and add a provider key.',
+      reason: 'This control plane has no explanation provider configured.',
     }
-  }
-  if (!fleet.baseUrl || !fleet.keyRef) {
-    return { status: 'disabled', reason: 'This fleet has no provider configured — add a base URL and key in Settings.' }
-  }
-
-  const [keyRow] = await ctx.db
-    .select({ encryptedValue: secrets.encryptedValue })
-    .from(secrets)
-    .where(
-      and(
-        eq(secrets.fleetId, opts.fleetId),
-        eq(secrets.key, fleet.keyRef),
-        isNull(secrets.serviceId)
-      )
-    )
-    .limit(1)
-
-  if (!keyRow) {
-    return { status: 'disabled', reason: `The provider key "${fleet.keyRef}" is not set for this fleet.` }
   }
 
   // 3. The limit, consulted only now — when a call is genuinely about to cost
@@ -159,19 +134,10 @@ export async function explainDeployment(
     }
   }
 
-  let apiKey: string
-  try {
-    apiKey = openSecret(keyRow.encryptedValue as unknown as SealedSecret, ctx.config.SECRETS_MASTER_KEY)
-  } catch {
-    // A value that will not open means SECRETS_MASTER_KEY changed since it was
-    // sealed. Never let ciphertext or the failure detail into the message.
-    return { status: 'disabled', reason: `The provider key "${fleet.keyRef}" could not be read — set it again.` }
-  }
-
   let out: Explanation
   try {
     out = await explainWith(
-      { baseUrl: fleet.baseUrl, apiKey, model: fleet.model },
+      { baseUrl, apiKey, model },
       { log: logTail, service: row.serviceName },
       fetchImpl
     )

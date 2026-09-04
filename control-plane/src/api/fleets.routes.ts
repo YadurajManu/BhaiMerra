@@ -52,11 +52,6 @@ export async function fleetRoutes(app: FastifyInstance) {
         heartbeatIntervalSec: fleets.heartbeatIntervalSec,
         heartbeatMissThreshold: fleets.heartbeatMissThreshold,
         agentAutoUpgrade: fleets.agentAutoUpgrade,
-        aiEnabled: fleets.aiEnabled,
-        aiBaseUrl: fleets.aiBaseUrl,
-        aiModel: fleets.aiModel,
-        // The key itself is never returned - only whether one is named.
-        aiKeyRef: fleets.aiKeyRef,
       })
       .from(fleets)
       .innerJoin(orgMembers, eq(orgMembers.orgId, fleets.orgId))
@@ -101,10 +96,6 @@ export async function fleetRoutes(app: FastifyInstance) {
           heartbeatMissThreshold: z.number().int().min(1).max(10).optional(),
           defaultReclaimPolicy: z.enum(['eager', 'idle', 'manual']).optional(),
           agentAutoUpgrade: z.boolean().optional(),
-          aiEnabled: z.boolean().optional(),
-          aiBaseUrl: z.string().url().max(512).nullable().optional(),
-          aiModel: z.string().trim().min(1).max(128).optional(),
-          aiKeyRef: z.string().trim().max(128).nullable().optional(),
         })
         .refine((v) => Object.keys(v).length > 0, { message: 'Nothing to change' })
         .safeParse(req.body)
