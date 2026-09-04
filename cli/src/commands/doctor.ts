@@ -41,6 +41,45 @@ const ORIGIN_UNREACHABLE = new Set([502, 503, 504, 520, 521, 522, 523, 524, 525,
  * What does indicate a broken path is the edge answering on the origin's
  * behalf, or nothing answering at all.
  */
+/**
+ * Whether this fleet can tell anybody something went wrong.
+ *
+ * A fleet with no alert rules fails silently, and the only way to find out is
+ * an outage. This one had none while its services went down four times in an
+ * afternoon: the empty state existed, and lived inside `fleet alerts`, a
+ * subcommand you only run once you already suspect the answer.
+ *
+ * Separated from the command so both outcomes can be tested without a control
+ * plane — the one that matters is the warning, and it is the one a live check
+ * against a working fleet never exercises.
+ */
+export function alertCheck(rules: Array<{ channelType: string; enabled: boolean }>): {
+  state: 'ok' | 'warn'
+  label: string
+  detail: string
+  remedy?: string
+} {
+  const live = rules.filter((r) => r.enabled)
+  if (live.length) {
+    return {
+      state: 'ok',
+      label: 'alerts',
+      detail: `${live.length} rule(s): ${[...new Set(live.map((r) => r.channelType))].join(', ')}`,
+    }
+  }
+  return {
+    state: 'warn',
+    label: 'alerts',
+    // Disabled and absent are different mistakes: one was set up and turned
+    // off, the other never existed, and the person reading needs to know which.
+    detail: rules.length
+      ? 'Every alert rule is disabled — failures will pass unreported.'
+      : 'No alert rules. A node going down or a deploy failing will tell nobody.',
+    remedy:
+      'Add one with `fleet alerts add --channel email --to you@example.com`, then prove it with `fleet alerts test`.',
+  }
+}
+
 async function reach(url: string): Promise<{ ok: boolean; detail: string }> {
   try {
     const response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(8_000) })
@@ -74,13 +113,17 @@ export const doctorCommand = {
     const fleetId = await requireFleet(typeof flags.fleet === 'string' ? flags.fleet : undefined)
 
     const result = await task('checking Fleet health', async () => {
-      const [identity, fleet, nodes, services, github, health] = await Promise.all([
+      const [identity, fleet, nodes, services, github, health, alerts] = await Promise.all([
         request<{ user: { email: string } }>('GET', '/auth/me'),
         request<{ fleet: { name: string }; role: string }>('GET', `/fleets/${fleetId}`),
         request<{ nodes: Node[] }>('GET', `/fleets/${fleetId}/nodes`),
         request<{ services: Service[] }>('GET', `/fleets/${fleetId}/services`),
         request<{ configured: boolean; error?: string; installations?: unknown[] }>('GET', `/fleets/${fleetId}/github/status`),
         request<{ version?: string }>('GET', '/healthz'),
+        request<{ rules: Array<{ channelType: string; enabled: boolean }> }>(
+          'GET',
+          `/fleets/${fleetId}/alert-rules`
+        ),
       ])
 
       const deploymentHistory = await Promise.all(
@@ -93,7 +136,7 @@ export const doctorCommand = {
         .map((service) => ({ name: service.name, hostname: service.domain ?? service.hostname }))
         .filter((service): service is { name: string; hostname: string } => Boolean(service.hostname))
       const ingress = await Promise.all(urls.map(async (service) => ({ ...service, ...(await reach(`https://${service.hostname}`)) })))
-      return { identity: identity.body, fleet: fleet.body, nodes: nodes.body.nodes, services: services.body.services, github: github.body, health: health.body, deploymentHistory, ingress }
+      return { identity: identity.body, fleet: fleet.body, nodes: nodes.body.nodes, services: services.body.services, github: github.body, health: health.body, alerts: alerts.body.rules, deploymentHistory, ingress }
     })
 
     const checks: Check[] = [
@@ -193,6 +236,8 @@ export const doctorCommand = {
             remedy: 'Set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY, restart the control plane, then connect repositories in Dashboard → Settings.',
           }
     )
+    checks.push(alertCheck(result.alerts))
+
     checks.push({ state: 'ok', label: 'control-plane version', detail: result.health.version ?? 'version not reported' })
 
     if (flags.json) return console.log(JSON.stringify({ fleetId, checks }, null, 2))

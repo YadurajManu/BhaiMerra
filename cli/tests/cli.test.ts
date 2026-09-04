@@ -2,6 +2,7 @@ import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 import { parseArgs, KNOWN_FLAGS, nearestFlag } from '../src/args.js'
 import { etaLine, progressLine } from '../src/progress.js'
+import { alertCheck } from '../src/commands/doctor.js'
 import { table, relativeTime, mb, visibleLength, truncate, c } from '../src/render.js'
 import { readFileSync, readdirSync } from 'node:fs'
 
@@ -209,5 +210,37 @@ describe('the deploy estimate', () => {
     assert.match(line, /4\/9/)
     assert.match(line, /arm64/)
     assert.match(line, /emulated/)
+  })
+})
+
+describe('the alerts check', () => {
+  test('a fleet with no rules is warned about, and told what to run', () => {
+    // The case that matters, and the one a live check against a working fleet
+    // never reaches. This fleet had no rules while its services went down four
+    // times in an afternoon.
+    const c = alertCheck([])
+    assert.equal(c.state, 'warn')
+    assert.match(c.detail, /tell nobody/)
+    assert.match(c.remedy!, /fleet alerts add/)
+  })
+
+  test('rules that exist but are all disabled say so specifically', () => {
+    // Set up and switched off is a different mistake from never set up, and
+    // the person reading needs to know which one they made.
+    const c = alertCheck([{ channelType: 'email', enabled: false }])
+    assert.equal(c.state, 'warn')
+    assert.match(c.detail, /disabled/)
+  })
+
+  test('a working rule passes, naming the channels', () => {
+    const c = alertCheck([
+      { channelType: 'email', enabled: true },
+      { channelType: 'email', enabled: true },
+      { channelType: 'slack', enabled: false },
+    ])
+    assert.equal(c.state, 'ok')
+    assert.match(c.detail, /2 rule/)
+    assert.match(c.detail, /email/)
+    assert.ok(!c.detail.includes('slack'), 'a disabled channel is not protection')
   })
 })

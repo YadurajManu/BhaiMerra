@@ -21,6 +21,12 @@ export default function Overview() {
   // absent from it — which is how four of them were down with the Overview
   // reporting nothing at all.
   const services = usePoll(() => api<{ services: Service[] }>(`/fleets/${id}/services`), [id], 8000)
+  // Polled slowly: this changes when somebody configures it, not on its own.
+  const alerts = usePoll(
+    () => api<{ rules: Array<{ enabled: boolean }> }>(`/fleets/${id}/alert-rules`),
+    [id],
+    60_000
+  )
   const navigate = useNavigate()
 
   if (!id) return <Empty title="No fleet selected" />
@@ -69,8 +75,35 @@ export default function Overview() {
       !pinnedDown.some((p) => p.service === s.name)
   )
 
+  const canAlert = (alerts.data?.rules ?? []).some((r) => r.enabled)
+
   return (
     <div className="space-y-6">
+      {/* Nothing is wrong yet, and nothing will say so when it is.
+
+          The rules, the channels and the delivery all existed; this fleet
+          simply had none configured, and found out by watching services go
+          down four times in an afternoon. The empty state was written — inside
+          `fleet alerts`, a command you only run once you already suspect the
+          answer. Shown here because this is the page people actually open.
+
+          Only once the fleet has something to lose: a brand new fleet with no
+          services does not need telling, and a warning on an empty screen is
+          how people learn to dismiss warnings. */}
+      {alerts.data && !canAlert && (services.data?.services.length ?? 0) > 0 && (
+        <Link
+          to="/alerts"
+          className="fade-up block border-l-2 border-[var(--color-warn)] bg-[color-mix(in_oklab,var(--color-warn)_6%,transparent)] px-5 py-4 transition-colors hover:bg-[color-mix(in_oklab,var(--color-warn)_10%,transparent)]"
+        >
+          <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--color-warn)]">
+            no alerts configured
+          </div>
+          <p className="mt-2 text-[14px] leading-relaxed">
+            A node going down or a deploy failing will tell nobody. Add a rule →
+          </p>
+        </Link>
+      )}
+
       {/* Something is wrong and nothing said so until you went looking. */}
       {broken.length > 0 && (
         <Link
