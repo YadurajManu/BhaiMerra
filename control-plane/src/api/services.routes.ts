@@ -1,4 +1,4 @@
-import { and, eq, ne, desc, inArray } from 'drizzle-orm'
+import { and, eq, ne, desc, inArray, gte, count } from 'drizzle-orm'
 import { z } from 'zod'
 import type { FastifyInstance } from 'fastify'
 import { services, deployments, nodes, fleets, placementEvents } from '../db/schema.js'
@@ -166,11 +166,37 @@ export async function serviceRoutes(app: FastifyInstance) {
         : []
       const lastByService = new Map(lastRows.map((d) => [d.serviceId, d]))
 
+      // How many recent failures each service has.
+      //
+      // A count, not the rows: the dashboard only needs to know whether there
+      // is history worth offering, and this list is polled continuously. The
+      // failures themselves are fetched from /deployments when somebody asks
+      // to see them.
+      //
+      // Bounded by a window rather than returning everything ever. A service
+      // that failed thirty times last month and has been healthy since is not
+      // usefully described as "30 failures", and the number would only grow.
+      const failureRows = rows.length
+        ? await db
+            .select({ serviceId: deployments.serviceId, count: count() })
+            .from(deployments)
+            .where(
+              and(
+                inArray(deployments.serviceId, rows.map((r) => r.id)),
+                eq(deployments.status, 'failed'),
+                gte(deployments.startedAt, new Date(Date.now() - 7 * 24 * 60 * 60_000))
+              )
+            )
+            .groupBy(deployments.serviceId)
+        : []
+      const failuresByService = new Map(failureRows.map((r) => [r.serviceId, Number(r.count)]))
+
       return {
         services: rows.map((s) => ({
           ...s,
           current: byService.get(s.id) ?? null,
           last: lastByService.get(s.id) ?? null,
+          recentFailures: failuresByService.get(s.id) ?? 0,
         })),
       }
     }

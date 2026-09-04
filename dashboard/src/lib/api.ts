@@ -189,6 +189,14 @@ export type Service = {
     nodeName: string | null
     gitSha: string | null
   } | null
+  /**
+   * Failed deployments in the last week.
+   *
+   * A count, so the card can offer its history without the list carrying the
+   * rows on every poll. The failures themselves come from /deployments when
+   * somebody opens them.
+   */
+  recentFailures: number
 }
 
 export type PlacementMapNode = {

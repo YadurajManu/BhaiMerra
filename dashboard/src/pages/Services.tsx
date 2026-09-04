@@ -68,6 +68,7 @@ function summarise(reason: string): { head: string; rest: string | null } {
 import { Button, ConfirmDialog, Copyable, Dot, Empty, ErrorNote, Panel, StatusPill } from '../components/ui'
 import DeployProgress from '../components/DeployProgress'
 import ExplainFailure from '../components/ExplainFailure'
+import PastFailures from '../components/PastFailures'
 
 const TEMPLATES: Record<string, string> = {
   nginx: `fleet: homelab
@@ -727,13 +728,23 @@ export default function Services() {
                         <span className={state.busy ? 'breathe' : undefined}>{state.label}</span>
                       </span>
                     )}
-                    {state.detail && (
+                    {/* A healthy service that has been failing is worth a
+                        word. Without this the card forgets: the moment
+                        something is fixed, what broke it stops being visible
+                        anywhere a person is looking, and the only route back
+                        is to open the service and scroll its history knowing
+                        what to look for. */}
+                    {(state.detail || s.recentFailures > 0) && (
                       <button
                         onClick={() => setOpenReason(expanded ? null : s.id)}
                         aria-expanded={expanded}
                         className="press font-mono text-[10.5px] text-[var(--color-fg-dim)] underline underline-offset-2 hover:text-[var(--color-fg-muted)]"
                       >
-                        {expanded ? 'hide reason' : 'why?'}
+                        {expanded
+                          ? 'hide'
+                          : state.detail
+                            ? 'why?'
+                            : `${s.recentFailures} recent failure${s.recentFailures === 1 ? '' : 's'}`}
                       </button>
                     )}
                   </div>
@@ -754,17 +765,21 @@ export default function Services() {
                 )}
 
                 {/* The reason, in the place a person is already looking. */}
-                {state.detail && (
+                {(state.detail || s.recentFailures > 0) && (
                   <div className="reveal -mt-1" data-open={expanded}>
                     <div>
                       <div className="rounded-[3px] border-l-2 border-[var(--color-down)] bg-[color-mix(in_oklab,var(--color-down)_6%,transparent)] px-3.5 py-3">
-                        <p className="font-mono text-[11.5px] leading-relaxed text-[var(--color-fg-muted)]">
-                          {summarise(state.detail).head}
-                        </p>
-                        {summarise(state.detail).rest && (
-                          <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-all border-t border-[var(--color-line)] pt-2 font-mono text-[10.5px] leading-relaxed text-[var(--color-fg-dim)]">
-                            {summarise(state.detail).rest}
-                          </pre>
+                        {state.detail && (
+                          <>
+                            <p className="font-mono text-[11.5px] leading-relaxed text-[var(--color-fg-muted)]">
+                              {summarise(state.detail).head}
+                            </p>
+                            {summarise(state.detail).rest && (
+                              <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-all border-t border-[var(--color-line)] pt-2 font-mono text-[10.5px] leading-relaxed text-[var(--color-fg-dim)]">
+                                {summarise(state.detail).rest}
+                              </pre>
+                            )}
+                          </>
                         )}
                         <Link
                           to={`/logs?service=${s.id}`}
@@ -798,6 +813,22 @@ export default function Services() {
                               fleetId={fleet.id}
                               deploymentId={s.last.id}
                               failureReason={state.detail}
+                            />
+                          </div>
+                        )}
+
+                        {/* What it has already recovered from. Mounted only
+                            while the panel is open, so the request happens
+                            when somebody asks rather than on every poll. */}
+                        {expanded && s.recentFailures > 0 && fleet?.id && (
+                          <div className="mt-3 border-t border-[var(--color-line)] pt-3">
+                            <div className="mono-label mb-2 text-[9px] text-[var(--color-fg-dim)]">
+                              RECENT FAILURES
+                            </div>
+                            <PastFailures
+                              serviceId={s.id}
+                              fleetId={fleet.id}
+                              excludeDeploymentId={state.detail ? s.last?.id : undefined}
                             />
                           </div>
                         )}
