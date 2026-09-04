@@ -529,7 +529,19 @@ export const initCommand = {
       await writeFile(path, manifest)
       console.log(`${c.green('created')} ${path}`)
       if (found.layout) console.log(c.dim(`  ${found.layout}`))
+
       for (const s of found.services) {
+        // A manifest saying `build: ./web` against a directory with no
+        // Dockerfile is a deploy that fails at the first step. detect() has
+        // already worked out what the file should contain; writing it is the
+        // difference between a manifest and something that runs.
+        if (s.detection.dockerfile && !s.detection.hasDockerfile) {
+          const target = join(process.cwd(), s.dir, 'Dockerfile')
+          await writeFile(target, s.detection.dockerfile)
+          console.log(
+            `${c.green('created')} ${s.dir}/Dockerfile  ${c.dim(`(${s.detection.label}, port ${s.detection.port})`)}`
+          )
+        }
         console.log(c.dim(`  · ${s.name}  ${s.dir}  ${s.detection.label}`))
       }
       for (const db of found.databases) {

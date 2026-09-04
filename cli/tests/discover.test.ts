@@ -171,8 +171,34 @@ describe('conventions without a workspace file', () => {
     await writeFile(join(dir, 'apps', 'site', 'Dockerfile'), 'FROM nginx\nEXPOSE 8080\n')
 
     const d = await discover(dir)
-    assert.equal(d.layout, 'apps/ and services/ directories')
+    assert.equal(d.layout, 'directories that look like services')
     assert.deepEqual(d.services.map((s) => s.name), ['site'])
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  test('backend/ beside a frontend is found too', async () => {
+    // Neither is under apps/ or services/, and nothing declares a workspace.
+    // A real project in exactly this shape was read as one unrecognised
+    // project, because only the apps/-style layout was being looked for.
+    const dir = await mkdtemp(join(tmpdir(), 'fleet-two-'))
+    await mkdir(join(dir, 'backend'), { recursive: true })
+    await writeFile(
+      join(dir, 'backend', 'package.json'),
+      JSON.stringify({ name: 'backend', scripts: { start: 'nest start' }, dependencies: { '@nestjs/core': '^10', '@prisma/client': '^5' } })
+    )
+    await mkdir(join(dir, 'landing_page'), { recursive: true })
+    await writeFile(
+      join(dir, 'landing_page', 'package.json'),
+      JSON.stringify({ name: 'site', scripts: { build: 'vite build' }, dependencies: { vite: '^5' } })
+    )
+    await mkdir(join(dir, 'documentation'), { recursive: true })
+
+    const d = await discover(dir)
+    // Underscores become hyphens: a service name ends up in a hostname.
+    assert.deepEqual(d.services.map((s) => s.name).sort(), ['backend', 'landing-page'])
+    // A folder of documents is not a service.
+    assert.ok(!d.services.some((s) => s.name === 'documentation'))
+    assert.deepEqual(d.databases.map((x) => x.engine), ['postgres'], 'prisma implies postgres')
     await rm(dir, { recursive: true, force: true })
   })
 

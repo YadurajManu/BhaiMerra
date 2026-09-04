@@ -82,6 +82,11 @@ services:
       ['mariadb:11', 'mariadb'],
       ['mongo:7', 'mongo'],
       ['timescale/timescaledb:latest-pg16', 'postgres'],
+      // Found in a real project: pgvector is what anything doing embeddings
+      // runs, and it was becoming a plain container.
+      ['ankane/pgvector:latest', 'postgres'],
+      ['pgvector/pgvector:pg16', 'postgres'],
+      ['bitnami/postgresql:16', 'postgres'],
     ] as const) {
       const { manifest } = composeToFleet(
         `services:\n  app: { image: app:1 }\n  store: { image: ${image} }`,

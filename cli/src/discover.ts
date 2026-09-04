@@ -231,9 +231,21 @@ async function expand(root: string, globs: string[]): Promise<string[]> {
   return [...dirs]
 }
 
-/** Conventional layouts, for repositories that declare no workspaces. */
+/**
+ * Candidate directories for a repository that declares no workspaces.
+ *
+ * Two shapes, because both are common and neither is declared anywhere. The
+ * first is a parent holding many packages - apps/, services/, packages/. The
+ * second is simply a few directories at the top level: backend/ beside
+ * landing_page/, or api/ beside web/. Looking only for the first meant a
+ * perfectly ordinary two-app repository was read as one unrecognised project.
+ *
+ * Only immediate children are considered. Walking deeper finds vendored
+ * copies, fixtures and examples, and proposes deploying them.
+ */
 async function conventionalDirs(root: string): Promise<string[]> {
   const dirs: string[] = []
+
   for (const parent of ['apps', 'services', 'packages']) {
     try {
       for (const entry of await readdir(join(root, parent), { withFileTypes: true })) {
@@ -242,6 +254,16 @@ async function conventionalDirs(root: string): Promise<string[]> {
     } catch {
       /* not this layout */
     }
+  }
+  if (dirs.length) return dirs
+
+  try {
+    for (const entry of await readdir(root, { withFileTypes: true })) {
+      if (!entry.isDirectory() || IGNORED.has(entry.name) || entry.name.startsWith('.')) continue
+      dirs.push(entry.name)
+    }
+  } catch {
+    /* unreadable root is the caller's problem */
   }
   return dirs
 }
@@ -286,7 +308,7 @@ export async function discover(root: string = process.cwd()): Promise<Discovery>
   } else {
     const conventional = await conventionalDirs(root)
     if (conventional.length) {
-      layout = 'apps/ and services/ directories'
+      layout = 'directories that look like services'
       candidates = conventional
       notes.push(`no workspace file, but ${conventional.length} directories look like services`)
     }

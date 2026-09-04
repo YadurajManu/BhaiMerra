@@ -35,6 +35,14 @@ export type ComposeResult = {
 const ENGINE_IMAGES: Record<string, string> = {
   postgres: 'postgres',
   postgis: 'postgres',
+  // Postgres by another name. pgvector in particular is what anything doing
+  // embeddings runs, and leaving it unrecognised turned a managed database
+  // back into a container the reader has to look after themselves.
+  pgvector: 'postgres',
+  'ankane/pgvector': 'postgres',
+  'pgvector/pgvector': 'postgres',
+  'supabase/postgres': 'postgres',
+  'bitnami/postgresql': 'postgres',
   'timescale/timescaledb': 'postgres',
   mysql: 'mysql',
   mariadb: 'mariadb',
