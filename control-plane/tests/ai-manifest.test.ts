@@ -17,8 +17,11 @@ import assert from 'node:assert/strict'
 import { loadConfig } from '../src/config.js'
 import { createContext, closeContext, type AppContext } from '../src/api/context.js'
 import { assistManifest, DAILY_LIMIT } from '../src/ai/manifest.js'
+import { fleets, nodes, orgs } from '../src/db/schema.js'
+import { hashToken, newAgentToken } from '../src/lib/tokens.js'
 
 let ctx: AppContext
+let fleetId: string
 
 /** A draft the real parser accepts — the floor every outcome falls back to. */
 const DRAFT = `fleet: homelab
@@ -52,11 +55,30 @@ function provider(content: string) {
 const reply = (manifest: string, notes: string[] = []) =>
   JSON.stringify({ manifest, notes })
 
-before(() => {
+before(async () => {
   ctx = createContext(loadConfig())
   // The assistant only runs when a provider is configured; these tests supply
   // the provider themselves, so the key just has to be non-empty.
   ctx.config = { ...ctx.config, AI_API_KEY: 'test-key' }
+
+  // A real fleet with one real node: "node:" is checked against what exists,
+  // so a fixture with no nodes would let an invented one through unnoticed.
+  const [org] = await ctx.db.insert(orgs).values({ name: `assist-org-${Date.now()}` }).returning()
+  const [fleet] = await ctx.db
+    .insert(fleets)
+    .values({ orgId: org!.id, name: 'assist-fleet' })
+    .returning()
+  fleetId = fleet!.id
+  await ctx.db.insert(nodes).values({
+    fleetId,
+    name: 'real-node',
+    arch: 'amd64',
+    cpuCores: 4,
+    ramMb: 8192,
+    diskMb: 100_000,
+    agentTokenHash: hashToken(newAgentToken()),
+    status: 'online',
+  })
 })
 
 after(async () => {
@@ -68,7 +90,7 @@ describe('a manifest the parser would reject never reaches the user', () => {
     const user = `assist-invalid-${Date.now()}`
     const { impl, calls } = provider(reply('fleet: homelab\nservices:\n  web:\n  bad: [unclosed\n'))
 
-    const out = await assistManifest(ctx, { userId: user, draft: DRAFT, repoMap: MAP }, impl)
+    const out = await assistManifest(ctx, { userId: user, fleetId, draft: DRAFT, repoMap: MAP }, impl)
 
     assert.equal(calls(), 1, 'the provider was asked')
     assert.equal(out.status, 'kept_draft', `expected the draft to be kept, got ${out.status}`)
@@ -87,7 +109,7 @@ describe('a manifest the parser would reject never reaches the user', () => {
       reply('fleet: homelab\nservices:\n  web:\n    container_port: 80\n    placement: sideways\n')
     )
 
-    const out = await assistManifest(ctx, { userId: user, draft: DRAFT, repoMap: MAP }, impl)
+    const out = await assistManifest(ctx, { userId: user, fleetId, draft: DRAFT, repoMap: MAP }, impl)
 
     assert.equal(out.status, 'kept_draft')
   })
@@ -97,7 +119,7 @@ describe('a manifest the parser would reject never reaches the user', () => {
     // of both: charged for the model, and left with the draft.
     const user = `assist-refund-${Date.now()}`
     const bad = provider(reply('fleet: homelab\nservices:\n  web:\n    placement: sideways\n'))
-    await assistManifest(ctx, { userId: user, draft: DRAFT, repoMap: MAP }, bad.impl)
+    await assistManifest(ctx, { userId: user, fleetId, draft: DRAFT, repoMap: MAP }, bad.impl)
 
     const used = await ctx.redis.get(
       `ai:manifest:${user}:${new Date().toISOString().slice(0, 10)}`
@@ -111,7 +133,7 @@ describe('a manifest the parser would reject never reaches the user', () => {
       throw new Error('connect ECONNREFUSED')
     }) as unknown as typeof fetch
 
-    const out = await assistManifest(ctx, { userId: user, draft: DRAFT, repoMap: MAP }, impl)
+    const out = await assistManifest(ctx, { userId: user, fleetId, draft: DRAFT, repoMap: MAP }, impl)
 
     assert.equal(out.status, 'kept_draft')
     if (out.status === 'kept_draft') assert.match(out.reason, /ECONNREFUSED/)
@@ -121,7 +143,7 @@ describe('a manifest the parser would reject never reaches the user', () => {
     const user = `assist-prose-${Date.now()}`
     const { impl } = provider('Sure! Here is your manifest, I hope it helps.')
 
-    const out = await assistManifest(ctx, { userId: user, draft: DRAFT, repoMap: MAP }, impl)
+    const out = await assistManifest(ctx, { userId: user, fleetId, draft: DRAFT, repoMap: MAP }, impl)
     assert.equal(out.status, 'kept_draft')
   })
 })
@@ -140,7 +162,7 @@ services:
 `
     const { impl } = provider(reply(corrected, ['port taken from EXPOSE 8080']))
 
-    const out = await assistManifest(ctx, { userId: user, draft: DRAFT, repoMap: MAP }, impl)
+    const out = await assistManifest(ctx, { userId: user, fleetId, draft: DRAFT, repoMap: MAP }, impl)
 
     assert.equal(out.status, 'ok')
     if (out.status === 'ok') {
@@ -157,7 +179,7 @@ services:
     const user = `assist-same-${Date.now()}`
     const { impl } = provider(reply(DRAFT.replace(/\n+/g, '\n\n')))
 
-    const out = await assistManifest(ctx, { userId: user, draft: DRAFT, repoMap: MAP }, impl)
+    const out = await assistManifest(ctx, { userId: user, fleetId, draft: DRAFT, repoMap: MAP }, impl)
 
     assert.equal(out.status, 'ok')
     if (out.status === 'ok') assert.equal(out.changed, false)
@@ -173,7 +195,7 @@ describe('the draft itself is checked first', () => {
 
     const out = await assistManifest(
       ctx,
-      { userId: user, draft: 'fleet: homelab\nservices:\n  web:\n    placement: sideways\n', repoMap: MAP },
+      { userId: user, fleetId, draft: 'fleet: homelab\nservices:\n  web:\n    placement: sideways\n', repoMap: MAP },
       impl
     )
 
@@ -206,7 +228,7 @@ describe('questions', () => {
       })
     )
 
-    const out = await assistManifest(ctx, { userId: user, draft: DRAFT, repoMap: MAP }, impl)
+    const out = await assistManifest(ctx, { userId: user, fleetId, draft: DRAFT, repoMap: MAP }, impl)
     assert.equal(out.status, 'ok')
     if (out.status === 'ok') {
       assert.equal(out.questions.length, 1)
@@ -231,7 +253,7 @@ describe('questions', () => {
       })
     )
 
-    const out = await assistManifest(ctx, { userId: user, draft: DRAFT, repoMap: MAP }, impl)
+    const out = await assistManifest(ctx, { userId: user, fleetId, draft: DRAFT, repoMap: MAP }, impl)
     assert.equal(out.status, 'ok')
     if (out.status === 'ok') {
       assert.deepEqual(out.questions.map((q) => q.id), ['fine'])
@@ -251,11 +273,82 @@ describe('questions', () => {
 
     await assistManifest(
       ctx,
-      { userId: user, draft: DRAFT, repoMap: MAP, answers: { 'public-service': 'api' } },
+      { userId: user, fleetId, draft: DRAFT, repoMap: MAP, answers: { 'public-service': 'api' } },
       impl
     )
 
     assert.match(sent, /public-service/, 'the answer reaches the model')
     assert.match(sent, /ask nothing further/, 'and is framed as settled')
+  })
+})
+
+describe('a machine is not something a repository can name', () => {
+  test('an invented node is refused, and the draft kept', async () => {
+    // Exactly what happened. Told to correct a draft against a repository, the
+    // model changed `node: CHANGE_ME` to `node: mongo`, because docker-compose
+    // had a service by that name. It reads as diligent and is the one
+    // inference no repository can support: a container name is not a host.
+    //
+    // Nothing downstream caught it. The manifest parsed, `apply --dry-run`
+    // said valid, and `fleet up` failed on a fleet with no node called mongo.
+    const user = `assist-node-${Date.now()}`
+    const { impl } = provider(
+      reply(`fleet: homelab
+
+services:
+  web:
+    build: .
+    placement: pinned
+    container_port: 80
+    resources: { ram: 512Mi, cpu: 0.5 }
+    node: mongo
+`)
+    )
+
+    const out = await assistManifest(ctx, { userId: user, fleetId, draft: DRAFT, repoMap: MAP }, impl)
+
+    assert.equal(out.status, 'kept_draft')
+    if (out.status === 'kept_draft') {
+      assert.match(out.reason, /mongo/, 'name what it tried to use')
+      assert.match(out.reason, /real-node/, 'and what it could have used')
+    }
+  })
+
+  test('a real node is accepted', async () => {
+    // The guard must not become a ban: pinning to a node that exists is a
+    // correction worth making, and this fleet has one.
+    const user = `assist-realnode-${Date.now()}`
+    const { impl } = provider(
+      reply(`fleet: homelab
+
+services:
+  web:
+    build: .
+    placement: pinned
+    container_port: 80
+    resources: { ram: 512Mi, cpu: 0.5 }
+    node: real-node
+`)
+    )
+
+    const out = await assistManifest(ctx, { userId: user, fleetId, draft: DRAFT, repoMap: MAP }, impl)
+    assert.equal(out.status, 'ok')
+  })
+
+  test('the model is told which nodes exist', async () => {
+    // It cannot choose correctly without being told, and telling it is what
+    // makes the guard a backstop rather than the only defence.
+    const user = `assist-told-${Date.now()}`
+    let sent = ''
+    const impl = (async (_url: string, init: RequestInit) => {
+      sent = String(init.body)
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content: reply(DRAFT) } }] }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      )
+    }) as unknown as typeof fetch
+
+    await assistManifest(ctx, { userId: user, fleetId, draft: DRAFT, repoMap: MAP }, impl)
+    assert.match(sent, /real-node/, 'the fleet’s node names reach the prompt')
   })
 })

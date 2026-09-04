@@ -85,6 +85,30 @@ export async function serviceRoutes(app: FastifyInstance) {
 
       try {
         const parsed = parseManifest(body.data.manifest)
+
+        // The same node check the apply path runs.
+        //
+        // Parsing alone said "valid" for a manifest apply then rejected,
+        // because a node name is only wrong relative to a fleet. `--dry-run`
+        // exists to catch exactly what apply would refuse, and a dry run that
+        // passes where the real one fails is worse than not having one: it is
+        // a green light that means nothing.
+        const { fleetId } = req.params as { fleetId: string }
+        const fleetNodes = await db
+          .select({ name: nodes.name })
+          .from(nodes)
+          .where(eq(nodes.fleetId, fleetId))
+        const known = new Set(fleetNodes.map((n) => n.name))
+        const unresolved = parsed.services
+          .filter((s) => s.node && !known.has(s.node))
+          .map((s) => ({
+            path: `services.${s.name}.node`,
+            message:
+              `no node named "${s.node}" in this fleet` +
+              (known.size ? ` — this fleet has: ${[...known].join(', ')}` : ' — this fleet has no nodes yet'),
+          }))
+        if (unresolved.length) return { valid: false, issues: unresolved }
+
         return {
           valid: true,
           fleet: parsed.fleet,
@@ -479,6 +503,7 @@ export async function serviceRoutes(app: FastifyInstance) {
       const { assistManifest } = await import('../ai/manifest.js')
       const out = await assistManifest(app.ctx, {
         userId: req.userId!,
+        fleetId: (req.params as { fleetId: string }).fleetId,
         draft: body.draft,
         repoMap: body.repoMap,
         answers: body.answers,

@@ -1,5 +1,7 @@
 import { chat } from './provider.js'
 import { parseManifest, ManifestError } from '../manifest/parse.js'
+import { nodes } from '../db/schema.js'
+import { eq } from 'drizzle-orm'
 import type { AppContext } from '../api/context.js'
 
 /**
@@ -95,6 +97,8 @@ Rules, in order of importance:
 
 5. Databases only when a driver appears in a dependency list (pg, mongoose, redis, mysql2, prisma...). "uses:" names databases only, never other services.
 
+5a. "node:" names a physical machine in the fleet. It is the one field no evidence in a repository can settle — a compose service called "mongo" is not a machine. You are told below which nodes exist; use one of those names or leave the draft's value exactly as it is. Never invent one.
+
 6. Keep service names kebab-case, and keep any part of the draft you have no evidence to change.
 
 Write nothing outside the JSON.`
@@ -146,6 +150,8 @@ export async function assistManifest(
   ctx: AppContext,
   opts: {
     userId: string
+    /** Whose nodes the manifest may name. */
+    fleetId: string
     draft: string
     repoMap: string
     /** Answers to a previous round's questions, as id -> chosen value. */
@@ -176,6 +182,14 @@ export async function assistManifest(
     }
   }
 
+  // The node names this fleet actually has, so the model can choose correctly
+  // rather than guessing — and so a guess can be caught below.
+  const fleetNodes = await ctx.db
+    .select({ name: nodes.name })
+    .from(nodes)
+    .where(eq(nodes.fleetId, opts.fleetId))
+  const nodeNames = fleetNodes.map((n) => n.name)
+
   const key = limitKey(opts.userId)
   const used = await ctx.redis.incr(key)
   if (used === 1) await ctx.redis.expire(key, secondsUntilUtcMidnight())
@@ -200,6 +214,9 @@ export async function assistManifest(
             `Evidence from the repository:\n\n${opts.repoMap}`,
             // Answered questions are settled facts, not suggestions. Asking
             // the same thing twice would make the prompt feel broken.
+            nodeNames.length
+              ? `Nodes in this fleet, the only valid values for "node:": ${nodeNames.join(', ')}`
+              : 'This fleet has no nodes yet; leave any "node:" value exactly as the draft has it.',
             opts.answers && Object.keys(opts.answers).length
               ? `The user has answered these; treat them as evidence and ask nothing further about them:\n${Object.entries(
                   opts.answers
@@ -229,7 +246,29 @@ export async function assistManifest(
   // The guardrail. Whatever the model produced has to survive the parser the
   // control plane applies with, or the user never sees it.
   try {
-    parseManifest(reply.manifest)
+    const suggested = parseManifest(reply.manifest)
+
+    // And it must not have invented a machine.
+    //
+    // Told to correct a draft against a repository, a model changed
+    // `node: CHANGE_ME` to `node: mongo` because the compose file had a
+    // service by that name. It reads as diligent and is the one inference no
+    // repository can support: a container name is not a host. The manifest
+    // parsed, `--dry-run` passed, and `fleet up` failed on a fleet with no
+    // node called mongo.
+    const known = new Set(nodeNames)
+    const invented = suggested.services.filter((svc) => svc.node && !known.has(svc.node))
+    if (invented.length) {
+      await refund()
+      return {
+        status: 'kept_draft',
+        reason:
+          `The review named ${invented.map((s) => `"${s.node}"`).join(', ')}, which ` +
+          (nodeNames.length
+            ? `is not a node in this fleet. This fleet has: ${nodeNames.join(', ')}.`
+            : 'is not a node in this fleet.'),
+      }
+    }
   } catch (err) {
     await refund()
     return {
