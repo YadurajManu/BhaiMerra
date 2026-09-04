@@ -383,6 +383,17 @@ const UpgradeCheckInterval = 30 * time.Minute
  * a node that cannot upgrade must keep running the version it has, because the
  * alternative is a fleet that goes down when a download does.
  */
+// checkForUpgrade runs one check and says whether a build is staged and
+// waiting for a restart.
+//
+// It logs exactly one line per check, at info, naming what it decided. That
+// matters more than it looks: every branch below used to return quietly, at
+// debug, and the opt-out branch said nothing at all -- so a node that could
+// never upgrade (opted out, a bad URL, a revoked token) produced precisely the
+// same silence as one that was already current. Finding out which required
+// hashing binaries by hand against the published sums. A check that runs every
+// half hour and says what it concluded costs 48 lines a day and removes a
+// whole category of "is this even running?".
 func checkForUpgrade(
 	ctx context.Context,
 	api *client.Client,
@@ -390,49 +401,58 @@ func checkForUpgrade(
 	statePath string,
 	log *slog.Logger,
 ) bool {
+	staged, decision, fields := decideUpgrade(ctx, api, saved, statePath, log)
+	log.Info("upgrade check", append([]any{"decision", decision}, fields...)...)
+	return staged
+}
+
+// decideUpgrade is the check itself. Every path returns a decision word, so the
+// caller can log one line without this function having to remember to.
+func decideUpgrade(
+	ctx context.Context,
+	api *client.Client,
+	saved *state.State,
+	statePath string,
+	log *slog.Logger,
+) (bool, string, []any) {
 	// The fleet has to have opted in. Checked here, on every attempt, so
 	// turning it off in the dashboard stops the next one rather than only
 	// applying to nodes that have not started yet.
 	desired, err := api.DesiredState(ctx)
 	if err != nil {
-		log.Debug("could not read desired state, skipping upgrade check", "err", err)
-		return false
+		// The control plane being unreachable is not an upgrade failure worth
+		// shouting about; the heartbeat already reports that far more loudly.
+		return false, "control_plane_unreachable", []any{"err", err}
 	}
 	if !desired.AgentAutoUpgrade {
-		return false
+		return false, "disabled_for_this_fleet", nil
 	}
 
 	self, err := os.Executable()
 	if err != nil {
-		log.Debug("cannot locate own binary, skipping upgrade check", "err", err)
-		return false
+		return false, "cannot_locate_own_binary", []any{"err", err}
 	}
 
 	runningSum, err := upgrade.HashFile(self)
 	if err != nil {
-		log.Debug("cannot hash own binary, skipping upgrade check", "err", err)
-		return false
+		return false, "cannot_hash_own_binary", []any{"err", err}
 	}
 
 	body, err := api.PublishedSums(ctx)
 	if err != nil {
-		// The control plane being unreachable is not an upgrade failure worth
-		// shouting about; the heartbeat already reports that far more loudly.
-		log.Debug("could not fetch published checksums", "err", err)
-		return false
+		return false, "no_published_checksums", []any{"err", err}
 	}
 
 	binary := upgrade.BinaryName(runtime.GOOS, runtime.GOARCH)
 	publishedSum, err := upgrade.Published(upgrade.ParseSums(body), binary)
 	if err != nil {
-		log.Debug("no published build for this platform", "binary", binary)
-		return false
+		return false, "no_build_for_this_platform", []any{"binary", binary}
 	}
 
 	st := upgrade.State{LastStaged: saved.UpgradeStaged, Attempts: saved.UpgradeAttempts}
 	switch upgrade.Decide(runningSum, publishedSum, st) {
 	case upgrade.UpToDate:
-		return false
+		return false, "up_to_date", []any{"build", runningSum[:12]}
 
 	case upgrade.AlreadyStaged:
 		// Staged but still running the old binary: the restart has not happened
@@ -442,15 +462,15 @@ func checkForUpgrade(
 		if err := state.Save(statePath, saved); err != nil {
 			log.Warn("could not record upgrade attempt", "err", err)
 		}
-		log.Info("an upgrade is staged and waiting for a restart",
-			"attempts", saved.UpgradeAttempts, "build", publishedSum[:12])
-		return false
+		return false, "staged_awaiting_restart", []any{
+			"attempts", saved.UpgradeAttempts, "build", publishedSum[:12],
+		}
 
 	case upgrade.Failed:
 		log.Warn("staged build is not being installed — leaving this node on its current version",
 			"build", publishedSum[:12], "attempts", saved.UpgradeAttempts,
 			"hint", "the service unit may predate self-upgrade; re-run install.sh --configure")
-		return false
+		return false, "staged_build_never_installed", []any{"build", publishedSum[:12]}
 	}
 
 	log.Info("a newer agent is published, downloading",
@@ -459,7 +479,7 @@ func checkForUpgrade(
 	rc, err := api.DownloadAgent(ctx, binary)
 	if err != nil {
 		log.Warn("agent download failed, staying on the current version", "err", err)
-		return false
+		return false, "download_failed", []any{"err", err}
 	}
 	defer rc.Close()
 
@@ -467,7 +487,7 @@ func checkForUpgrade(
 		// Includes the checksum mismatch, which is the one that matters: a
 		// binary that does not match what was published is never staged.
 		log.Warn("agent upgrade rejected, staying on the current version", "err", err)
-		return false
+		return false, "rejected_before_staging", []any{"err", err}
 	}
 
 	saved.UpgradeStaged = publishedSum
@@ -476,14 +496,13 @@ func checkForUpgrade(
 		// Without this the agent would forget it staged anything and download
 		// the same bytes on the next tick, forever.
 		log.Warn("could not record staged upgrade", "err", err)
-		return false
+		return false, "staged_but_not_recorded", []any{"err", err}
 	}
 
 	log.Info("verified and staged; restarting to install", "build", publishedSum[:12])
-	return true
+	return true, "staged", []any{"from", runningSum[:12], "to", publishedSum[:12]}
 }
 
-// runUpgradeChecks polls for a newer build and signals when one is ready.
 func runUpgradeChecks(
 	ctx context.Context,
 	api *client.Client,
