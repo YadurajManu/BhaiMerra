@@ -146,6 +146,38 @@ function parseReply(content: string): { manifest: string; notes: string[]; quest
   return { manifest, notes, questions }
 }
 
+/**
+ * Whether a provider refused because the request was too big.
+ *
+ * Every provider says it differently and none of them say it in a field, so
+ * this reads the message. Worth doing: the response is to send less, which is
+ * something we can actually do, unlike almost every other provider error.
+ */
+function tooLarge(message: string): boolean {
+  return /too large|context length|maximum context|tokens per minute|reduce your message|413/i.test(
+    message
+  )
+}
+
+/**
+ * The evidence, cut down for a second attempt.
+ *
+ * Keeps the head of each section rather than dropping whole sections: a
+ * service described by the first fifteen lines of its package.json is still
+ * described, whereas a service dropped entirely is invisible and the review
+ * will confidently say nothing about it.
+ */
+function trimMap(map: string): string {
+  return map
+    .split(/\n(?=## )/)
+    .map((section) => {
+      const lines = section.split('\n')
+      if (lines.length <= 12) return section
+      return [...lines.slice(0, 12), '…'].join('\n')
+    })
+    .join('\n')
+}
+
 /** Ignoring whitespace, so a reformat is not reported as a change. */
 const same = (a: string, b: string) => a.replace(/\s+/g, ' ').trim() === b.replace(/\s+/g, ' ').trim()
 
@@ -207,8 +239,8 @@ export async function assistManifest(
   }
 
   let reply: { manifest: string; notes: string[]; questions: Question[] }
-  try {
-    const { content } = await chat(
+  const ask = async (map: string) =>
+    chat(
       { apiKey, baseUrl, model },
       [
         { role: 'system', content: SYSTEM },
@@ -216,7 +248,7 @@ export async function assistManifest(
           role: 'user',
           content: [
             `Draft fleet.yaml:\n\n${opts.draft}`,
-            `Evidence from the repository:\n\n${opts.repoMap}`,
+            `Evidence from the repository:\n\n${map}`,
             // Answered questions are settled facts, not suggestions. Asking
             // the same thing twice would make the prompt feel broken.
             nodeNames.length
@@ -239,6 +271,21 @@ export async function assistManifest(
       { maxTokens: 3000 },
       fetchImpl
     )
+
+  try {
+    let content: string
+    try {
+      content = (await ask(opts.repoMap)).content
+    } catch (err) {
+      // One retry, with less. A repository large enough to overflow a model's
+      // limit is exactly the kind the review is most useful on, and refusing
+      // it outright leaves the biggest projects with the least help. Only for
+      // being too large: retrying a bad key or a WAF page would just spend the
+      // same time to fail identically.
+      const message = err instanceof Error ? err.message : ''
+      if (!tooLarge(message)) throw err
+      content = (await ask(trimMap(opts.repoMap))).content
+    }
     reply = parseReply(content)
   } catch (err) {
     await refund()

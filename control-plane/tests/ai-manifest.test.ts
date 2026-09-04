@@ -409,3 +409,69 @@ services:
     assert.equal(out.status, 'ok')
   })
 })
+
+describe('a repository too large for the model', () => {
+  test('is retried once with less evidence, not refused', async () => {
+    // Groq's free tier allows 8000 tokens a minute. This project's own map
+    // came to ~6,300, and with the prompt and draft the request was 8,901 and
+    // refused — on the repository the review would have been most useful for.
+    let calls = 0
+    let secondBody = ''
+    const impl = (async (_url: string, init: RequestInit) => {
+      calls++
+      if (calls === 1) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              message:
+                'Request too large for model `x` on tokens per minute (TPM): Limit 8000, Requested 8901',
+            },
+          }),
+          { status: 413, headers: { 'content-type': 'application/json' } }
+        )
+      }
+      secondBody = String(init.body)
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content: reply(DRAFT, ['ok']) } }] }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      )
+    }) as unknown as typeof fetch
+
+    const bigMap = Array.from({ length: 40 }, (_, i) =>
+      `## service-${i}/package.json\n` + Array.from({ length: 30 }, (_, l) => `line ${l}`).join('\n')
+    ).join('\n')
+
+    const out = await assistManifest(
+      ctx,
+      { userId: `assist-big-${Date.now()}`, fleetId, draft: DRAFT, repoMap: bigMap },
+      impl
+    )
+
+    assert.equal(calls, 2, 'it should try again with less')
+    assert.equal(out.status, 'ok')
+    assert.ok(secondBody.length < bigMap.length, 'the second attempt sends less than the first')
+    assert.match(secondBody, /service-39/, 'and still mentions the last service, not just the first few')
+  })
+
+  test('any other provider error is not retried', async () => {
+    // Retrying a bad key or a WAF challenge spends the same time to fail the
+    // same way, and doubles the delay before the user is told.
+    let calls = 0
+    const impl = (async () => {
+      calls++
+      return new Response(JSON.stringify({ error: { message: 'invalid api key' } }), {
+        status: 401,
+        headers: { 'content-type': 'application/json' },
+      })
+    }) as unknown as typeof fetch
+
+    const out = await assistManifest(
+      ctx,
+      { userId: `assist-401-${Date.now()}`, fleetId, draft: DRAFT, repoMap: MAP },
+      impl
+    )
+
+    assert.equal(calls, 1, 'asked once')
+    assert.equal(out.status, 'kept_draft')
+  })
+})
