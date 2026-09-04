@@ -46,9 +46,16 @@ export async function reclaimToNode(
     )
 
   for (const { deployment, service } of held) {
+    // startedAt too, or this resume is dead on arrival. The row has been held
+    // as pinned_unavailable for as long as its node was away, and the rollout
+    // window is measured from startedAt -- so without this it re-enters
+    // `deploying` already expired and the next sweep fails it before the agent
+    // has had a chance to start anything. That is what took a database and an
+    // API down after a control-plane restart: held, resumed, failed within a
+    // minute, then reaped by the agent for being absent from desired state.
     await ctx.db
       .update(deployments)
-      .set({ status: 'deploying', failureReason: null })
+      .set({ status: 'deploying', failureReason: null, startedAt: new Date() })
       .where(eq(deployments.id, deployment.id))
 
     outcomes.push({

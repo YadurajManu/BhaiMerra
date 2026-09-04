@@ -79,9 +79,18 @@ export async function deployFromPush(
         )
 
       // Going live is this row's last phase, not a second insert.
+      //
+      // startedAt is reset here, at the transition into `deploying`, because
+      // that is what the rollout window measures: "the window in which a
+      // container has to be pulled, started, and report healthy". It defaults
+      // to row creation, which is before the build -- so a build longer than
+      // ROLLOUT_TIMEOUT_MS produced a row that entered `deploying` already
+      // past its own deadline and was failed by the next sweep while its
+      // container was still starting. Builds of forty minutes are expected
+      // here, so that was every large project.
       await tx
         .update(deployments)
-        .set({ status: 'deploying', imageTags: [image], hostPort })
+        .set({ status: 'deploying', imageTags: [image], hostPort, startedAt: new Date() })
         .where(eq(deployments.id, deploymentId))
 
       await tx.insert(placementEvents).values({

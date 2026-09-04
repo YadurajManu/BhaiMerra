@@ -56,7 +56,7 @@ describe('reclaim policies (FR-9)', () => {
 
   const nodeOf = async (serviceId: string) => {
     const [row] = await ctx.db
-      .select({ nodeId: deployments.nodeId, status: deployments.status })
+      .select({ nodeId: deployments.nodeId, status: deployments.status, startedAt: deployments.startedAt })
       .from(deployments)
       .where(and(eq(deployments.serviceId, serviceId), inArray(deployments.status, ['deploying', 'running'])))
       .limit(1)
@@ -122,6 +122,38 @@ describe('reclaim policies (FR-9)', () => {
     const row = await nodeOf(svc!.id)
     assert.equal(row?.status, 'deploying', 'the agent will start it on its next poll')
     assert.equal(row?.nodeId, n['home'])
+  })
+
+  test('a resumed deployment gets a fresh rollout window', async () => {
+    // The outage this prevents. A held deployment carries the startedAt from
+    // before its node went away, and the rollout window is measured from that
+    // timestamp -- so resuming it without a reset produces a row that is
+    // already past its own deadline. failStalledRollouts then failed it within
+    // the minute, before the agent had polled once, and the agent reaped the
+    // container for being absent from desired state. A database went that way
+    // after a control-plane restart of about ninety seconds.
+    const [svc] = await ctx.db
+      .insert(services)
+      .values({
+        fleetId, name: 'long-held', placementPolicy: 'pinned', pinnedNodeId: n['home'],
+        requestRamMb: 512, persistentVolume: true, volumeName: 'helddata', compatibleArches: ['amd64'],
+      })
+      .returning()
+
+    // Held since long before any rollout window would have elapsed.
+    const longAgo = new Date(Date.now() - 6 * 60 * 60_000)
+    await ctx.db
+      .insert(deployments)
+      .values({ serviceId: svc!.id, nodeId: n['home'], status: 'pinned_unavailable', startedAt: longAgo })
+
+    await reclaimToNode(ctx, fleetId, n['home']!)
+
+    const row = await nodeOf(svc!.id)
+    assert.equal(row?.status, 'deploying')
+    assert.ok(
+      row!.startedAt.getTime() > Date.now() - 60_000,
+      'the window has to start when the rollout does, or the sweep kills it before the agent polls'
+    )
   })
 
   test('a service already on the returning node is left alone', async () => {
