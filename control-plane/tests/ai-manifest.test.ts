@@ -181,3 +181,81 @@ describe('the draft itself is checked first', () => {
     assert.equal(calls(), 0, 'no provider call for a draft that was already broken')
   })
 })
+
+describe('questions', () => {
+  test('are carried through when the model asks them', async () => {
+    // The rules tell the model never to guess, which leaves real gaps — which
+    // service owns the public URL, whether a worker should be pinned. Asking
+    // is the honest form of not knowing.
+    const user = `assist-q-${Date.now()}`
+    const { impl } = provider(
+      JSON.stringify({
+        manifest: DRAFT,
+        notes: [],
+        questions: [
+          {
+            id: 'public-service',
+            ask: 'Which service should get the public URL?',
+            why: 'Two services listen on a port and neither is obviously the front door.',
+            options: [
+              { value: 'web', label: 'web — the Vite build' },
+              { value: 'api', label: 'api — the Express server' },
+            ],
+          },
+        ],
+      })
+    )
+
+    const out = await assistManifest(ctx, { userId: user, draft: DRAFT, repoMap: MAP }, impl)
+    assert.equal(out.status, 'ok')
+    if (out.status === 'ok') {
+      assert.equal(out.questions.length, 1)
+      assert.equal(out.questions[0]!.id, 'public-service')
+      assert.equal(out.questions[0]!.options.length, 2)
+    }
+  })
+
+  test('a malformed question is dropped, not fatal', async () => {
+    // The manifest is the answer; questions are an extra. One bad entry must
+    // not cost the review.
+    const user = `assist-badq-${Date.now()}`
+    const { impl } = provider(
+      JSON.stringify({
+        manifest: DRAFT,
+        notes: [],
+        questions: [
+          { id: 'fine', ask: 'A real one?', why: '', options: [{ value: 'a', label: 'A' }, { value: 'b', label: 'B' }] },
+          { ask: 'no id, no options' },
+          { id: 'lonely', ask: 'One option is not a choice', why: '', options: [{ value: 'x', label: 'X' }] },
+        ],
+      })
+    )
+
+    const out = await assistManifest(ctx, { userId: user, draft: DRAFT, repoMap: MAP }, impl)
+    assert.equal(out.status, 'ok')
+    if (out.status === 'ok') {
+      assert.deepEqual(out.questions.map((q) => q.id), ['fine'])
+    }
+  })
+
+  test('answers are sent to the model as settled, not re-asked', async () => {
+    const user = `assist-ans-${Date.now()}`
+    let sent = ''
+    const impl = (async (_url: string, init: RequestInit) => {
+      sent = String(init.body)
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content: JSON.stringify({ manifest: DRAFT, notes: [] }) } }] }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      )
+    }) as unknown as typeof fetch
+
+    await assistManifest(
+      ctx,
+      { userId: user, draft: DRAFT, repoMap: MAP, answers: { 'public-service': 'api' } },
+      impl
+    )
+
+    assert.match(sent, /public-service/, 'the answer reaches the model')
+    assert.match(sent, /ask nothing further/, 'and is framed as settled')
+  })
+})

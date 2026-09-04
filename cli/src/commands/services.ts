@@ -584,25 +584,33 @@ async function reviewed(draft: string, flags: Flags): Promise<string> {
   const { repoMap } = await import('../repomap.js')
   const fleetId = await requireFleet(typeof flags.fleet === 'string' ? flags.fleet : undefined)
 
+  type Question = {
+    id: string
+    ask: string
+    why: string
+    options: Array<{ value: string; label: string }>
+  }
   type Assist =
-    | { status: 'ok'; manifest: string; notes: string[]; changed: boolean; model: string; usage: { used: number; limit: number } }
+    | { status: 'ok'; manifest: string; notes: string[]; questions: Question[]; changed: boolean; model: string; usage: { used: number; limit: number } }
     | { status: 'disabled'; reason: string }
     | { status: 'rate_limited'; limit: number; resetsInSec: number }
     | { status: 'kept_draft'; reason: string }
 
+  const review = (map: string, answers?: Record<string, string>) =>
+    task(
+      answers ? 'applying your answers' : 'reading the repository for a second opinion',
+      async () =>
+        request<Assist>('POST', `/fleets/${fleetId}/manifest/assist`, {
+          body: { draft, repoMap: map, ...(answers ? { answers } : {}) },
+        }),
+      { done: () => (answers ? 'done' : 'reviewed') }
+    )
+
+  let map: string
   let out: Assist
   try {
-    const map = await repoMap()
-    out = (
-      await task(
-        'reading the repository for a second opinion',
-        async () =>
-          request<Assist>('POST', `/fleets/${fleetId}/manifest/assist`, {
-            body: { draft, repoMap: map },
-          }),
-        { done: () => 'reviewed' }
-      )
-    ).body
+    map = await repoMap()
+    out = (await review(map)).body
   } catch (err) {
     console.log(
       `${glyph.warn} ${c.yellow('review skipped')}  ${err instanceof Error ? err.message : 'the control plane could not be reached'}`
@@ -625,15 +633,76 @@ async function reviewed(draft: string, flags: Flags): Promise<string> {
     console.log(`${glyph.warn} ${c.yellow('kept the draft')}  ${out.reason}`)
     return draft
   }
-  if (!out.changed) {
-    console.log(`${glyph.ok} ${c.green('reviewed')}  ${c.dim('nothing to change')}`)
-    return out.manifest
+  // Questions are asked whether or not anything changed. A model that could
+  // not settle something leaves the draft exactly as it found it and asks —
+  // returning early on "nothing to change" swallowed precisely the case the
+  // questions exist for.
+  console.log(
+    `${glyph.ok} ${c.green('reviewed')}  ${c.dim(out.changed ? out.model : 'nothing to change')}`
+  )
+  for (const note of out.notes) console.log(c.dim(`  · ${note}`))
+
+  // Anything the evidence could not settle is asked rather than guessed.
+  //
+  // Only when there is somebody to ask: piped into a script, or run with
+  // --yes, the questions are printed as what was assumed instead. A command
+  // that blocks on a prompt nobody can answer is worse than one that decides.
+  const answered = await answerQuestions(out.questions, flags)
+  if (answered) {
+    try {
+      const second = (await review(map, answered)).body
+      if (second.status === 'ok') {
+        for (const note of second.notes) console.log(c.dim(`  · ${note}`))
+        console.log(c.dim(`  ${second.usage.used}/${second.usage.limit} reviews used today`))
+        return second.manifest
+      }
+      // The second pass failing is not a reason to lose the first one.
+      console.log(`${glyph.warn} ${c.yellow('kept the first answer')}  ${'reason' in second ? second.reason : 'the follow-up did not come back'}`)
+    } catch {
+      console.log(`${glyph.warn} ${c.yellow('kept the first answer')}  the follow-up could not be sent`)
+    }
   }
 
-  console.log(`${glyph.ok} ${c.green('reviewed')}  ${c.dim(out.model)}`)
-  for (const note of out.notes) console.log(c.dim(`  · ${note}`))
   console.log(c.dim(`  ${out.usage.used}/${out.usage.limit} reviews used today`))
   return out.manifest
+}
+
+/**
+ * Put the model's open questions to the person running the command.
+ *
+ * Returns null when there is nothing to ask, or nobody to ask — the answers
+ * are then left to the manifest as it stands, and what was assumed is printed
+ * so the omission is visible rather than silent.
+ */
+async function answerQuestions(
+  questions: Array<{ id: string; ask: string; why: string; options: Array<{ value: string; label: string }> }>,
+  flags: Flags
+): Promise<Record<string, string> | null> {
+  if (!questions.length) return null
+
+  const { canPrompt, select } = await import('../prompt.js')
+  if (flags.yes || !canPrompt()) {
+    console.log(c.dim('  · not asking (--yes or no terminal); left as generated:'))
+    for (const q of questions) console.log(c.dim(`    ? ${q.ask}`))
+    return null
+  }
+
+  const answers: Record<string, string> = {}
+  for (const q of questions) {
+    console.log('')
+    if (q.why) console.log(c.dim(`  ${q.why}`))
+    answers[q.id] = await select(
+      q.ask,
+      // "Leave it as generated" last and always present: a question with no
+      // way to decline is a demand, and the draft is a legitimate answer.
+      [
+        ...q.options.map((o) => ({ label: o.label, value: o.value })),
+        { label: 'leave it as generated', value: '' },
+      ]
+    )
+    if (!answers[q.id]) delete answers[q.id]
+  }
+  return Object.keys(answers).length ? answers : null
 }
 
 export const initCommand = {

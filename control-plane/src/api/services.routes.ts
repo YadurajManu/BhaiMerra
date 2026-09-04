@@ -471,6 +471,8 @@ export async function serviceRoutes(app: FastifyInstance) {
           // large has more to say than a model can read anyway, and the CLI
           // trims it to the evidence before sending.
           repoMap: z.string().min(1).max(64_000),
+          /** Answers to a previous round's questions, as id -> chosen value. */
+          answers: z.record(z.string().max(64), z.string().max(512)).optional(),
         })
         .parse(req.body ?? {})
 
@@ -479,6 +481,7 @@ export async function serviceRoutes(app: FastifyInstance) {
         userId: req.userId!,
         draft: body.draft,
         repoMap: body.repoMap,
+        answers: body.answers,
       })
       return reply.send(out)
     }

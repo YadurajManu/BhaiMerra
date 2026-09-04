@@ -27,11 +27,28 @@ import type { AppContext } from '../api/context.js'
 
 export const DAILY_LIMIT = 5
 
+/**
+ * Something the evidence cannot settle, offered as a choice.
+ *
+ * The rules say never guess. That leaves real gaps — which service the public
+ * URL belongs to, whether a worker should be pinned — that a person answers in
+ * seconds and a model can only invent. Asking is the honest form of not
+ * knowing, and it is why these come back as options rather than as decisions
+ * already made.
+ */
+export type Question = {
+  id: string
+  ask: string
+  why: string
+  options: Array<{ value: string; label: string }>
+}
+
 export type AssistOutcome =
   | {
       status: 'ok'
       manifest: string
       notes: string[]
+      questions: Question[]
       changed: boolean
       model: string
       usage: { used: number; limit: number }
@@ -60,7 +77,11 @@ function secondsUntilUtcMidnight(): number {
 const SYSTEM = `You correct a generated fleet.yaml for Fleet OS. You are given a draft and evidence read from the repository.
 
 Return JSON only:
-{"manifest": "<the corrected fleet.yaml>", "notes": ["<one line per change, saying what evidence justified it>"]}
+{"manifest": "<the corrected fleet.yaml>",
+ "notes": ["<one line per change, saying what evidence justified it>"],
+ "questions": [{"id": "<short-slug>", "ask": "<one question>", "why": "<why the evidence cannot settle it>", "options": [{"value": "<exact value to use>", "label": "<what it means>"}]}]}
+
+Questions are for what the evidence genuinely cannot settle and a person answers in seconds: which service the public URL belongs to, whether a background worker should be pinned, which of two ports is the one that serves traffic. Ask at most three, each with two to four concrete options. Ask nothing you could have read from the evidence, and never ask for a value you should have refused to guess — put that in the manifest as an omission instead. If the evidence settles everything, return an empty list.
 
 Rules, in order of importance:
 
@@ -79,14 +100,18 @@ Rules, in order of importance:
 Write nothing outside the JSON.`
 
 /** Pull the object out of a reply that may be fenced or padded with prose. */
-function parseReply(content: string): { manifest: string; notes: string[] } {
+function parseReply(content: string): { manifest: string; notes: string[]; questions: Question[] } {
   const fenced = content.match(/```(?:json)?\s*([\s\S]*?)```/)
   const raw = (fenced?.[1] ?? content).trim()
   const start = raw.indexOf('{')
   const end = raw.lastIndexOf('}')
   if (start < 0 || end <= start) throw new Error('the model did not return JSON')
 
-  const parsed = JSON.parse(raw.slice(start, end + 1)) as { manifest?: unknown; notes?: unknown }
+  const parsed = JSON.parse(raw.slice(start, end + 1)) as {
+    manifest?: unknown
+    notes?: unknown
+    questions?: unknown
+  }
   const manifest = typeof parsed.manifest === 'string' ? parsed.manifest.trim() : ''
   if (!manifest) throw new Error('the model returned no manifest')
 
@@ -94,7 +119,24 @@ function parseReply(content: string): { manifest: string; notes: string[] } {
     ? parsed.notes.filter((n): n is string => typeof n === 'string' && n.trim().length > 0).slice(0, 12)
     : []
 
-  return { manifest, notes }
+  // A malformed question is dropped rather than failing the whole review: the
+  // manifest is the answer, and questions are an extra.
+  const questions: Question[] = Array.isArray(parsed.questions)
+    ? (parsed.questions as unknown[])
+        .filter((q): q is Question => {
+          const c = q as Partial<Question>
+          return (
+            typeof c?.id === 'string' &&
+            typeof c?.ask === 'string' &&
+            Array.isArray(c?.options) &&
+            c!.options!.length > 1 &&
+            c!.options!.every((o) => typeof o?.value === 'string' && typeof o?.label === 'string')
+          )
+        })
+        .slice(0, 3)
+    : []
+
+  return { manifest, notes, questions }
 }
 
 /** Ignoring whitespace, so a reformat is not reported as a change. */
@@ -102,7 +144,13 @@ const same = (a: string, b: string) => a.replace(/\s+/g, ' ').trim() === b.repla
 
 export async function assistManifest(
   ctx: AppContext,
-  opts: { userId: string; draft: string; repoMap: string },
+  opts: {
+    userId: string
+    draft: string
+    repoMap: string
+    /** Answers to a previous round's questions, as id -> chosen value. */
+    answers?: Record<string, string>
+  },
   fetchImpl: typeof fetch = fetch
 ): Promise<AssistOutcome> {
   const { AI_API_KEY: apiKey, AI_BASE_URL: baseUrl, AI_MODEL: model } = ctx.config
@@ -139,7 +187,7 @@ export async function assistManifest(
     await ctx.redis.decr(key).catch(() => {})
   }
 
-  let reply: { manifest: string; notes: string[] }
+  let reply: { manifest: string; notes: string[]; questions: Question[] }
   try {
     const { content } = await chat(
       { apiKey, baseUrl, model },
@@ -147,7 +195,21 @@ export async function assistManifest(
         { role: 'system', content: SYSTEM },
         {
           role: 'user',
-          content: `Draft fleet.yaml:\n\n${opts.draft}\n\nEvidence from the repository:\n\n${opts.repoMap}`,
+          content: [
+            `Draft fleet.yaml:\n\n${opts.draft}`,
+            `Evidence from the repository:\n\n${opts.repoMap}`,
+            // Answered questions are settled facts, not suggestions. Asking
+            // the same thing twice would make the prompt feel broken.
+            opts.answers && Object.keys(opts.answers).length
+              ? `The user has answered these; treat them as evidence and ask nothing further about them:\n${Object.entries(
+                  opts.answers
+                )
+                  .map(([id, value]) => `  ${id}: ${value}`)
+                  .join('\n')}`
+              : '',
+          ]
+            .filter(Boolean)
+            .join('\n\n'),
         },
       ],
       // Larger than the explainer's: the answer contains a whole manifest, and
@@ -183,6 +245,7 @@ export async function assistManifest(
     status: 'ok',
     manifest: reply.manifest,
     notes: reply.notes,
+    questions: reply.questions,
     changed: !same(reply.manifest, opts.draft),
     model,
     usage: { used, limit: DAILY_LIMIT },
