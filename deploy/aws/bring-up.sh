@@ -112,6 +112,11 @@ BUILDX_CACHE_MODE=min
 
 TUNNEL_CREDENTIALS=$CRED
 
+# The gid of the host's docker group, so the control plane can use the socket
+# it mounts. Wrong or missing, every build fails with "permission denied" and
+# nothing else looks broken.
+DOCKER_GID=$(getent group docker | cut -d: -f3)
+
 # Optional. Email falls back to logging what it would have sent, so an
 # unconfigured control plane still runs normally - it just goes quiet.
 RESEND_API_KEY=

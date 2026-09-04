@@ -157,6 +157,19 @@ services:
       # write to it can control the host's Docker. Drop it if you only ever
       # deploy prebuilt images.
       - /var/run/docker.sock:/var/run/docker.sock
+    # Join the host's docker group, so the socket above is usable.
+    #
+    # Mounting it is not enough: /var/run/docker.sock is root:docker 0660 and
+    # this container runs as an unprivileged user in neither. Without this
+    # every build fails with "permission denied while trying to connect to the
+    # Docker daemon socket" - the whole build-from-source path dead while
+    # every health check stays green.
+    #
+    # The gid differs per host (988 on this Ubuntu, 999 on Debian, 0 under
+    # Docker Desktop), so bring-up.sh reads it and writes it to .env.
+    # Find it with: getent group docker | cut -d: -f3
+    group_add:
+      - "${DOCKER_GID:-988}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
