@@ -43,13 +43,14 @@ export type Diagnosis =
   | { status: 'disabled'; reason: string }
   | { status: 'inconclusive'; reason: string; calls: Array<{ tool: string; args: Record<string, unknown> }> }
 
-const SYSTEM = `You diagnose why a service on Fleet OS is not behaving, by calling read-only tools.
+const SYSTEM = `You work out why a service on Fleet OS is misbehaving, by asking for information one question at a time.
 
-Reply with JSON only, one of:
-  {"call": {"tool": "<name>", "args": {...}}}
-  {"answer": {"summary": "<one or two sentences>", "findings": [{"claim": "<what is true>", "evidence": "<the tool call and what it showed>"}], "next": ["<what the operator should do>"]}}
+Do not use function calling. This conversation has no functions available: emitting one is an error and the investigation stops. Reply with a JSON object and nothing else, one of:
 
-Tools:
+  {"lookup": {"name": "<which>", "args": {...}}}
+  {"answer": {"summary": "<one or two sentences>", "findings": [{"claim": "<what is true>", "evidence": "<the lookup and what it showed>"}], "next": ["<what the operator should do>"]}}
+
+What you can ask for:
   services {}                     — every service in the fleet and whether it is running
   deployments {service}           — its recent deployments: status, timing, failure reason, node, host port
   nodes {}                        — every node: status, architecture, agent version, seconds since its last heartbeat
@@ -60,15 +61,15 @@ Tools:
 
 How to work:
 
-Start by establishing what is true, not by guessing what is wrong. "deployments" first for a named service — a failure reason usually names the cause outright.
+Establish what is true before guessing what is wrong. For a named service, ask for its deployments first — a failure reason usually names the cause outright.
 
 Look for disagreement. The control plane's view and the node's are both available, and most real failures live in the gap: a deployment marked running whose container the node never mentions, a container the node calls unhealthy while it serves traffic, a service reported running that answers 502.
 
 A 200 is not proof. Check the size and first bytes — a static site replaced by its web server's welcome page returns 200 and about 900 bytes.
 
-Every finding cites the call that showed it. A claim you cannot point at is a guess, and a guess in a diagnosis is worse than no diagnosis.
+Every finding cites what showed it. A claim you cannot point at is a guess, and a guess in a diagnosis is worse than no diagnosis.
 
-Answer when you can support an answer. If the evidence does not settle it, say what you established and what you would look at next — an honest partial answer is useful and a confident wrong one is not.
+Answer as soon as you can support an answer. If the evidence does not settle it, say what you established and what you would look at next: an honest partial answer is useful and a confident wrong one is not.
 
 Write nothing outside the JSON.`
 
@@ -84,15 +85,20 @@ function parseStep(content: string): {
   if (start < 0 || end <= start) throw new Error('the model did not return JSON')
 
   const parsed = JSON.parse(raw.slice(start, end + 1)) as {
+    lookup?: { name?: unknown; args?: unknown }
     call?: { tool?: unknown; args?: unknown }
     answer?: { summary?: unknown; findings?: unknown; next?: unknown }
   }
 
-  if (parsed.call && typeof parsed.call.tool === 'string') {
+  // Either spelling. The prompt asks for "lookup"/"name", and a model that has
+  // read a great many tool-calling examples reaches for "call"/"tool" anyway —
+  // refusing that would fail an investigation over a synonym.
+  const asked = parsed.lookup?.name ?? parsed.call?.tool
+  if (typeof asked === 'string') {
     return {
       call: {
-        tool: parsed.call.tool,
-        args: (parsed.call.args ?? {}) as Record<string, unknown>,
+        tool: asked,
+        args: ((parsed.lookup?.args ?? parsed.call?.args) ?? {}) as Record<string, unknown>,
       },
     }
   }
@@ -112,7 +118,7 @@ function parseStep(content: string): {
     return { answer: { summary: parsed.answer.summary, findings, next } }
   }
 
-  throw new Error('the model returned neither a call nor an answer')
+  throw new Error('the model returned neither a lookup nor an answer')
 }
 
 /**
