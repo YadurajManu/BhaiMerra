@@ -189,3 +189,39 @@ describe('project names', () => {
     }
   })
 })
+
+describe('databases are part of the plan', () => {
+  test('a database is planned, and planned before the services that use it', () => {
+    // It used to be left out entirely. Applying the manifest creates a
+    // database once; after that a failed one was never revived, so `fleet up`
+    // walked the whole stack, skipped it, and reported success while every
+    // service depending on it crash-looped against a database that no longer
+    // existed. Recovery needed `fleet up db` by name.
+    const planned = planFromManifest(`
+fleet: homelab
+services:
+  api:
+    build: ./api
+    uses: [db]
+databases:
+  db:
+    engine: postgres
+`)
+    const names = planned.map((p) => p.name)
+    assert.deepEqual(names, ['db', 'api'], 'the database is what uses: resolves to, so it goes first')
+
+    const db = planned.find((p) => p.name === 'db')!
+    assert.equal(db.database, true)
+    assert.equal(db.build, undefined, 'a managed database has no build context')
+  })
+
+  test('a manifest with no databases is unchanged', () => {
+    const planned = planFromManifest(`
+services:
+  web:
+    build: ./web
+`)
+    assert.deepEqual(planned.map((p) => p.name), ['web'])
+    assert.ok(!planned.some((p) => p.database))
+  })
+})

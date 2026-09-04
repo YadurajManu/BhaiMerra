@@ -127,12 +127,52 @@ export async function failStalledRollouts(
     )
   )
 
+  // Which of these services have something else already serving. Used only to
+  // describe the outcome honestly: the old message claimed "the previous
+  // release was left running" for every failure, including services that had
+  // nothing else at all and were now entirely down.
+  const serviceIds = [...new Set(candidates.map((c) => c.serviceId))]
+  const otherLive = await ctx.db
+    .select({ serviceId: deployments.serviceId, id: deployments.id })
+    .from(deployments)
+    .where(and(inArray(deployments.serviceId, serviceIds), eq(deployments.status, 'running')))
+  const candidateIds = new Set(candidates.map((c) => c.id))
+  const hasFallback = new Set(
+    otherLive.filter((d) => !candidateIds.has(d.id)).map((d) => d.serviceId)
+  )
+
   const failed: string[] = []
   const rescued: string[] = []
 
   for (const row of candidates) {
     const beat = row.nodeId ? beats.get(row.nodeId) : null
     const container = beat?.containers?.find((c) => c.deployment_id === row.id)
+
+    // No heartbeat at all: this node is not saying anything, so there is no
+    // evidence here about the container either way.
+    //
+    // Timing out is a claim about the container, and the node is the only
+    // thing that can support it — so when the node is silent this function has
+    // nothing to go on and must not write a verdict. It used to fail the row,
+    // which was destructive far beyond one bad status: `failed` appears in
+    // none of the sets the recovery paths read. rescheduleFromNode looks at
+    // ['deploying', 'running'] and reclaimForNode at 'pinned_unavailable', so
+    // failing a row here removed it from both, permanently. The node then
+    // reconnected, found the deployment absent from its desired state, and
+    // reaped a container that was serving traffic. A database was deleted this
+    // way. Leaving the row alone lets the designed path run: reschedule holds
+    // it as pinned_unavailable or moves it, and reclaim resumes it when the
+    // node returns.
+    //
+    // A row with no node assigned is different — nothing will ever report it,
+    // so waiting for a heartbeat that cannot arrive would strand it for ever.
+    if (row.nodeId && !beat) {
+      opts.log?.info(
+        { deploymentId: row.id, nodeId: row.nodeId },
+        'rollout window elapsed but this node is silent; leaving it for the node-down path to resolve'
+      )
+      continue
+    }
 
     if (container && container.state === 'running') {
       // It is up. The rollout did not stall, the promotion signal did — so
@@ -155,7 +195,9 @@ export async function failStalledRollouts(
         status: 'failed',
         failureReason: container
           ? `the container is ${container.state} and never reported healthy within the rollout window`
-          : 'the node never reported this container within the rollout window; the previous release was left running',
+          : hasFallback.has(row.serviceId)
+            ? 'the node never reported this container within the rollout window; the previous release was left running'
+            : 'the node never reported this container within the rollout window, and this service has nothing else running',
         finishedAt: new Date(),
       })
       .where(eq(deployments.id, row.id))

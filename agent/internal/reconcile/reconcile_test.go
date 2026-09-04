@@ -2,10 +2,10 @@ package reconcile
 
 import (
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"io"
 	"os"
 	"strings"
 	"sync"
@@ -193,7 +193,17 @@ func TestPromotionRemovesThePreviousRelease(t *testing.T) {
 		managed("web", "dep1", true),
 		managed("web", "dep2", true),
 	)
-	_, err := d.engine(t).Reconcile(t.Context(), desire(svc("web", "dep2")))
+	// Twice: nothing is removed on the first pass after start, so that a
+	// desired state computed before the control plane noticed this agent come
+	// back cannot delete a container that should still be running.
+	e := d.engine(t)
+	if _, err := e.Reconcile(t.Context(), desire(svc("web", "dep2"))); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.removedIDs) != 0 {
+		t.Fatalf("the first pass must remove nothing, got %v", d.removedIDs)
+	}
+	_, err := e.Reconcile(t.Context(), desire(svc("web", "dep2")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +234,12 @@ func TestAContainerOffTheFleetNetworkIsReplaced(t *testing.T) {
 
 func TestAServiceNoLongerScheduledHereIsRemoved(t *testing.T) {
 	d := newFakeDaemon(t, managed("web", "dep1", true), managed("api", "dep9", true))
-	actions, err := d.engine(t).Reconcile(t.Context(), desire(svc("web", "dep1")))
+	e := d.engine(t)
+	// The first pass holds; the second acts. See the hold test below.
+	if _, err := e.Reconcile(t.Context(), desire(svc("web", "dep1"))); err != nil {
+		t.Fatal(err)
+	}
+	actions, err := e.Reconcile(t.Context(), desire(svc("web", "dep1")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,4 +323,54 @@ func TestMain(m *testing.M) {
 	// Keep a developer's real DOCKER_HOST out of these.
 	_ = os.Unsetenv("DOCKER_HOST")
 	os.Exit(m.Run())
+}
+
+func TestTheFirstPassAfterStartRemovesNothing(t *testing.T) {
+	// The outage this prevents: an agent restart of about a minute ended with
+	// a running database container deleted. The control plane had failed its
+	// deployment while the node was silent, so the desired state the returning
+	// agent was handed no longer mentioned it, and the agent reaped it.
+	//
+	// Removal is the one path here where being wrong destroys state instead of
+	// failing, and a restart is exactly when the control plane's view of this
+	// node is most likely to predate it. One pass of delay costs about ten
+	// seconds; being wrong costs a database.
+	d := newFakeDaemon(t, managed("web", "dep1", true), managed("db", "dep9", true))
+	e := d.engine(t)
+
+	actions, err := e.Reconcile(t.Context(), desire(svc("web", "dep1")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.removedIDs) != 0 {
+		t.Errorf("the first pass must remove nothing, got %v", d.removedIDs)
+	}
+	if got := verbFor(actions, "db"); got != "held" {
+		t.Errorf("verb = %q, want held so the hold is visible rather than silent", got)
+	}
+
+	// And it is not a permanent amnesty: the very next pass acts.
+	if _, err := e.Reconcile(t.Context(), desire(svc("web", "dep1"))); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.removedIDs) != 1 || d.removedIDs[0] != "db-dep9" {
+		t.Errorf("the second pass should remove it, got %v", d.removedIDs)
+	}
+}
+
+func TestStartingIsNotDeferredOnTheFirstPass(t *testing.T) {
+	// Only removal waits. A node that comes back with nothing running must
+	// start its workloads immediately, or the hold would turn a restart into
+	// an outage of its own.
+	d := newFakeDaemon(t)
+	actions, err := d.engine(t).Reconcile(t.Context(), desire(svc("web", "dep1")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := verbFor(actions, "web"); got != "started" {
+		t.Errorf("verb = %q, want started on the very first pass", got)
+	}
+	if len(d.created) != 1 {
+		t.Errorf("expected the container to be created immediately, got %v", d.created)
+	}
 }

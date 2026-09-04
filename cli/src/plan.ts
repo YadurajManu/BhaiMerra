@@ -31,6 +31,14 @@ export type PlannedService = {
   /** Build context path, relative to the manifest. Absent for a prebuilt image. */
   build?: string
   affinity: string[]
+  /**
+   * A managed database from the `databases:` block rather than a service.
+   *
+   * It deploys like any other service — the control plane gives it a service
+   * row and an engine image — but it has no build context, and it is what
+   * every `uses:` in the manifest resolves to, so it goes first.
+   */
+  database?: boolean
 }
 
 /**
@@ -41,11 +49,12 @@ export type PlannedService = {
  * rejected by apply with a proper message before any of this matters.
  */
 export function planFromManifest(source: string): PlannedService[] {
-  const doc = parseYaml(source) as { services?: Record<string, unknown> } | null
-  const services = doc?.services
-  if (!services || typeof services !== 'object') return []
+  const doc = parseYaml(source) as {
+    services?: Record<string, unknown>
+    databases?: Record<string, unknown>
+  } | null
 
-  return Object.entries(services).map(([name, raw]) => {
+  const services = Object.entries(doc?.services ?? {}).map(([name, raw]) => {
     const body = (raw ?? {}) as { build?: unknown; affinity?: unknown }
     return {
       name,
@@ -53,6 +62,23 @@ export function planFromManifest(source: string): PlannedService[] {
       affinity: Array.isArray(body.affinity) ? body.affinity.filter((a) => typeof a === 'string') : [],
     }
   })
+
+  // Databases are deployed too.
+  //
+  // They used to be left out entirely, on the reasoning that applying the
+  // manifest creates them. It does — once. After that a database whose
+  // deployment has failed is never revived, because nothing puts it back in
+  // the plan: `fleet up` walked the whole stack, skipped it, and reported
+  // success while the database it depended on stayed dead and every service
+  // using it crash-looped. Recovering needed `fleet up db` by name, which is
+  // knowledge the command should not require.
+  const databases = Object.keys(doc?.databases ?? {}).map((name) => ({
+    name,
+    affinity: [],
+    database: true,
+  }))
+
+  return [...databases, ...services]
 }
 
 /**

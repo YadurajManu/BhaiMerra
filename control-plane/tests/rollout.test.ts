@@ -25,6 +25,7 @@ describe('a rollout keeps the working release serving', () => {
   let app: FastifyInstance
   let token: string
   let agentToken: string
+  let nodeId: string
   let fleetId: string
   let orgId: string
   let userId: string
@@ -66,6 +67,7 @@ describe('a rollout keeps the working release serving', () => {
       },
     })
     agentToken = register.json().agent_token
+    nodeId = register.json().node_id ?? register.json().nodeId
 
     await app.inject({
       method: 'POST',
@@ -298,6 +300,51 @@ services:
     assert.equal(row!.status, 'failed')
     // And it names the state, rather than claiming a health check timed out.
     assert.match(row!.reason!, /exited/)
+  })
+
+  test('a silent node leaves the rollout alone instead of failing it', async () => {
+    // The outage this prevents, in full. Restarting the agent took a node off
+    // the air for about a minute. The rollout window elapsed while it was
+    // quiet, and this function failed both of its deployments. `failed` is in
+    // none of the sets the recovery paths read -- rescheduleFromNode looks at
+    // ['deploying', 'running'], reclaimForNode at 'pinned_unavailable' -- so
+    // the rows became invisible to both, permanently. The agent came back,
+    // found them absent from its desired state, and reaped the containers.
+    // One of them was a database.
+    //
+    // A silent node is not evidence about a container. It is the absence of
+    // evidence, and this function must not write a verdict on it.
+    const res = await app.inject({
+      method: 'POST',
+      url: `/services/${serviceId}/deploy`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: {},
+    })
+    await settleDeploys(ctx)
+    const fresh = res.json().deployment?.id ?? res.json().deploymentId
+    assert.ok(fresh, `expected a deployment id, got ${res.body}`)
+
+    await ctx.db
+      .update(deployments)
+      .set({ status: 'deploying', startedAt: new Date(Date.now() - ROLLOUT_TIMEOUT_MS - 60_000) })
+      .where(eq(deployments.id, fresh))
+
+    // The node goes quiet: its heartbeat key expires exactly like this.
+    await ctx.redis.del(`node:${nodeId}:hb`)
+
+    const failed = await failStalledRollouts(ctx)
+    assert.ok(!failed.includes(fresh), 'a silent node is not grounds for failing a deployment')
+
+    const [row] = await ctx.db
+      .select({ status: deployments.status })
+      .from(deployments)
+      .where(eq(deployments.id, fresh))
+      .limit(1)
+    assert.equal(
+      row!.status,
+      'deploying',
+      'it must stay visible to the node-down path, which is what actually owns this case'
+    )
   })
 
   test('the failure says what happened', async () => {

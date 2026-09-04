@@ -97,6 +97,7 @@ export const upCommand = {
     // deploying one service of it and leaving the rest was never what anybody
     // wanted — it just meant typing the command again in the right order.
     const targets = args[0] ? [args[0]] : deployOrder(planned)
+    const isDatabase = new Set(planned.filter((p) => p.database).map((p) => p.name))
     if (!targets.length) {
       throw new CliError(
         'The manifest declares no services to deploy.',
@@ -116,16 +117,32 @@ export const upCommand = {
       return service
     })
 
-    if (resolved.length > 1) {
+    // A database that is already serving is left alone.
+    //
+    // Redeploying one replaces a running container for no reason, and every
+    // service that talks to it loses its connections while it restarts. It is
+    // in the plan so that a database which is *not* running comes back — which
+    // is the case that used to need `fleet up db` by name — not so that every
+    // deploy of the stack restarts the database underneath it. Naming it
+    // explicitly still redeploys it.
+    const skipped = args[0]
+      ? []
+      : resolved.filter((s) => isDatabase.has(s.name) && s.current?.status === 'running')
+    const toDeploy = resolved.filter((s) => !skipped.includes(s))
+    for (const s of skipped) {
+      console.log(`  ${c.dim('already running')}  ${c.bold(s.name)}`)
+    }
+
+    if (toDeploy.length > 1) {
       console.log(
-        `\n  ${c.dim('deploying')} ${resolved.map((s) => c.bold(s.name)).join(c.dim(' → '))}\n`
+        `\n  ${c.dim('deploying')} ${toDeploy.map((s) => c.bold(s.name)).join(c.dim(' → '))}\n`
       )
     }
 
     const gitSha = typeof flags.sha === 'string' ? flags.sha : undefined
     const deployed: Array<{ service: Service; url: string | null }> = []
 
-    for (const service of resolved) {
+    for (const service of toDeploy) {
       const url = await deployOne(service, {
         fleetId,
         gitSha,

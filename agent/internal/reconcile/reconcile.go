@@ -27,6 +27,12 @@ type Engine struct {
 	// prober simply leaves Docker's own verdict in place, which is what every
 	// test that does not care about health gets.
 	Health *health.Prober
+
+	// Whether a reconcile pass has completed since this process started.
+	//
+	// Only ever touched by the reconcile goroutine, which is the single caller
+	// of Reconcile, so it needs no synchronisation.
+	settled bool
 }
 
 // probeTargets is the subset of desired state the agent can probe itself:
@@ -59,7 +65,7 @@ func probeTargets(desired *client.DesiredState) []health.Target {
 
 type Action struct {
 	Service string
-	Verb    string // started | replaced | stopped | unchanged | failed
+	Verb    string // started | replaced | stopped | unchanged | held | failed
 	Detail  string
 }
 
@@ -168,12 +174,40 @@ func (e *Engine) Reconcile(ctx context.Context, desired *client.DesiredState) ([
 		if name == "" {
 			name = strings.TrimPrefix(strings.Join(c.Names, ","), "/")
 		}
+
+		// Nothing is removed on the first pass after this process starts.
+		//
+		// This is the one path where a mistake destroys state rather than
+		// failing, and a restart is exactly when the control plane's view of
+		// this node is most stale: heartbeats and reconciliation start
+		// concurrently, so the first desired state can be computed before the
+		// control plane has seen us come back. It has already gone wrong once
+		// -- an agent restart of about a minute ended with a database
+		// container deleted -- and self-upgrade now makes restarts routine.
+		//
+		// One pass, about ten seconds, is enough for a heartbeat to land and
+		// the answer to be about the node as it is now. A container that
+		// genuinely should go is removed on the next pass; the cost of being
+		// wrong in that direction is a few more seconds of a container that is
+		// no longer wanted, against deleting one that is.
+		if !e.settled {
+			actions = append(actions, Action{name, "held", "not removed until a second pass confirms it"})
+			e.Log.Info("holding a removal until the next pass",
+				"service", name, "deployment", id,
+				"why", "the control plane's view of this node may predate our restart")
+			continue
+		}
+
 		if err := e.Docker.Remove(ctx, c.ID); err != nil {
 			actions = append(actions, Action{name, "failed", "remove: " + err.Error()})
 			continue
 		}
 		actions = append(actions, Action{name, "stopped", "no longer scheduled here"})
 	}
+
+	// Only now: a pass that returned early never proved anything about what
+	// this node should be running.
+	e.settled = true
 
 	return actions, nil
 }
