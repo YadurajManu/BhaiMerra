@@ -535,6 +535,40 @@ export const logsCommand = {
 }
 
 /**
+ * The node to pin a database to, when there is only one it could be.
+ *
+ * A database has to name the node holding its data — that is the one decision
+ * Fleet will not make for you, because moving a database moves its disk. But
+ * on a fleet with a single node there is no decision to make, and writing
+ * CHANGE_ME there meant `init` produced a manifest whose next command fails:
+ *
+ *     error  The manifest names nodes that are not in this fleet
+ *       services.db.node: no node named "CHANGE_ME" in this fleet
+ *
+ * Best effort, and quiet about it. `init` otherwise needs no control plane at
+ * all — it reads a directory — so a missing session, an unreachable server or
+ * a fleet with several nodes all fall back to the placeholder rather than
+ * turning a local command into one that requires the network.
+ */
+async function theOnlyNode(flags: Flags): Promise<string | undefined> {
+  try {
+    const fleetId = await requireFleet(typeof flags.fleet === 'string' ? flags.fleet : undefined)
+    const { body } = await request<{ nodes: Array<{ name: string; status: string }> }>(
+      'GET',
+      `/fleets/${fleetId}/nodes`
+    )
+    // Offline is fine: a node that is down still holds its disk, and that is
+    // what pinning is about. Only an empty fleet has nothing to choose.
+    if (body.nodes.length !== 1) return undefined
+    const only = body.nodes[0]!.name
+    console.log(c.dim(`  · pinned the database to ${only}, the only node in this fleet`))
+    return only
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * A second opinion on the draft, when --ai is given.
  *
  * Opt-in, because it sends a description of the repository to whatever
@@ -630,7 +664,9 @@ export const initCommand = {
     if (found.services.length > 1 || found.databases.length) {
       const drafted = manifestFromDiscovery(found, {
         fleet: typeof flags.fleet === 'string' ? flags.fleet : undefined,
-        node: typeof flags.node === 'string' ? flags.node : undefined,
+        node:
+          (typeof flags.node === 'string' ? flags.node : undefined) ??
+          (found.databases.length ? await theOnlyNode(flags) : undefined),
       })
       const questions = drafted.questions
       const manifest = flags.ai ? await reviewed(drafted.manifest, flags) : drafted.manifest
