@@ -1,6 +1,7 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 import { parseArgs, KNOWN_FLAGS, nearestFlag } from '../src/args.js'
+import { etaLine, progressLine } from '../src/progress.js'
 import { table, relativeTime, mb, visibleLength, truncate, c } from '../src/render.js'
 import { readFileSync, readdirSync } from 'node:fs'
 
@@ -141,5 +142,72 @@ describe('unknown flags', () => {
   test('something with no relation suggests nothing', () => {
     // A confident wrong suggestion is worse than none.
     assert.equal(nearestFlag('nonsense'), null)
+  })
+})
+
+describe('the deploy estimate', () => {
+  test('is drawn from real history, and says how much is left', () => {
+    const p = {
+      deploymentId: 'd1',
+      status: 'building',
+      since: new Date(Date.now() - 60_000).toISOString(),
+      gitSha: null,
+      nodeName: null,
+      failureReason: null,
+      typicalMs: 180_000,
+    }
+    const line = etaLine(p)!
+    assert.match(line, /1m/, 'elapsed')
+    assert.match(line, /left/, 'and what remains')
+  })
+
+  test('says nothing at all on a first deploy', () => {
+    // There is no honest estimate without history, and a bar filled from a
+    // number nobody measured is the same lie as "not needed".
+    const p = {
+      deploymentId: 'd1',
+      status: 'building',
+      since: new Date().toISOString(),
+      gitSha: null,
+      nodeName: null,
+      failureReason: null,
+    }
+    assert.equal(etaLine(p), undefined)
+  })
+
+  test('an overrun is reported as an overrun, not parked at the end', () => {
+    // A deploy that is slower than usual is exactly when somebody needs to
+    // know, and a bar stuck at 100% is how progress bars lose their meaning.
+    const p = {
+      deploymentId: 'd1',
+      status: 'building',
+      since: new Date(Date.now() - 300_000).toISOString(),
+      gitSha: null,
+      nodeName: null,
+      failureReason: null,
+      typicalMs: 120_000,
+    }
+    assert.match(etaLine(p)!, /over the usual/)
+  })
+
+  test('emulation is named on the build line', () => {
+    // The answer to "why is this taking so long" for almost every slow build
+    // in this system.
+    const line = progressLine({
+      deploymentId: 'd1',
+      status: 'building',
+      since: new Date().toISOString(),
+      gitSha: null,
+      nodeName: null,
+      failureReason: null,
+      detail: 'RUN npm ci',
+      step: 4,
+      ofSteps: 9,
+      platform: 'linux/arm64',
+      emulated: true,
+    })!
+    assert.match(line, /4\/9/)
+    assert.match(line, /arm64/)
+    assert.match(line, /emulated/)
   })
 })

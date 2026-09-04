@@ -15,6 +15,7 @@
  */
 import { request, CliError, EXIT } from './api.js'
 import type { Ladder, Step } from './ladder.js'
+import { bar } from './ui.js'
 
 /** The shape of `GET /services/:id/progress`. Mirrors `DeployProgress` server-side. */
 export type DeployProgress = {
@@ -29,6 +30,10 @@ export type DeployProgress = {
   step?: number
   ofSteps?: number
   platform?: string
+  /** This platform is being built under emulation, which is why it is slow. */
+  emulated?: boolean
+  /** Median of this service's own recent deploys. Absent on a first deploy. */
+  typicalMs?: number
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -52,7 +57,51 @@ export function progressLine(p: DeployProgress): string | undefined {
   if (!p.detail) return undefined
   const counter = p.step && p.ofSteps ? `${p.step}/${p.ofSteps} ` : ''
   const platform = p.platform ? `${p.platform.replace(/^linux\//, '')} ` : ''
-  return `${counter}${platform}${p.detail}`
+  // Emulation is the answer to "why is this taking so long", and a build that
+  // takes three minutes instead of twenty seconds is almost always this. Said
+  // once, on the line already being drawn, rather than as a separate warning.
+  const how = p.emulated ? ' (emulated — slow)' : ''
+  return `${counter}${platform}${p.detail}${how}`
+}
+
+/**
+ * A duration a person reads, not a step suffix.
+ *
+ * ui.ts has `duration`, which is dim, colour-wrapped, prefixed with a space
+ * and renders three minutes as "180s" — right for the end of a finished step,
+ * wrong for a sentence about how long is left.
+ */
+function human(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000))
+  if (total < 60) return `${total}s`
+  const minutes = Math.floor(total / 60)
+  const seconds = total % 60
+  if (minutes < 60) return seconds ? `${minutes}m ${seconds}s` : `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  return `${hours}h ${minutes % 60}m`
+}
+
+/**
+ * Elapsed against what this service usually takes.
+ *
+ * Only from real history: on a first deploy there is nothing honest to say,
+ * and a bar filled from a number nobody measured is the same lie as the "not
+ * needed" it replaces. Overrunning is shown as overrunning rather than parked
+ * at the end of the bar — a deploy that is genuinely slow today is exactly
+ * when somebody needs to know.
+ */
+export function etaLine(p: DeployProgress, now = Date.now()): string | undefined {
+  if (!p.typicalMs || !p.since) return undefined
+  const elapsed = now - new Date(p.since).getTime()
+  if (elapsed < 0) return undefined
+
+  const fraction = Math.min(1, elapsed / p.typicalMs)
+  const left = p.typicalMs - elapsed
+  const tail =
+    left > 0
+      ? `~${human(left)} left`
+      : `${human(-left)} over the usual ${human(p.typicalMs)}`
+  return `${bar(fraction)} ${human(elapsed)} · ${tail}`
 }
 
 /**
@@ -224,7 +273,14 @@ export function phaseWalker(l: Ladder, steps: Step[] = DEPLOY_STEPS): PhaseWalke
         // poll, and it belongs on the step that decided it.
         advance(target, at === 0 ? (p.nodeName ?? undefined) : undefined)
       }
-      const line = progressLine(p)
+      // The build line, or the estimate when there is no build line to show.
+      //
+      // Both on one row rather than two: the ladder redraws a fixed region and
+      // a row that appears and disappears makes the whole block jump. During a
+      // build the sub-step is the more useful of the two — it is proof of
+      // movement — and the estimate carries the rest of the wait, when the
+      // node is pulling an image and nothing is being logged at all.
+      const line = progressLine(p) ?? etaLine(p)
       if (line && at < steps.length) l.detail(steps[at]!.key, line)
     },
   }

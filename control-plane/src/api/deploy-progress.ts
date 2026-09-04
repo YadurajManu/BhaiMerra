@@ -23,7 +23,7 @@
  * can exist, and be reported on, for the whole length of a build without any
  * node being told to pull an image that does not exist yet.
  */
-import { desc, eq } from 'drizzle-orm'
+import { and, desc, eq, inArray, isNotNull, ne } from 'drizzle-orm'
 import { deployments, nodes } from '../db/schema.js'
 import type { BuildProgress } from '../build/runner.js'
 import type { AppContext } from './context.js'
@@ -169,6 +169,24 @@ export type DeployProgress = {
   step?: number
   ofSteps?: number
   platform?: string
+  /**
+   * Whether this platform is being built under emulation.
+   *
+   * The single most useful thing this payload can say. A build that takes
+   * three minutes instead of twenty seconds is almost always an arm64 image
+   * built on an amd64 control plane through QEMU, and without being told,
+   * that reads as a hang. Only the control plane knows its own architecture,
+   * so only the control plane can answer this.
+   */
+  emulated?: boolean
+  /**
+   * How long this service's deploys usually take, in milliseconds.
+   *
+   * The median of its own recent successes — not an average, which one
+   * pathological build skews, and not a guess. Absent when there is no
+   * history, in which case the caller must say so rather than invent a bar.
+   */
+  typicalMs?: number
 }
 
 /**
@@ -200,7 +218,34 @@ export async function readProgress(
 
   if (!row) return null
 
+  // What this service's deploys usually cost, from its own history.
+  //
+  // Median of the last five that actually reached `running`, so a single
+  // twenty-minute emulated build does not move the estimate for everything
+  // after it. Failures are excluded: they finish early and would make the
+  // typical look faster than any real deploy.
+  const past = await ctx.db
+    .select({ startedAt: deployments.startedAt, finishedAt: deployments.finishedAt })
+    .from(deployments)
+    .where(
+      and(
+        eq(deployments.serviceId, serviceId),
+        ne(deployments.id, row.id),
+        inArray(deployments.status, ['running', 'superseded']),
+        isNotNull(deployments.finishedAt)
+      )
+    )
+    .orderBy(desc(deployments.startedAt))
+    .limit(5)
+
+  const durations = past
+    .map((d) => d.finishedAt!.getTime() - d.startedAt.getTime())
+    .filter((ms) => ms > 0)
+    .sort((a, b) => a - b)
+  const typicalMs = durations.length ? durations[Math.floor(durations.length / 2)] : undefined
+
   const progress: DeployProgress = {
+    ...(typicalMs ? { typicalMs } : {}),
     deploymentId: row.id,
     status: row.status,
     since: row.startedAt.toISOString(),
@@ -220,7 +265,14 @@ export async function readProgress(
     if (typeof line.detail === 'string') progress.detail = line.detail
     if (typeof line.step === 'number') progress.step = line.step
     if (typeof line.ofSteps === 'number') progress.ofSteps = line.ofSteps
-    if (typeof line.platform === 'string') progress.platform = line.platform
+    if (typeof line.platform === 'string') {
+      progress.platform = line.platform
+      // "linux/arm64" against a control plane running amd64. Compared on the
+      // architecture alone: the OS is linux on both sides of any build we do.
+      const target = line.platform.split('/')[1]
+      const host = process.arch === 'x64' ? 'amd64' : process.arch === 'arm64' ? 'arm64' : process.arch
+      if (target && target !== host) progress.emulated = true
+    }
   } catch {
     // A malformed value is not worth failing the request over.
   }
