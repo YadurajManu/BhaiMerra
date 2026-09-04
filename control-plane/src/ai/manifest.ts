@@ -1,5 +1,6 @@
 import { chat } from './provider.js'
 import { parseManifest, ManifestError } from '../manifest/parse.js'
+import { applyEdits, parseEdits, type Edit } from './edits.js'
 import { nodes } from '../db/schema.js'
 import { eq } from 'drizzle-orm'
 import type { AppContext } from '../api/context.js'
@@ -106,6 +107,36 @@ Rules, in order of importance:
 
 Write nothing outside the JSON.`
 
+/**
+ * The per-service prompt.
+ *
+ * Narrower than the whole-manifest one in the way that matters: it is shown
+ * one service and asked what is wrong with that service, so it cannot damage
+ * a service it was never given — and it returns edits, so it cannot damage
+ * the one it was given by rewriting it badly.
+ */
+const SERVICE_SYSTEM = `You review one service in a Fleet OS manifest against evidence from its directory.
+
+Return JSON only:
+{"edits": [{"service": "<name>", "field": "<field>", "value": <value or null>, "why": "<the evidence that justifies it>"}],
+ "questions": [{"id": "<slug>", "ask": "<one question>", "why": "<why the evidence cannot settle it>", "options": [{"value": "<value>", "label": "<meaning>"}]}]}
+
+You may edit only: container_port, health, resources, placement, replicas, env, command. A null value removes the field.
+
+Rules:
+
+1. Use only what the evidence shows. If it does not say, change nothing. Never infer a port or a path from what projects of this kind usually do.
+
+2. Never invent a health check. Only set "health" when the evidence shows a route serving that path — an Express/Fastify/Nest route, a static index.html at the root. An API behind a global prefix does NOT serve "/". Where the draft has a health check the evidence does not support, remove it with a null value: no check means container state decides and the service comes up, whereas a wrong path fails every probe for ever.
+
+3. container_port comes from evidence: an EXPOSE line, a listen() call, a PORT default. Never from habit.
+
+4. You cannot change node, build, image, uses, volume or name. Those name machines, source and data, and no repository can settle them. Do not ask about them either.
+
+5. Return an empty edits list when the draft is already right. That is the common answer and a good one.
+
+Write nothing outside the JSON.`
+
 /** Pull the object out of a reply that may be fenced or padded with prose. */
 function parseReply(content: string): { manifest: string; notes: string[]; questions: Question[] } {
   const fenced = content.match(/```(?:json)?\s*([\s\S]*?)```/)
@@ -191,6 +222,14 @@ export async function assistManifest(
     repoMap: string
     /** Answers to a previous round's questions, as id -> chosen value. */
     answers?: Record<string, string>
+    /**
+     * Evidence per service, when the caller can split it.
+     *
+     * Present: one pass per service, each seeing only its own directory, so
+     * depth does not have to be traded against fitting a token budget. Absent:
+     * the whole map in one pass, which is what an older CLI sends.
+     */
+    parts?: Array<{ service: string; map: string }>
   },
   fetchImpl: typeof fetch = fetch
 ): Promise<AssistOutcome> {
@@ -236,6 +275,101 @@ export async function assistManifest(
 
   const refund = async () => {
     await ctx.redis.decr(key).catch(() => {})
+  }
+
+  // One pass per service when the caller split the evidence.
+  //
+  // The whole-repository pass has to fit everything into one request, and on a
+  // seven-service project that meant trimming the map 44% — after which a
+  // review that had made six corrections made none. Per service, each request
+  // carries one directory at full depth, so a large repository gets a better
+  // review rather than a thinner one.
+  //
+  // It costs one allowance, not one per service: the user asked for a review,
+  // and how many requests that takes is an implementation detail they did not
+  // choose.
+  if (opts.parts?.length) {
+    const edits: Edit[] = []
+    const notes: string[] = []
+    const questions: Question[] = []
+    let asked = 0
+    let failures = 0
+
+    for (const part of opts.parts) {
+      try {
+        const { content } = await chat(
+          { apiKey, baseUrl, model },
+          [
+            { role: 'system', content: SERVICE_SYSTEM },
+            {
+              role: 'user',
+              content: [
+                `The manifest:\n\n${opts.draft}`,
+                `Review the service "${part.service}". Evidence from its directory:\n\n${part.map}`,
+                opts.answers && Object.keys(opts.answers).length
+                  ? `Already answered; treat as settled:\n${Object.entries(opts.answers)
+                      .map(([id, value]) => `  ${id}: ${value}`)
+                      .join('\n')}`
+                  : '',
+              ]
+                .filter(Boolean)
+                .join('\n\n'),
+            },
+          ],
+          { maxTokens: 1200 },
+          fetchImpl
+        )
+        const out = parseEdits(content)
+        asked++
+        // A pass may only edit the service it was shown. Anything else is a
+        // pass reaching outside its evidence, which is the whole reason for
+        // splitting them up.
+        edits.push(...out.edits.filter((e) => e.service === part.service))
+        questions.push(...(out.questions as Question[]))
+      } catch {
+        // One service failing is not the review failing. The rest still have
+        // something to say, and reporting nothing because the fourth of seven
+        // timed out would waste the six that worked.
+        failures++
+      }
+    }
+
+    if (!asked) {
+      await refund()
+      return { status: 'kept_draft', reason: 'No service could be reviewed.' }
+    }
+
+    const result = applyEdits(opts.draft, edits)
+    for (const e of result.applied) notes.push(`${e.service}: ${e.why}`)
+    for (const r of result.refused) {
+      notes.push(`${r.edit.service}: declined to change ${r.edit.field} — ${r.reason}`)
+    }
+    if (failures) notes.push(`${failures} service(s) could not be reviewed and were left as generated.`)
+
+    // The merged result still has to survive the parser, and the guards that
+    // apply to the manifest as a whole rather than to one service.
+    try {
+      parseManifest(result.manifest)
+    } catch (err) {
+      await refund()
+      return {
+        status: 'kept_draft',
+        reason:
+          err instanceof ManifestError
+            ? `The edits produced an invalid manifest: ${err.issues.map((i) => `${i.path}: ${i.message}`).join('; ')}`
+            : 'The edits produced a manifest that could not be parsed.',
+      }
+    }
+
+    return {
+      status: 'ok',
+      manifest: result.manifest,
+      notes,
+      questions: questions.slice(0, 3),
+      changed: result.applied.length > 0,
+      model,
+      usage: { used, limit },
+    }
   }
 
   let reply: { manifest: string; notes: string[]; questions: Question[] }

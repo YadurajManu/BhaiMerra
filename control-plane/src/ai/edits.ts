@@ -46,6 +46,21 @@ const EDITABLE = new Set([
  */
 const FORBIDDEN = new Set(['node', 'build', 'image', 'uses', 'volume', 'name'])
 
+/**
+ * The shape the manifest wants, from the shape a model naturally writes.
+ *
+ * `health: /healthz` is the obvious way to say it and the manifest wants
+ * `health: { path: /healthz }`. Without this the whole review is discarded —
+ * the merged manifest fails the parser and the draft is kept — over a
+ * difference in spelling that costs one line to accept. Only for fields where
+ * the short form is unambiguous; anything else is passed through and stands or
+ * falls on the parser.
+ */
+function shape(field: string, value: Edit['value']): unknown {
+  if (field === 'health' && typeof value === 'string') return { path: value }
+  return value
+}
+
 export type ApplyResult = {
   manifest: string
   applied: Edit[]
@@ -89,7 +104,7 @@ export function applyEdits(manifest: string, edits: Edit[]): ApplyResult {
     if (edit.value === null) {
       doc.deleteIn(['services', edit.service, edit.field])
     } else {
-      doc.setIn(['services', edit.service, edit.field], edit.value)
+      doc.setIn(['services', edit.service, edit.field], shape(edit.field, edit.value))
     }
     applied.push(edit)
   }

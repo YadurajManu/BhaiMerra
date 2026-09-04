@@ -27,7 +27,9 @@ describe('applying a review as edits', () => {
       { service: 'api', field: 'health', value: '/healthz', why: 'server.js defines it' },
     ])
     assert.equal(out.applied.length, 1)
-    assert.match(out.manifest, /health: \/healthz/)
+    // Normalised: `health: /healthz` is what a model writes, and the
+    // manifest wants `health: { path: /healthz }`.
+    assert.match(out.manifest, /path: \/healthz/)
     assert.match(out.manifest, /build: \.\/web/, 'the service it was not shown is untouched')
   })
 

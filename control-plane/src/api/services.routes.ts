@@ -503,6 +503,16 @@ export async function serviceRoutes(app: FastifyInstance) {
           repoMap: z.string().min(1).max(64_000),
           /** Answers to a previous round's questions, as id -> chosen value. */
           answers: z.record(z.string().max(64), z.string().max(512)).optional(),
+          /**
+           * Evidence split by service, so each is reviewed at full depth.
+           *
+           * Bounded per part rather than in total: the point is that a large
+           * repository sends more requests, not one larger one.
+           */
+          parts: z
+            .array(z.object({ service: z.string().max(64), map: z.string().min(1).max(32_000) }))
+            .max(24)
+            .optional(),
         })
         .parse(req.body ?? {})
 
@@ -513,6 +523,7 @@ export async function serviceRoutes(app: FastifyInstance) {
         draft: body.draft,
         repoMap: body.repoMap,
         answers: body.answers,
+        parts: body.parts,
       })
       return reply.send(out)
     }

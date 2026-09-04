@@ -587,7 +587,11 @@ async function theOnlyNode(flags: Flags): Promise<string | undefined> {
  * appeared with different ports and no explanation is worse than one with a
  * mistake in it -- at least the mistake is yours to find.
  */
-async function reviewed(draft: string, flags: Flags): Promise<string> {
+async function reviewed(
+  draft: string,
+  flags: Flags,
+  services: Array<{ name: string; dir: string }>
+): Promise<string> {
   const { repoMap } = await import('../repomap.js')
   const fleetId = await requireFleet(typeof flags.fleet === 'string' ? flags.fleet : undefined)
 
@@ -611,12 +615,22 @@ async function reviewed(draft: string, flags: Flags): Promise<string> {
   // just given was discarded. Applying an answer needs the manifest it applies
   // to and the answer, not the evidence that produced it: the model has
   // already read the repository and written its conclusions down.
-  const review = (base: string, map: string, answers?: Record<string, string>) =>
+  const review = (
+    base: string,
+    map: string,
+    answers?: Record<string, string>,
+    parts?: Array<{ service: string; map: string }>
+  ) =>
     task(
       answers ? 'applying your answers' : 'reading the repository for a second opinion',
       async () =>
         request<Assist>('POST', `/fleets/${fleetId}/manifest/assist`, {
-          body: { draft: base, repoMap: map, ...(answers ? { answers } : {}) },
+          body: {
+            draft: base,
+            repoMap: map,
+            ...(answers ? { answers } : {}),
+            ...(parts ? { parts } : {}),
+          },
         }),
       { done: () => (answers ? 'done' : 'reviewed') }
     )
@@ -625,7 +639,17 @@ async function reviewed(draft: string, flags: Flags): Promise<string> {
   let out: Assist
   try {
     map = await repoMap()
-    out = (await review(draft, map)).body
+    // Evidence per service, so each is reviewed at full depth rather than
+    // every service being trimmed to fit one request. The whole-repository
+    // map still goes along: a service is judged partly by what surrounds it,
+    // and the tree is how the model knows what else exists.
+    const parts = await Promise.all(
+      services.map(async (svc) => ({
+        service: svc.name,
+        map: await repoMap(join(process.cwd(), svc.dir)),
+      }))
+    )
+    out = (await review(draft, map, undefined, parts)).body
   } catch (err) {
     console.log(
       `${glyph.warn} ${c.yellow('review skipped')}  ${err instanceof Error ? err.message : 'the control plane could not be reached'}`
@@ -755,7 +779,13 @@ export const initCommand = {
           (found.databases.length ? await theOnlyNode(flags) : undefined),
       })
       const questions = drafted.questions
-      const manifest = flags.ai ? await reviewed(drafted.manifest, flags) : drafted.manifest
+      const manifest = flags.ai
+        ? await reviewed(
+            drafted.manifest,
+            flags,
+            found.services.map((s) => ({ name: s.name, dir: s.dir }))
+          )
+        : drafted.manifest
       await writeFile(path, manifest)
       console.log(`${c.green('created')} ${path}`)
       if (found.layout) console.log(c.dim(`  ${found.layout}`))

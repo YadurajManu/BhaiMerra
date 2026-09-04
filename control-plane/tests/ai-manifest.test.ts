@@ -475,3 +475,161 @@ describe('a repository too large for the model', () => {
     assert.equal(out.status, 'kept_draft')
   })
 })
+
+describe('reviewing one service at a time', () => {
+  const TWO = `fleet: homelab
+
+services:
+  api:
+    build: ./api
+    placement: flexible
+    container_port: 3000
+    resources: { ram: 512Mi, cpu: 0.5 }
+
+  web:
+    build: ./web
+    placement: flexible
+    container_port: 80
+    resources: { ram: 512Mi, cpu: 0.5 }
+`
+
+  /** A provider that answers per service, recording what each pass was shown. */
+  function perService(replies: Record<string, unknown>) {
+    const seen: string[] = []
+    const impl = (async (_url: string, init: RequestInit) => {
+      // Unescaped: the prompt is inside a JSON body, so its quotes arrive as
+      // \" and a naive includes() matches nothing.
+      const body = String(init.body).replace(/\\"/g, '"')
+      const which = Object.keys(replies).find((name) => body.includes(`the service "${name}"`))
+      seen.push(which ?? 'unknown')
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(replies[which ?? ''] ?? { edits: [] }) } }],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      )
+    }) as unknown as typeof fetch
+    return { impl, seen: () => seen }
+  }
+
+  test('asks once per service and merges the edits', async () => {
+    // The point of splitting: each request carries one directory at full
+    // depth, so a large repository gets a better review rather than a thinner
+    // one. On this project, trimming to fit took a review from six
+    // corrections to none.
+    const { impl, seen } = perService({
+      api: { edits: [{ service: 'api', field: 'health', value: '/healthz', why: 'main.py defines it' }] },
+      web: { edits: [{ service: 'web', field: 'container_port', value: 8080, why: 'EXPOSE 8080' }] },
+    })
+
+    const out = await assistManifest(
+      ctx,
+      {
+        userId: `assist-parts-${Date.now()}`,
+        fleetId,
+        draft: TWO,
+        repoMap: MAP,
+        parts: [
+          { service: 'api', map: '## api/main.py\n@app.get("/healthz")' },
+          { service: 'web', map: '## web/Dockerfile\nEXPOSE 8080' },
+        ],
+      },
+      impl
+    )
+
+    assert.deepEqual(seen(), ['api', 'web'], 'one pass each')
+    assert.equal(out.status, 'ok')
+    if (out.status === 'ok') {
+      assert.match(out.manifest, /path: \/healthz/)
+      assert.match(out.manifest, /container_port: 8080/)
+      assert.ok(out.changed)
+    }
+  })
+
+  test('a pass cannot edit a service it was not shown', async () => {
+    // The isolation that makes splitting safe. A pass given only ./api has no
+    // evidence about web, and an edit naming it is reaching outside what it
+    // was given.
+    const { impl } = perService({
+      api: {
+        edits: [
+          { service: 'api', field: 'container_port', value: 4000, why: 'EXPOSE 4000' },
+          { service: 'web', field: 'container_port', value: 1, why: 'guessed' },
+        ],
+      },
+      web: { edits: [] },
+    })
+
+    const out = await assistManifest(
+      ctx,
+      {
+        userId: `assist-cross-${Date.now()}`,
+        fleetId,
+        draft: TWO,
+        repoMap: MAP,
+        parts: [
+          { service: 'api', map: '## api/Dockerfile\nEXPOSE 4000' },
+          { service: 'web', map: '## web/Dockerfile\nEXPOSE 80' },
+        ],
+      },
+      impl
+    )
+
+    assert.equal(out.status, 'ok')
+    if (out.status === 'ok') {
+      assert.match(out.manifest, /container_port: 4000/, 'its own edit lands')
+      assert.match(out.manifest, /container_port: 80\b/, 'the other service is untouched')
+    }
+  })
+
+  test('one service failing does not lose the others', async () => {
+    // Reporting nothing because the second of seven timed out would waste the
+    // six that worked.
+    let calls = 0
+    const impl = (async (_url: string, init: RequestInit) => {
+      calls++
+      if (String(init.body).replace(/\\"/g, '"').includes('the service "web"')) {
+        return new Response('{}', { status: 500, headers: { 'content-type': 'application/json' } })
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  edits: [{ service: 'api', field: 'container_port', value: 4000, why: 'EXPOSE 4000' }],
+                }),
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      )
+    }) as unknown as typeof fetch
+
+    const out = await assistManifest(
+      ctx,
+      {
+        userId: `assist-partial-${Date.now()}`,
+        fleetId,
+        draft: TWO,
+        repoMap: MAP,
+        parts: [
+          { service: 'api', map: '## api/Dockerfile\nEXPOSE 4000' },
+          { service: 'web', map: '## web/Dockerfile\nEXPOSE 80' },
+        ],
+      },
+      impl
+    )
+
+    assert.ok(calls >= 2)
+    assert.equal(out.status, 'ok')
+    if (out.status === 'ok') {
+      assert.match(out.manifest, /container_port: 4000/, 'the pass that worked still applies')
+      assert.ok(
+        out.notes.some((n) => /could not be reviewed/.test(n)),
+        'and the one that did not is reported, not hidden'
+      )
+    }
+  })
+})
