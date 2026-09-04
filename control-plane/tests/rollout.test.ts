@@ -14,7 +14,7 @@ import { and, eq, desc } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 
 import { loadConfig } from '../src/config.js'
-import { createContext, closeContext, type AppContext } from '../src/api/context.js'
+import { createContext, closeContext, settleDeploys, type AppContext } from '../src/api/context.js'
 import { buildServer } from '../src/server.js'
 import { orgs, users, services, deployments } from '../src/db/schema.js'
 import { resolveRoute } from '../src/ingress/routes.js'
@@ -94,13 +94,20 @@ services:
     await closeContext(ctx)
   })
 
-  const deploy = () =>
-    app.inject({
+  // A deploy answers as soon as a node is chosen and keeps building after,
+  // so every one of these tests would otherwise race the work it started —
+  // editing a row while the deploy is still writing to it. Waiting here means
+  // no caller has to remember.
+  const deploy = async () => {
+    const res = await app.inject({
       method: 'POST',
       url: `/services/${serviceId}/deploy`,
       headers: { authorization: `Bearer ${token}` },
       payload: {},
     })
+    await settleDeploys(ctx)
+    return res
+  }
 
   /** Report a container to the control plane the way the agent does. */
   const beat = (containers: Array<{ deployment_id: string; state: string; health?: string }>) =>
@@ -126,10 +133,13 @@ services:
 
   let first: string
   let second: string
+  /** The rollout that timed out unhealthy — the one the failure message is about. */
+  let timedOut: string
 
   test('the first deploy goes live once the container reports healthy', async () => {
     const res = await deploy()
-    assert.equal(res.statusCode, 201, res.body)
+    assert.equal(res.statusCode, 202, res.body)
+    await settleDeploys(ctx)
     first = res.json().deployment.id
 
     await beat([{ deployment_id: first, state: 'running', health: 'healthy' }])
@@ -196,6 +206,7 @@ services:
   test('a rollout that never becomes healthy fails without taking the site down', async () => {
     const res = await deploy()
     const third = res.json().deployment.id
+    timedOut = third
 
     // Age it past the window rather than waiting ten minutes for it.
     await ctx.db
@@ -227,6 +238,9 @@ services:
       headers: { authorization: `Bearer ${token}` },
       payload: {},
     })
+    // The deploy answers before it finishes; this test then edits the row
+    // it created, so it has to wait for the work to stop touching it.
+    await settleDeploys(ctx)
     const fresh = res.json().deployment?.id ?? res.json().deploymentId
     assert.ok(fresh, `expected a deployment id, got ${res.body}`)
 
@@ -261,6 +275,9 @@ services:
       headers: { authorization: `Bearer ${token}` },
       payload: {},
     })
+    // The deploy answers before it finishes; this test then edits the row
+    // it created, so it has to wait for the work to stop touching it.
+    await settleDeploys(ctx)
     const dead = res.json().deployment?.id ?? res.json().deploymentId
     assert.ok(dead)
 
@@ -287,7 +304,12 @@ services:
     const [row] = await ctx.db
       .select({ reason: deployments.failureReason })
       .from(deployments)
-      .where(and(eq(deployments.serviceId, serviceId), eq(deployments.status, 'failed')))
+      // By id, not "the newest failed row for this service". By now the service
+      // has several failures with different causes, and both "limit 1" and
+      // "order by startedAt" pick an arbitrary one of them - one of these
+      // tests deliberately backdates its row, so recency is not even a
+      // tiebreak. This assertion is about one specific rollout.
+      .where(eq(deployments.id, timedOut))
       .limit(1)
     // The reason distinguishes "the node never told us about this container"
     // from "the node told us, and it was not healthy". They call for different
@@ -363,6 +385,9 @@ services:
       headers: { authorization: `Bearer ${token}` },
       payload: {},
     })
+    // The deploy answers before it finishes; this test then edits the row
+    // it created, so it has to wait for the work to stop touching it.
+    await settleDeploys(ctx)
     const id = res.json().deployment.id
 
     // No health field at all, which is what Docker reports for an image with

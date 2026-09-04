@@ -508,127 +508,184 @@ export async function serviceRoutes(app: FastifyInstance) {
       })
       const phases = phaseWriter(app.ctx, deploymentId)
 
-      try {
-        let finalImage: string
-        if (buildPlan) {
-          await phases.set('building')
-          const gitSha = body.gitSha ?? 'latest'
-          const built = await app.ctx.builds.build({
-            serviceName: service.name,
-            // An upload *is* the context: the CLI resolved `build: ./api`
-            // against the manifest's directory before packing, so the archive
-            // root is already the directory to build. Joining the path on
-            // again looks for ./api inside ./api.
-            //
-            // A checkout is the other way round — it is the whole repository,
-            // and the manifest's path selects a directory within it.
-            buildContext: body.contextId ? '.' : buildPlan.buildContext,
-            contextRoot: body.contextId
-              ? contextPath(app.ctx.config.BUILD_WORKDIR, body.contextId)
-              : undefined,
-            gitSha,
-            platforms: buildPlan.platforms,
-            registry: app.ctx.config.REGISTRY_URL ?? '',
-            onProgress: phases.onBuildProgress,
-          })
-          finalImage = built.imageTags[0]!
-          req.log.info(
-            {
-              service: service.name,
+      /*
+       * Answer now; build afterwards.
+       *
+       * This used to hold the HTTP request open for the whole build, which
+       * made "how long may a build take" a question about proxies rather than
+       * about builds. Cloudflare cuts an origin request at about 100 seconds,
+       * so a perfectly healthy multi-arch build died at 124s with a 524 and
+       * the row was left saying `building` forever. Any real project exceeds
+       * that; an arm64 build under QEMU exceeds it several times over.
+       *
+       * The deployment row and the phase writer are the durable record, and
+       * the client already follows them - /progress for the live line, then
+       * the service list until the status is terminal. So the response is the
+       * receipt, and the work continues without anybody holding a socket open
+       * for it.
+       */
+        const runDeploy = async () => {
+          try {
+          let finalImage: string
+          if (buildPlan) {
+            await phases.set('building')
+            const gitSha = body.gitSha ?? 'latest'
+            const built = await app.ctx.builds.build({
+              serviceName: service.name,
+              // An upload *is* the context: the CLI resolved `build: ./api`
+              // against the manifest's directory before packing, so the archive
+              // root is already the directory to build. Joining the path on
+              // again looks for ./api inside ./api.
+              //
+              // A checkout is the other way round — it is the whole repository,
+              // and the manifest's path selects a directory within it.
+              buildContext: body.contextId ? '.' : buildPlan.buildContext,
+              contextRoot: body.contextId
+                ? contextPath(app.ctx.config.BUILD_WORKDIR, body.contextId)
+                : undefined,
+              gitSha,
               platforms: buildPlan.platforms,
-              image: finalImage,
-              durationMs: built.durationMs,
-            },
-            'multi-arch build complete'
-          )
-        } else {
-          // Only reachable with an image: a service without one always produced
-          // a build plan above.
-          finalImage = image!
-        }
-
-        await phases.set('scheduling')
-        // Allocated per node, so the ingress proxy has somewhere to send
-        // traffic. An internal service gets none on purpose: publishing a port
-        // binds it on the node's interface, which is how a database ends up
-        // reachable from the whole LAN. Its neighbours reach it by name on the
-        // fleet network instead.
-        const hostPort = service.internal ? null : await allocateHostPort(app.ctx, decision.nodeId)
-
-        const deployment = await app.ctx.db.transaction(async (tx) => {
-          // A stateful service cannot overlap. Two Postgres processes writing
-          // one volume corrupt it, so for these the old release is superseded
-          // now and the node replaces the container in place. The downtime is
-          // real and is the correct trade: a moment offline is recoverable,
-          // and a corrupted volume is not.
-          if (service.persistentVolume) {
-            await tx
-              .update(deployments)
-              .set({ status: 'superseded', finishedAt: new Date() })
-              .where(
-                and(
-                  eq(deployments.serviceId, service.id),
-                  ne(deployments.id, deploymentId),
-                  inArray(deployments.status, ['deploying', 'running'])
-                )
-              )
+              registry: app.ctx.config.REGISTRY_URL ?? '',
+              onProgress: phases.onBuildProgress,
+            })
+            finalImage = built.imageTags[0]!
+            req.log.info(
+              {
+                service: service.name,
+                platforms: buildPlan.platforms,
+                image: finalImage,
+                durationMs: built.durationMs,
+              },
+              'multi-arch build complete'
+            )
+          } else {
+            // Only reachable with an image: a service without one always produced
+            // a build plan above.
+            finalImage = image!
           }
 
-          // For everything else the previous release is deliberately *not*
-          // superseded here.
-          //
-          // It used to be, which meant the moment a deploy was scheduled the old
-          // release stopped being the live one — before the new container had
-          // been pulled, let alone proved it could serve a request. That is the
-          // whole outage: the site was down from the instant the deploy started
-          // until the replacement happened to come up, and if the replacement
-          // never came up, it stayed down.
-          //
-          // Both rows are live for the length of the rollout. Ingress prefers
-          // the running one, so traffic keeps reaching the old release, and the
-          // heartbeat supersedes it at the moment the new one reports healthy.
-          //
-          // A stateful service is the exception and is handled on the node: two
-          // containers cannot share one volume without corrupting it.
+          await phases.set('scheduling')
+          // Allocated per node, so the ingress proxy has somewhere to send
+          // traffic. An internal service gets none on purpose: publishing a port
+          // binds it on the node's interface, which is how a database ends up
+          // reachable from the whole LAN. Its neighbours reach it by name on the
+          // fleet network instead.
+          const hostPort = service.internal ? null : await allocateHostPort(app.ctx, decision.nodeId)
 
-          // The row already exists; going live is its last phase, not a second
-          // insert. Two rows per deploy would double every history view.
-          const [row] = await tx
-            .update(deployments)
-            .set({ status: 'deploying', imageTags: [finalImage], hostPort })
-            .where(eq(deployments.id, deploymentId))
-            .returning()
+          const deployment = await app.ctx.db.transaction(async (tx) => {
+            // A stateful service cannot overlap. Two Postgres processes writing
+            // one volume corrupt it, so for these the old release is superseded
+            // now and the node replaces the container in place. The downtime is
+            // real and is the correct trade: a moment offline is recoverable,
+            // and a corrupted volume is not.
+            if (service.persistentVolume) {
+              await tx
+                .update(deployments)
+                .set({ status: 'superseded', finishedAt: new Date() })
+                .where(
+                  and(
+                    eq(deployments.serviceId, service.id),
+                    ne(deployments.id, deploymentId),
+                    inArray(deployments.status, ['deploying', 'running'])
+                  )
+                )
+            }
 
-          await tx.insert(placementEvents).values({
-            serviceId: service.id,
-            fromNodeId: null,
-            toNodeId: decision.nodeId,
-            reason: 'manual',
-            detail: {
-              score: decision.candidates[0]?.score,
-              breakdown: decision.candidates[0]?.breakdown,
-              consideredNodes: decision.candidates.length,
-            },
+            // For everything else the previous release is deliberately *not*
+            // superseded here.
+            //
+            // It used to be, which meant the moment a deploy was scheduled the old
+            // release stopped being the live one — before the new container had
+            // been pulled, let alone proved it could serve a request. That is the
+            // whole outage: the site was down from the instant the deploy started
+            // until the replacement happened to come up, and if the replacement
+            // never came up, it stayed down.
+            //
+            // Both rows are live for the length of the rollout. Ingress prefers
+            // the running one, so traffic keeps reaching the old release, and the
+            // heartbeat supersedes it at the moment the new one reports healthy.
+            //
+            // A stateful service is the exception and is handled on the node: two
+            // containers cannot share one volume without corrupting it.
+
+            // The row already exists; going live is its last phase, not a second
+            // insert. Two rows per deploy would double every history view.
+            const [row] = await tx
+              .update(deployments)
+              .set({ status: 'deploying', imageTags: [finalImage], hostPort })
+              .where(eq(deployments.id, deploymentId))
+              .returning()
+
+            await tx.insert(placementEvents).values({
+              serviceId: service.id,
+              fromNodeId: null,
+              toNodeId: decision.nodeId,
+              reason: 'manual',
+              detail: {
+                score: decision.candidates[0]?.score,
+                breakdown: decision.candidates[0]?.breakdown,
+                consideredNodes: decision.candidates.length,
+              },
+            })
+
+            await recordAudit(tx, {
+              orgId,
+              actorUserId: req.userId,
+              action: 'service.deployed',
+              targetType: 'service',
+              targetId: service.id,
+              metadata: { node: decision.nodeName, image: finalImage, gitSha: body.gitSha },
+            })
+
+            return row!
           })
 
-          await recordAudit(tx, {
-            orgId,
-            actorUserId: req.userId,
-            action: 'service.deployed',
-            targetType: 'service',
-            targetId: service.id,
-            metadata: { node: decision.nodeName, image: finalImage, gitSha: body.gitSha },
+          // The build line has served its purpose; the phase on the row is the
+          // durable record from here on.
+          await phases.clear().catch(() => {})
+
+          req.log.info({ service: service.name, deploymentId }, 'deploy complete')
+          } catch (err) {
+            // Written to the row, not thrown: the caller already has its 202 and
+            // nothing is listening. The row is the only place this can be read
+            // from afterwards, which is exactly what makes it the record.
+            const reason = err instanceof Error ? err.message : 'deploy failed'
+            await phases.fail(reason).catch((writeErr) => {
+              req.log.error({ err: writeErr, deploymentId }, 'could not record deploy failure')
+            })
+            req.log.warn(
+              { err, deploymentId, service: service.name, platforms: buildPlan?.platforms ?? [] },
+              'deploy failed'
+            )
+          } finally {
+            // Customer source is held only for as long as it takes to build it;
+            // a control plane that keeps every upload runs out of disk in a week.
+            if (body.contextId) {
+              await disposeContext(app.ctx.config.BUILD_WORKDIR, body.contextId).catch((err) => {
+                req.log.warn({ err, contextId: body.contextId }, 'could not remove the build context')
+              })
+            }
+          }
+        }
+
+        // Fire and record. Nothing awaits this - the point is that the caller is
+        // already gone. runDeploy handles its own failures; this catch is the
+        // backstop, because an unhandled rejection here would take the process
+        // down and every other fleet with it.
+        const running = runDeploy()
+          .catch((err) => {
+            req.log.error({ err, deploymentId }, 'deploy escaped its own error handling')
           })
+          .finally(() => {
+            app.ctx.deploysInFlight.delete(deploymentId)
+          })
+        // Registered so the work is observable: a shutdown can wait for it
+        // rather than leaving a row saying `building` for ever, which is
+        // exactly what a killed build looks like afterwards.
+        app.ctx.deploysInFlight.set(deploymentId, running)
 
-          return row!
-        })
-
-        // The build line has served its purpose; the phase on the row is the
-        // durable record from here on.
-        await phases.clear().catch(() => {})
-
-        return reply.code(201).send({
-          deployment: { id: deployment.id, status: deployment.status },
+        return reply.code(202).send({
+          deployment: { id: deploymentId, status: 'deploying' },
           placedOn: { id: decision.nodeId, name: decision.nodeName },
           // The point of the whole exercise: a URL, handed back on deploy.
           // An internal service has none, and says how it is reached instead.
@@ -642,35 +699,8 @@ export async function serviceRoutes(app: FastifyInstance) {
           reachableAs: service.internal ? `${service.name}:${service.containerPort}` : null,
           score: decision.candidates[0]?.score,
           warnings: decision.warnings,
-          note: 'The agent will converge on its next desired-state poll.',
+          note: 'Building and scheduling continue; follow /progress or the service status.',
         })
-      } catch (err) {
-        // The request still fails, but the reason is written to the row first:
-        // an operator who missed the terminal output can still find out why.
-        const reason = err instanceof Error ? err.message : 'deploy failed'
-        await phases.fail(reason).catch((writeErr) => {
-          req.log.error({ err: writeErr, deploymentId }, 'could not record deploy failure')
-        })
-
-        if (err instanceof BuildUnavailableError) {
-          // The build is where most deploys fail, so the message is the
-          // product: it names the platforms and the reason, verbatim.
-          throw new ApiError(422, 'build_failed', err.message, {
-            platforms: buildPlan?.platforms ?? [],
-            deploymentId,
-          })
-        }
-        throw err
-      } finally {
-        // Both paths, always. Customer source is held only for as long as it
-        // takes to build it, and a control plane that keeps every upload runs
-        // out of disk in a week.
-        if (body.contextId) {
-          await disposeContext(app.ctx.config.BUILD_WORKDIR, body.contextId).catch((err) => {
-            req.log.warn({ err, contextId: body.contextId }, 'could not remove the build context')
-          })
-        }
-      }
     }
   )
 

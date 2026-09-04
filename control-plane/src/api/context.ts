@@ -23,6 +23,21 @@ export type AppContext = {
    * so no call site has to branch on whether email exists.
    */
   email: EmailSender
+  /**
+   * Deploys still building, keyed by deployment id.
+   *
+   * A deploy answers as soon as a node is chosen and keeps working afterwards,
+   * so without this the work is unobservable: a shutdown mid-build leaves a row
+   * saying `building` for ever — which is exactly what a killed build looked
+   * like — and a test cannot tell "not finished yet" from "finished and did
+   * nothing". Entries remove themselves when they settle.
+   */
+  deploysInFlight: Map<string, Promise<void>>
+}
+
+/** Wait for every in-flight deploy. Used on shutdown, and by tests. */
+export async function settleDeploys(ctx: AppContext): Promise<void> {
+  await Promise.allSettled([...ctx.deploysInFlight.values()])
 }
 
 export function createContext(
@@ -57,7 +72,10 @@ export function createContext(
 
   const email = createEmailSender(config, log)
 
-  const ctx: Partial<AppContext> = { config, db, sql, redis, heartbeats, builds, github, email }
+  const ctx: Partial<AppContext> = {
+    config, db, sql, redis, heartbeats, builds, github, email,
+    deploysInFlight: new Map(),
+  }
   ctx.tunnels = new TunnelRegistry(ctx as AppContext)
 
   return ctx as AppContext

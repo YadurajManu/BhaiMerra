@@ -218,11 +218,18 @@ async function deployOne(
       `waiting for ${c.bold(service.name)} to come up`,
       async (s) => {
         s.hints([
+          'the image is built on the control plane, for every architecture in the fleet',
+          'building for a different architecture than the control plane is emulated, and slow',
           'the agent picks up desired state on its next poll',
           "a cold image pull takes as long as the node's uplink does",
           'a service with a health check goes running once it passes, not before',
         ])
-        const deadline = Date.now() + 180_000
+        // Long, because this now covers the build as well as the rollout.
+        // The control plane answers as soon as a node is chosen and keeps
+        // building afterwards, so this is the window in which a multi-arch
+        // build has to finish - and an arm64 build emulated on an amd64 host
+        // is measured in tens of minutes, not minutes.
+        const deadline = Date.now() + 45 * 60_000
         while (Date.now() < deadline) {
           const { body } = await request<{ services: Service[] }>(
             'GET',

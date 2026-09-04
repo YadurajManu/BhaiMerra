@@ -13,7 +13,7 @@ import { eq } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 
 import { loadConfig } from '../src/config.js'
-import { createContext, closeContext, type AppContext } from '../src/api/context.js'
+import { createContext, closeContext, settleDeploys, type AppContext } from '../src/api/context.js'
 import { buildServer } from '../src/server.js'
 import { orgs, users, services, deployments } from '../src/db/schema.js'
 import { parseManifest } from '../src/manifest/parse.js'
@@ -122,7 +122,8 @@ describe('internal services', () => {
       headers: { authorization: `Bearer ${token}` },
       payload: {},
     })
-    assert.equal(res.statusCode, 201, res.body)
+    assert.equal(res.statusCode, 202, res.body)
+    await settleDeploys(ctx)
 
     const body = res.json()
     assert.equal(body.url, null, 'an internal service was handed a public URL')
@@ -144,7 +145,8 @@ describe('internal services', () => {
       headers: { authorization: `Bearer ${token}` },
       payload: {},
     })
-    assert.equal(res.statusCode, 201, res.body)
+    assert.equal(res.statusCode, 202, res.body)
+    await settleDeploys(ctx)
     assert.ok(res.json().url?.startsWith('https://'))
 
     const [row] = await ctx.db

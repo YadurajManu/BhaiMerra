@@ -14,7 +14,7 @@ import { eq } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 
 import { loadConfig } from '../src/config.js'
-import { createContext, closeContext, type AppContext } from '../src/api/context.js'
+import { createContext, closeContext, settleDeploys, type AppContext } from '../src/api/context.js'
 import { buildServer } from '../src/server.js'
 import { orgs, users } from '../src/db/schema.js'
 
@@ -169,7 +169,8 @@ services:
       ...auth(),
       payload: {},
     })
-    assert.equal(res.statusCode, 201, res.body)
+    assert.equal(res.statusCode, 202, res.body)
+    await settleDeploys(ctx)
     assert.equal(res.json().placedOn.name, 'test-node')
     assert.ok(!res.body.includes('s3cr3t'), 'the deploy response leaked the value')
   })
