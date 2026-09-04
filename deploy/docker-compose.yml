@@ -196,6 +196,29 @@ services:
       - '${WWW_PORT:-8083}:80'
     # The marketing site. Static, and the only service here with no state.
 
+  caddy:
+    image: caddy:2-alpine
+    container_name: fleet-caddy
+    restart: unless-stopped
+    depends_on:
+      registry: { condition: service_started }
+    ports:
+      # 443 serves the registry. 80 is not a redirect convenience: ACME's
+      # http-01 challenge arrives there, and without it Caddy can never get
+      # a certificate and 443 never comes up.
+      - '80:80'
+      - '443:443'
+    environment:
+      INGRESS_ZONE: ${INGRESS_ZONE:-fleetos.app}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and ACME account keys. Losing this volume means
+      # re-issuing on next start, which Let's Encrypt rate-limits, so it
+      # outlives the container deliberately.
+      - caddydata:/data
+      - caddyconfig:/config
+    profiles: ['registry-tls']
+
   cloudflared:
     image: cloudflare/cloudflared:latest
     container_name: fleet-tunnel
@@ -219,3 +242,5 @@ volumes:
   registrydata:
   builds:
   backups:
+  caddydata:
+  caddyconfig:

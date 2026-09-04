@@ -1,0 +1,29 @@
+# TLS for the container registry, served straight from this box.
+#
+# The registry is the one hostname that must NOT go through the Cloudflare
+# tunnel. Cloudflare's free plan rejects request bodies over 100 MB, and a
+# single image layer routinely exceeds that -- a Node project's node_modules
+# layer is about the smallest real one that does. The push then fails with
+# "413 Payload Too Large" from the edge, which reads like a registry problem
+# and is not: the registry never sees the request.
+#
+# Pulls were never affected, because the limit is on request bodies and a pull
+# is a response. So the symptom is a control plane that builds happily, serves
+# images happily, and cannot push -- for large images only.
+#
+# Docker will not talk to a registry without TLS, so bypassing Cloudflare means
+# terminating TLS here. Caddy gets a real certificate over ACME on port 80,
+# which is why that port is published as well as 443.
+#
+# DNS for this name must be a plain A record to this box with Cloudflare's
+# proxy OFF. Left proxied, the request goes back through the edge and the
+# 100 MB limit comes back with it.
+fleetregistry.{$INGRESS_ZONE} {
+	# Reached over the compose network, so the traffic never leaves the host
+	# even though the client resolved a public name to get here.
+	#
+	# No request-size or timeout tuning below: Caddy imposes no body limit and
+	# no read timeout by default, which is what a registry needs. The limit
+	# this file exists to escape was never Caddy's.
+	reverse_proxy registry:5000
+}
