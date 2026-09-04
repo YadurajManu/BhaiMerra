@@ -465,14 +465,20 @@ export async function serviceRoutes(app: FastifyInstance) {
     { preHandler: requireFleetPermission('service.read') },
     async (req, reply) => {
       const { fleetId, deploymentId } = req.params as { fleetId: string; deploymentId: string }
-      const { explainDeployment, usageToday, DAILY_LIMIT } = await import('../ai/explain.js')
+      const { explainDeployment, usageToday } = await import('../ai/explain.js')
 
       const out = await explainDeployment(app.ctx, { fleetId, deploymentId, userId: req.userId! })
       const used = await usageToday(app.ctx, req.userId!)
 
       // The meter travels with every answer, so the limit is never a surprise
       // that only appears at the moment it stops you.
-      return reply.send({ ...out, usage: { used, limit: DAILY_LIMIT } })
+      // The configured limit, not the default. Reporting the constant while
+      // enforcing the setting would make the meter lie for any operator who
+      // changed it — and a meter you cannot trust is worse than none.
+      return reply.send({
+        ...out,
+        usage: { used, limit: app.ctx.config.AI_DAILY_LIMIT },
+      })
     }
   )
 

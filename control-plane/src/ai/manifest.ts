@@ -27,7 +27,8 @@ import type { AppContext } from '../api/context.js'
  * everybody was getting anyway.
  */
 
-export const DAILY_LIMIT = 5
+/** Default when AI_DAILY_LIMIT is not set. The operator pays; they choose. */
+export const DAILY_LIMIT = 20
 
 /**
  * Something the evidence cannot settle, offered as a choice.
@@ -193,8 +194,9 @@ export async function assistManifest(
   const key = limitKey(opts.userId)
   const used = await ctx.redis.incr(key)
   if (used === 1) await ctx.redis.expire(key, secondsUntilUtcMidnight())
-  if (used > DAILY_LIMIT) {
-    return { status: 'rate_limited', limit: DAILY_LIMIT, resetsInSec: secondsUntilUtcMidnight() }
+  const limit = ctx.config.AI_DAILY_LIMIT ?? DAILY_LIMIT
+  if (used > limit) {
+    return { status: 'rate_limited', limit, resetsInSec: secondsUntilUtcMidnight() }
   }
 
   const refund = async () => {
@@ -287,6 +289,6 @@ export async function assistManifest(
     questions: reply.questions,
     changed: !same(reply.manifest, opts.draft),
     model,
-    usage: { used, limit: DAILY_LIMIT },
+    usage: { used, limit },
   }
 }

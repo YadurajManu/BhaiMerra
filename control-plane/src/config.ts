@@ -34,6 +34,15 @@ const schema = z.object({
   AI_API_KEY: z.string().optional(),
   AI_BASE_URL: z.string().url().default('https://agentrouter.org/v1'),
   AI_MODEL: z.string().default('claude-sonnet-4-8'),
+  /**
+   * How many AI answers one person may generate per day, per feature.
+   *
+   * The operator holds the key and pays for the calls, so this is theirs to
+   * set. Counted separately for each feature — a day spent reading failures
+   * should not stop you generating a manifest — and per person, so one user
+   * cannot exhaust a team's budget.
+   */
+  AI_DAILY_LIMIT: z.coerce.number().int().min(1).max(1000).default(20),
 
   RESEND_API_KEY: z.string().optional(),
   /** Envelope sender. Must be on a domain verified in Resend, or every send 403s. */

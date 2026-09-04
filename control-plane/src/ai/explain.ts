@@ -22,7 +22,8 @@ import { explainWith, type Explanation } from './provider.js'
  * thing standing between a stuck retry loop and a bill. Cache hits do not
  * count, so in practice this is a limit on *new* failures, not on looking.
  */
-export const DAILY_LIMIT = 5
+/** Default when AI_DAILY_LIMIT is not set. The operator pays; they choose. */
+export const DAILY_LIMIT = 20
 
 export type ExplainOutcome =
   | { status: 'ok'; summary: string; steps: string[]; cached: boolean; hits: number; model: string }
@@ -125,7 +126,8 @@ export async function explainDeployment(
   const used = await ctx.redis.incr(key)
   if (used === 1) await ctx.redis.expire(key, secondsUntilUtcMidnight())
 
-  if (used > DAILY_LIMIT) {
+  const limit = ctx.config.AI_DAILY_LIMIT ?? DAILY_LIMIT
+  if (used > limit) {
     return {
       status: 'rate_limited',
       used: used - 1,
