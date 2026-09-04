@@ -39,6 +39,17 @@ export async function request<T = any>(
     throw new CliError('Not signed in. Run `fleet auth login` first.', EXIT.usage)
   }
 
+  // A POST with nothing to send still needs a content type.
+  //
+  // Fastify answers 415 to a POST that arrives without one, so every bodyless
+  // POST from this CLI failed before reaching its route — including `fleet
+  // alerts test`, the command the CLI itself recommends for checking alerts
+  // work before an incident. Sending an empty object costs two bytes and makes
+  // the request well-formed, rather than leaving each such route to remember
+  // to accept a shape nothing sends.
+  const writes = method === 'POST' || method === 'PUT' || method === 'PATCH'
+  const payload = opts.raw ? opts.raw.data : writes || opts.body ? JSON.stringify(opts.body ?? {}) : undefined
+
   const send = async (token?: string) =>
     fetch(profile.api.replace(/\/+$/, '') + path, {
       method,
@@ -46,11 +57,11 @@ export async function request<T = any>(
         ...(token ? { authorization: `Bearer ${token}` } : {}),
         ...(opts.raw
           ? { 'content-type': opts.raw.contentType }
-          : opts.body
+          : payload !== undefined
             ? { 'content-type': 'application/json' }
             : {}),
       },
-      body: opts.raw ? opts.raw.data : opts.body ? JSON.stringify(opts.body) : undefined,
+      body: payload,
       signal: AbortSignal.timeout(20 * 60_000),
     })
 
