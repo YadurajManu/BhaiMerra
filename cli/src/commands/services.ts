@@ -515,6 +515,31 @@ export const initCommand = {
       process.cwd().split('/').pop()?.toLowerCase().replace(/[^a-z0-9-]+/g, '-') ||
       'app'
 
+    // Read the whole repository first. A monorepo, an apps/ directory, or a
+    // service beside a database is the ordinary case, and describing only the
+    // current directory left every one of those to be written out by hand.
+    const { discover, manifestFromDiscovery } = await import('../discover.js')
+    const found = await discover()
+
+    if (found.services.length > 1 || found.databases.length) {
+      const { manifest, questions } = manifestFromDiscovery(found, {
+        fleet: typeof flags.fleet === 'string' ? flags.fleet : undefined,
+        node: typeof flags.node === 'string' ? flags.node : undefined,
+      })
+      await writeFile(path, manifest)
+      console.log(`${c.green('created')} ${path}`)
+      if (found.layout) console.log(c.dim(`  ${found.layout}`))
+      for (const s of found.services) {
+        console.log(c.dim(`  · ${s.name}  ${s.dir}  ${s.detection.label}`))
+      }
+      for (const db of found.databases) {
+        console.log(c.dim(`  · ${db.name} (${db.engine}) — ${db.because}`))
+      }
+      for (const q of questions) console.log(`  ${c.yellow('?')} ${q}`)
+      console.log(c.dim(`\n  check it with: fleet apply --dry-run`))
+      return
+    }
+
     const d = await detect()
 
     // Write a Dockerfile if we generated one and none exists.

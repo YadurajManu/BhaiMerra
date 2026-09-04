@@ -1,4 +1,5 @@
 import { parse as parseYaml } from 'yaml'
+import { safeDatabaseName } from './dbnames.js'
 
 /**
  * docker-compose.yml → fleet.yaml.
@@ -216,13 +217,22 @@ export function composeToFleet(
   const databases: string[] = []
   /** Compose names that became databases, so `depends_on` can point at them. */
   const asDatabase = new Set<string>()
+  /** Compose name -> the name the database is declared under, which differs
+      whenever the compose name would collide with its engine's own env vars. */
+  const dbNames = new Map<string, string>()
+  const takenDbNames = new Set<string>()
 
   // Databases first, so a service's `uses` can reference one by name.
   for (const [name, raw] of Object.entries(servicesRaw)) {
     const svc = (asRecord(raw) ?? {}) as ComposeService
     const image = typeof svc.image === 'string' ? svc.image : ''
     const engine = image ? engineFor(image) : null
-    if (engine) asDatabase.add(name)
+    if (!engine) continue
+    asDatabase.add(name)
+    // Named here, in the pre-pass, not where the database is rendered: a
+    // service declared before it in the file still has to point at the name it
+    // ends up with, and the main loop would not know it yet.
+    dbNames.set(name, safeDatabaseName(name, engine, takenDbNames))
   }
 
   for (const [name, raw] of Object.entries(servicesRaw)) {
@@ -233,7 +243,13 @@ export function composeToFleet(
     if (asDatabase.has(name)) {
       const engine = engineFor(image)!
       const major = versionOf(image)
-      const lines = [`  ${name}:`]
+      const declared = dbNames.get(name)!
+      if (declared !== name) {
+        notes.push(
+          `${name} is declared as "${declared}": a database named after its own engine derives a password secret that collides with the engine's own environment variable, and the manifest is rejected.`
+        )
+      }
+      const lines = [`  ${declared}:`]
       lines.push(`    engine: ${major ? `${engine}@${major}` : engine}`)
       if (dbNode) lines.push(`    node: ${scalar(dbNode)}`)
       else {
@@ -338,7 +354,7 @@ export function composeToFleet(
     const deps = Array.isArray(svc.depends_on)
       ? svc.depends_on.filter((d): d is string => typeof d === 'string')
       : Object.keys(asRecord(svc.depends_on) ?? {})
-    const dbDeps = deps.filter((d) => asDatabase.has(d))
+    const dbDeps = deps.filter((d) => asDatabase.has(d)).map((d) => dbNames.get(d) ?? d)
     const svcDeps = deps.filter((d) => !asDatabase.has(d))
     if (dbDeps.length) lines.push(`    uses: [${dbDeps.join(', ')}]`)
     if (svcDeps.length) {

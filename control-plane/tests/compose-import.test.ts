@@ -22,6 +22,10 @@ import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { composeToFleet } from '../../cli/src/compose.js'
+import { discover, manifestFromDiscovery } from '../../cli/src/discover.js'
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { parseManifest } from '../src/manifest/parse.js'
 
 /** Parse, or fail with the issues the product would have shown the user. */
@@ -129,5 +133,62 @@ services:
       const parsed = mustParse(manifest)
       assert.equal(parsed.databases.length, 1, image)
     }
+  })
+})
+
+
+describe('a discovered repository is a valid manifest too', () => {
+  // Same discipline as the compose importer: the CLI's own tests check the
+  // fields it meant to write, and only the real parser can say whether the
+  // product accepts them. That check found two bugs last time.
+  test('a monorepo with two apps and a database', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'fleet-rt-'))
+    try {
+      await writeFile(
+        join(dir, 'package.json'),
+        JSON.stringify({ name: 'acme', private: true, workspaces: ['apps/*'] })
+      )
+      await mkdir(join(dir, 'apps', 'web'), { recursive: true })
+      await writeFile(
+        join(dir, 'apps', 'web', 'package.json'),
+        JSON.stringify({ name: 'web', scripts: { start: 'next start' }, dependencies: { next: '^14' } })
+      )
+      await mkdir(join(dir, 'apps', 'api'), { recursive: true })
+      await writeFile(
+        join(dir, 'apps', 'api', 'package.json'),
+        JSON.stringify({ name: 'api', scripts: { start: 'node i.js' }, dependencies: { fastify: '^4', pg: '^8' } })
+      )
+      await writeFile(join(dir, 'apps', 'api', '.env.example'), 'LOG_LEVEL=info\nDB_PASSWORD=\n')
+
+      const d = await discover(dir)
+      const { manifest } = manifestFromDiscovery(d, { fleet: 'homelab', node: 'kakashi' })
+      const parsed = mustParse(manifest)
+
+      assert.deepEqual(parsed.services.map((s) => s.name).sort(), ['api', 'db', 'web'])
+      assert.equal(parsed.databases.length, 1)
+      const api = parsed.services.find((s) => s.name === 'api')!
+      assert.ok(api.secrets.includes('DB_PASSWORD'))
+      assert.deepEqual(api.uses, ['db'])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+
+describe('a compose service named after its own engine', () => {
+  test('is renamed rather than producing a manifest the product refuses', () => {
+    // postgres: is what almost every compose file calls it. The derived secret
+    // POSTGRES_PASSWORD then collides with the variable the postgres image
+    // itself reads, and the parser rejects the whole file.
+    const { manifest, notes } = composeToFleet(
+      'services:\n  app: { image: app:1, depends_on: [postgres] }\n  postgres: { image: postgres:16 }',
+      { node: 'n1' }
+    )
+    const parsed = mustParse(manifest)
+    assert.equal(parsed.databases[0]!.name, 'db')
+    const app = parsed.services.find((s) => s.name === 'app')!
+    assert.deepEqual(app.uses, ['db'], 'the dependency follows the rename')
+    assert.ok(notes.some((n) => /is declared as "db"/.test(n)), 'and the rename is explained')
   })
 })
