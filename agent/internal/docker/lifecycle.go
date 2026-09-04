@@ -25,7 +25,13 @@ type RunSpec struct {
 	VolumePath    string
 	ContainerPort int
 	Health        *HealthSpec // nil disables the check
-	Memory        int64       // bytes; 0 means unlimited
+	// ProbedByAgent means health is decided from the node, over the published
+	// host port, and Docker must not run a check of its own. Set whenever the
+	// agent can reach the service; Health is then only used for the case it
+	// cannot — an internal service with no host port, where a probe from
+	// inside the container is still the only route in.
+	ProbedByAgent bool
+	Memory        int64 // bytes; 0 means unlimited
 }
 
 // HealthSpec is what the manifest's `health:` block becomes.
@@ -157,6 +163,44 @@ type healthcheck struct {
 	Retries  int      `json:"Retries"`
 }
 
+// healthcheckFor is the Docker healthcheck a spec should carry, or nil for
+// none. Pure and separate from Create so all three cases can be pinned down in
+// a test rather than only observed against a live daemon.
+//
+// The three are genuinely different:
+//
+//   - ProbedByAgent: the agent asks over the published host port, so Docker's
+//     check is switched OFF explicitly. "NONE" rather than nil, because nil
+//     leaves whatever HEALTHCHECK the image declares in force, and two probes
+//     that can disagree is worse than either alone.
+//   - Health set: no host port to reach, so the probe has to run inside the
+//     container. This is the path that needs wget or curl to exist in the
+//     image, and the reason agent-side probing was written.
+//   - Neither: nil, so the image's own check, if it has one, still applies.
+func healthcheckFor(spec RunSpec) *healthcheck {
+	if spec.ProbedByAgent {
+		return &healthcheck{Test: []string{"NONE"}}
+	}
+	if spec.Health == nil {
+		return nil
+	}
+	interval := spec.Health.IntervalSec
+	if interval <= 0 {
+		interval = 15
+	}
+	timeout := spec.Health.TimeoutSec
+	if timeout <= 0 {
+		timeout = 5
+	}
+	// Docker takes these in nanoseconds.
+	return &healthcheck{
+		Test:     spec.Health.testCommand(),
+		Interval: int64(interval) * int64(time.Second),
+		Timeout:  int64(timeout) * int64(time.Second),
+		Retries:  3,
+	}
+}
+
 type portBinding struct {
 	HostIP   string `json:"HostIp"`
 	HostPort string `json:"HostPort"`
@@ -243,23 +287,7 @@ func (c *Client) Create(ctx context.Context, spec RunSpec) (string, error) {
 		req.HostConfig.Mounts = []mount{{Type: "volume", Source: spec.Volume, Target: target}}
 	}
 
-	if spec.Health != nil {
-		interval := spec.Health.IntervalSec
-		if interval <= 0 {
-			interval = 15
-		}
-		timeout := spec.Health.TimeoutSec
-		if timeout <= 0 {
-			timeout = 5
-		}
-		// Docker takes these in nanoseconds.
-		req.Healthcheck = &healthcheck{
-			Test:     spec.Health.testCommand(),
-			Interval: int64(interval) * int64(time.Second),
-			Timeout:  int64(timeout) * int64(time.Second),
-			Retries:  3,
-		}
-	}
+	req.Healthcheck = healthcheckFor(spec)
 
 	var out createResponse
 	path := fmt.Sprintf("/%s/containers/create?name=%s", c.api(ctx), url.QueryEscape(ContainerName(spec.Service, spec.DeploymentID)))

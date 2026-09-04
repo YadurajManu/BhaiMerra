@@ -210,3 +210,68 @@ describe('conventions without a workspace file', () => {
     await rm(dir, { recursive: true, force: true })
   })
 })
+
+/**
+ * A guessed health path is not a harmless default.
+ *
+ * When it is wrong the probe fails for ever, and the deploy never leaves
+ * "deploying" even though the container is running and serving traffic
+ * correctly. No check at all is strictly better: container state decides and
+ * the service comes up. So the generator only writes one where the framework
+ * genuinely answers there.
+ */
+describe('generated health checks', () => {
+  test('a backend API gets no invented health path', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'fleet-health-api-'))
+    await mkdir(join(dir, 'backend'), { recursive: true })
+    await writeFile(
+      join(dir, 'backend', 'package.json'),
+      JSON.stringify({ name: 'backend', scripts: { start: 'nest start' }, dependencies: { '@nestjs/core': '^10' } })
+    )
+
+    const d = await discover(dir)
+    const { manifest } = manifestFromDiscovery(d, {})
+
+    assert.ok(
+      !/^\s+health: \{ path:/m.test(manifest),
+      'a NestJS app has no /health unless somebody wrote one; guessing it strands the deploy'
+    )
+    assert.match(manifest, /# No health check/, 'the absence should be explained, not silent')
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  test('a frontend keeps the health check it actually answers', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'fleet-health-web-'))
+    await mkdir(join(dir, 'site'), { recursive: true })
+    await writeFile(
+      join(dir, 'site', 'package.json'),
+      JSON.stringify({ name: 'site', scripts: { build: 'vite build' }, dependencies: { vite: '^5' } })
+    )
+
+    const d = await discover(dir)
+    const { manifest } = manifestFromDiscovery(d, {})
+
+    // A built Vite app is served at the root, so this one is not a guess.
+    assert.match(manifest, /^\s+health: \{ path: \/ \}/m)
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  test('a project with its own Dockerfile is not assumed to serve /', async () => {
+    // The case that stranded MedLifeCycle: an existing Dockerfile tells us
+    // nothing about routing, and its API answered 404 at / behind a global
+    // prefix.
+    const dir = await mkdtemp(join(tmpdir(), 'fleet-health-dockerfile-'))
+    await mkdir(join(dir, 'api'), { recursive: true })
+    await writeFile(join(dir, 'api', 'Dockerfile'), 'FROM node:20-bookworm-slim\nEXPOSE 3100\n')
+    await writeFile(join(dir, 'api', 'package.json'), JSON.stringify({ name: 'api', scripts: { start: 'node main.js' } }))
+
+    const d = await discover(dir)
+    const { manifest } = manifestFromDiscovery(d, {})
+
+    assert.ok(
+      !/^\s+health: \{ path:/m.test(manifest),
+      'an existing Dockerfile says nothing about which paths return 2xx'
+    )
+    await rm(dir, { recursive: true, force: true })
+  })
+})

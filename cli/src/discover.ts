@@ -397,7 +397,18 @@ export function manifestFromDiscovery(
     lines.push('    placement: flexible')
     if (s.detection.port !== 80) lines.push(`    container_port: ${s.detection.port}`)
     lines.push(`    resources: { ram: ${s.ramMb}Mi, cpu: 0.5 }`)
-    lines.push(`    health: { path: ${s.detection.healthPath} }`)
+    // Only where the framework genuinely answers at the path. A guessed one
+    // that is wrong does not fall back to "no check" — it fails for ever and
+    // the deploy never leaves "deploying", while the service runs correctly.
+    if (s.detection.healthPath) {
+      lines.push(`    health: { path: ${s.detection.healthPath} }`)
+    } else {
+      lines.push('    # No health check: container state decides whether this')
+      lines.push('    # is up. Add one once you know a path that returns 2xx —')
+      lines.push('    #   health: { path: /healthz }')
+      lines.push('    # Note the probe runs from the node, not inside the')
+      lines.push('    # container, so the image needs nothing installed for it.')
+    }
     if (s.gpu) {
       lines.push('    gpu: true')
       questions.push(`${s.name}: ${s.gpu}, so it asks for a GPU — remove "gpu: true" if it runs on CPU.`)

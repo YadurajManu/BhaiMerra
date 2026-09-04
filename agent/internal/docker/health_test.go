@@ -49,3 +49,51 @@ func TestRunSpecWithoutHealthProducesNoHealthcheck(t *testing.T) {
 		t.Fatal("a spec with no health block should carry no HealthSpec")
 	}
 }
+
+func TestAgentProbedServiceDisablesDockersOwnCheck(t *testing.T) {
+	// "NONE" rather than no healthcheck at all. Left unset, an image that ships
+	// its own HEALTHCHECK keeps running it, and the node would then have two
+	// verdicts about one container that can disagree.
+	hc := healthcheckFor(RunSpec{Service: "api", ProbedByAgent: true})
+	if hc == nil {
+		t.Fatal("a spec probed by the agent must switch Docker's check off explicitly, not leave it unset")
+	}
+	if len(hc.Test) != 1 || hc.Test[0] != "NONE" {
+		t.Fatalf("test = %v, want [NONE]", hc.Test)
+	}
+}
+
+func TestAgentProbingWinsOverAnInContainerSpec(t *testing.T) {
+	// Both set is not a contradiction to resolve at the daemon: the agent's
+	// probe is the one that does not depend on the image's contents.
+	hc := healthcheckFor(RunSpec{
+		Service:       "api",
+		ProbedByAgent: true,
+		Health:        &HealthSpec{Path: "/healthz", Port: 8080},
+	})
+	if len(hc.Test) != 1 || hc.Test[0] != "NONE" {
+		t.Fatalf("test = %v, want the agent's probe to win", hc.Test)
+	}
+}
+
+func TestInternalServiceStillProbesFromInside(t *testing.T) {
+	// No host port to reach it on, so the in-container probe is the only route
+	// left. It keeps the wget/curl dependency, which is why it is the fallback
+	// and not the default.
+	hc := healthcheckFor(RunSpec{Service: "worker", Health: &HealthSpec{Path: "/healthz", Port: 8080}})
+	if hc == nil {
+		t.Fatal("a service with no host port still needs a check")
+	}
+	if hc.Test[0] != "CMD-SHELL" {
+		t.Fatalf("test form = %q, want CMD-SHELL", hc.Test[0])
+	}
+	if hc.Retries != 3 {
+		t.Errorf("retries = %d, want 3", hc.Retries)
+	}
+}
+
+func TestNoHealthLeavesTheImagesOwnCheckAlone(t *testing.T) {
+	if hc := healthcheckFor(RunSpec{Service: "web", Image: "nginx"}); hc != nil {
+		t.Fatalf("healthcheck = %v, want nil so the image's own check still applies", hc)
+	}
+}

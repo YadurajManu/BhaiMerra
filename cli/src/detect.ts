@@ -24,7 +24,19 @@ export type Detection = {
   framework: Framework
   label: string
   port: number
-  healthPath: string
+  /**
+   * Where to probe, or null when nothing here is worth probing.
+   *
+   * Null on purpose, and not a default of "/". A guessed path that is wrong
+   * does not degrade to "no health check" -- it fails every probe for ever,
+   * and the deploy then sits at "deploying" while the service runs and serves
+   * traffic correctly. That is strictly worse than having no check at all,
+   * where container state decides and the service comes up. So a path is
+   * emitted only for frameworks that genuinely answer at the root; /health and
+   * /healthz are conventions, not guarantees, and inventing one for an API
+   * that does not implement it is how a working deploy gets stuck.
+   */
+  healthPath: string | null
   /** Dockerfile contents, or null when the project already has one. */
   dockerfile: string | null
   /** Whether a user-supplied Dockerfile already existed. */
@@ -173,7 +185,7 @@ export async function detect(cwd: string = process.cwd()): Promise<Detection> {
       framework: 'unknown',
       label: 'existing Dockerfile',
       port,
-      healthPath: '/',
+      healthPath: null,
       dockerfile: null,
       hasDockerfile: true,
     }
@@ -218,7 +230,7 @@ export async function detect(cwd: string = process.cwd()): Promise<Detection> {
         framework: 'node',
         label: 'Node.js API',
         port: 3000,
-        healthPath: '/health',
+        healthPath: null,
         dockerfile: NODE_DOCKERFILE,
         hasDockerfile: false,
       }
@@ -263,7 +275,7 @@ export async function detect(cwd: string = process.cwd()): Promise<Detection> {
       framework: 'python',
       label: isFastapi ? 'Python (FastAPI)' : isDjango ? 'Python (Django)' : isFlask ? 'Python (Flask)' : 'Python',
       port: 8000,
-      healthPath: '/health',
+      healthPath: null,
       dockerfile: pythonDF,
       hasDockerfile: false,
     }
@@ -278,7 +290,7 @@ export async function detect(cwd: string = process.cwd()): Promise<Detection> {
       framework: 'go',
       label: 'Go',
       port: 8080,
-      healthPath: '/healthz',
+      healthPath: null,
       dockerfile: GO_DOCKERFILE(moduleName),
       hasDockerfile: false,
     }
@@ -290,7 +302,7 @@ export async function detect(cwd: string = process.cwd()): Promise<Detection> {
       framework: 'rust',
       label: 'Rust',
       port: 8080,
-      healthPath: '/healthz',
+      healthPath: null,
       dockerfile: RUST_DOCKERFILE,
       hasDockerfile: false,
     }
@@ -313,7 +325,7 @@ export async function detect(cwd: string = process.cwd()): Promise<Detection> {
     framework: 'unknown',
     label: 'unknown project',
     port: 3000,
-    healthPath: '/',
+    healthPath: null,
     dockerfile: null,
     hasDockerfile: false,
   }

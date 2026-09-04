@@ -15,6 +15,7 @@ import (
 
 	"github.com/fleet-os/fleet-os/agent/internal/client"
 	"github.com/fleet-os/fleet-os/agent/internal/docker"
+	"github.com/fleet-os/fleet-os/agent/internal/health"
 )
 
 type Engine struct {
@@ -22,6 +23,38 @@ type Engine struct {
 	Client *client.Client
 	NodeID string
 	Log    *slog.Logger
+	// Health probes services over their published host port. Optional: a nil
+	// prober simply leaves Docker's own verdict in place, which is what every
+	// test that does not care about health gets.
+	Health *health.Prober
+}
+
+// probeTargets is the subset of desired state the agent can probe itself:
+// health enabled, a path to ask for, and a host port to ask on.
+func probeTargets(desired *client.DesiredState) []health.Target {
+	if desired == nil {
+		return nil
+	}
+	targets := make([]health.Target, 0, len(desired.Services))
+	for _, svc := range desired.Services {
+		if svc.HealthDisabled || svc.HealthCheckPath == "" || svc.HostPort <= 0 {
+			continue
+		}
+		path := svc.HealthCheckPath
+		if !strings.HasPrefix(path, "/") {
+			path = "/" + path
+		}
+		targets = append(targets, health.Target{
+			DeploymentID: svc.DeploymentID,
+			// Loopback rather than the node's routable address. The port is
+			// published on every interface, but the loopback route is the one
+			// no firewall rule written for outsiders can take away.
+			URL:      fmt.Sprintf("http://127.0.0.1:%d%s", svc.HostPort, path),
+			Interval: time.Duration(svc.HealthInterval) * time.Second,
+			Timeout:  time.Duration(svc.HealthTimeout) * time.Second,
+		})
+	}
+	return targets
 }
 
 type Action struct {
@@ -33,6 +66,13 @@ type Action struct {
 // Reconcile makes one pass: start what should run, replace what is running the
 // wrong deployment, and stop what is no longer wanted.
 func (e *Engine) Reconcile(ctx context.Context, desired *client.DesiredState) ([]Action, error) {
+	// Told before anything is started, so a service that comes up between here
+	// and the next pass is already being watched when its first heartbeat is
+	// assembled.
+	if e.Health != nil {
+		e.Health.Track(probeTargets(desired))
+	}
+
 	// Reconciliation is the one path that cannot proceed without Docker, so
 	// this is where an auto-start is worth attempting. Policy inside
 	// PingOrStart decides whether it actually happens — by default it will not
@@ -173,12 +213,23 @@ func (e *Engine) start(ctx context.Context, svc client.DesiredService, registryA
 		spec.Memory = int64(svc.MemoryMb) * 1024 * 1024
 	}
 
+	// Where the control plane published a host port, the agent probes the
+	// service from the node and Docker's own check is switched off. Where it
+	// did not — an internal service, reachable only on the fleet network — the
+	// in-container probe is still the only way in, so it stays. That fallback
+	// depends on the image carrying wget or curl, which is exactly the
+	// dependency agent-side probing exists to remove; it survives only because
+	// no probe at all would be worse.
 	if !svc.HealthDisabled && svc.HealthCheckPath != "" {
-		spec.Health = &docker.HealthSpec{
-			Path:        svc.HealthCheckPath,
-			Port:        containerPort,
-			IntervalSec: svc.HealthInterval,
-			TimeoutSec:  svc.HealthTimeout,
+		if svc.HostPort > 0 {
+			spec.ProbedByAgent = true
+		} else {
+			spec.Health = &docker.HealthSpec{
+				Path:        svc.HealthCheckPath,
+				Port:        containerPort,
+				IntervalSec: svc.HealthInterval,
+				TimeoutSec:  svc.HealthTimeout,
+			}
 		}
 	}
 
@@ -251,6 +302,12 @@ func (e *Engine) List(ctx context.Context) ([]client.Container, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Refreshed here because this is the only place the answer is read: the
+	// heartbeat carries it, and a verdict nobody asked for is wasted work.
+	if e.Health != nil {
+		e.Health.Probe(ctx)
+	}
+
 	out := make([]client.Container, 0, len(summaries))
 	for _, c := range summaries {
 		name := c.Labels[docker.LabelService]
@@ -263,6 +320,14 @@ func (e *Engine) List(ctx context.Context) ([]client.Container, error) {
 			DeploymentID: c.Labels[docker.LabelDeployment],
 		}
 		container.Health = healthFromStatus(c.Status)
+		// The agent's own probe wins where it has one. Docker's verdict is
+		// only a fallback now, and an empty status means "not probed", which
+		// must never be read as unhealthy.
+		if e.Health != nil {
+			if s := e.Health.Status(container.DeploymentID); s != "" {
+				container.Health = s
+			}
+		}
 		out = append(out, container)
 	}
 	return out, nil

@@ -24,6 +24,7 @@ import (
 	"github.com/fleet-os/fleet-os/agent/internal/client"
 	"github.com/fleet-os/fleet-os/agent/internal/diagnostics"
 	"github.com/fleet-os/fleet-os/agent/internal/docker"
+	"github.com/fleet-os/fleet-os/agent/internal/health"
 	"github.com/fleet-os/fleet-os/agent/internal/heartbeat"
 	"github.com/fleet-os/fleet-os/agent/internal/reconcile"
 	"github.com/fleet-os/fleet-os/agent/internal/sampler"
@@ -117,6 +118,10 @@ func run() error {
 		Client: api,
 		NodeID: saved.NodeID,
 		Log:    log,
+		// Health is decided here, on the node, rather than by a shell inside
+		// each container — so it no longer depends on the user's base image
+		// happening to contain wget or curl.
+		Health: health.New(),
 	}
 
 	// Volume backups. The control plane hands them over with the desired
