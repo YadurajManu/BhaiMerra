@@ -1,6 +1,6 @@
 {
   "name": "@yadurajfleetos/cli",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "description": "Fleet OS command-line interface for deploying and orchestrating services on user-owned hardware",
   "type": "module",
   "license": "MIT",
