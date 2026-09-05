@@ -121,11 +121,22 @@ export async function chat(
     schema?: { name: string; schema: Record<string, unknown> }
     /** Set internally once a provider has shown it cannot enforce one. */
     noSchema?: boolean
+    /**
+     * Abort this call after this long, overriding the default.
+     *
+     * For a caller working to its own deadline. An investigation bounded at
+     * eighty-five seconds still returned 524 because the bound was checked
+     * between calls and not during one: eighty-four seconds elapsed plus a
+     * twenty-six second call to a laptop-hosted model is a hundred and ten,
+     * and Cloudflare closes the connection at about a hundred. A budget that
+     * only one of the two parties honours is not a budget.
+     */
+    timeoutMs?: number
   } = {},
   fetchImpl: typeof fetch = fetch
 ): Promise<{ content: string; tokensIn: number; tokensOut: number }> {
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? TIMEOUT_MS)
 
   try {
     const res = await fetchImpl(`${config.baseUrl.replace(/\/$/, '')}/chat/completions`, {

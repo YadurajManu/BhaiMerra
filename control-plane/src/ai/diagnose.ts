@@ -375,10 +375,20 @@ export async function diagnose(
       // Small budget per turn: a step is one tool call or one answer, and a
       // model given room to write an essay in the middle of an investigation
       // spends the conversation's tokens on prose nobody reads.
+      // Never let one call outlive the investigation's own budget. A slow
+      // provider -- a model on somebody's laptop answers in tens of seconds --
+      // otherwise turns a bounded loop into an unbounded one, and the caller
+      // gets a gateway timeout instead of the partial answer this was careful
+      // to preserve.
+      const remaining = DEADLINE_MS - (Date.now() - startedAt)
       const reply = await chat(
         { apiKey, baseUrl, model },
         messages,
-        { maxTokens: 900, schema: STEP_SCHEMA as unknown as { name: string; schema: Record<string, unknown> } },
+        {
+          maxTokens: 900,
+          timeoutMs: Math.max(5_000, remaining),
+          schema: STEP_SCHEMA as unknown as { name: string; schema: Record<string, unknown> },
+        },
         fetchImpl
       )
       content = reply.content
@@ -450,6 +460,11 @@ export async function diagnose(
     // the final request, where nothing ever read it.
     const left = Math.min(
       MAX_CALLS - step - 1,
+      // How many more calls actually fit. Measured rather than assumed: the
+      // same loop runs against a hosted model answering in two seconds and a
+      // local one answering in twenty-six, and a step budget that ignores the
+      // difference is right for one of them.
+      Math.max(0, Math.floor((DEADLINE_MS - (Date.now() - startedAt)) / Math.max(1, (Date.now() - startedAt) / (step + 1)))),
       // Whichever runs out first. A model told it has nine lookups left while
       // eighty of its eighty-five seconds are gone will use them, and the
       // answer it was composing never gets sent.
