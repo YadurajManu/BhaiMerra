@@ -160,6 +160,59 @@ function firstObject(raw: string): string | null {
   return null
 }
 
+/**
+ * The shape of one step, for providers that can constrain their output.
+ *
+ * The same protocol the prompt describes, said in the one language a decoder
+ * can enforce. Asking politely does not work: Groq refused a request outright
+ * with "Tool choice is none, but model called a tool", and a local Gemma
+ * answered `<|tool_call>call:services{}<tool_call|>`. Both produce exactly this
+ * when handed a schema.
+ *
+ * Deliberately loose about which of the two keys appears -- requiring one would
+ * force a lookup where an answer was due. The parser decides that; this only
+ * guarantees it is JSON of the right shape.
+ */
+const STEP_SCHEMA = {
+  name: 'step',
+  schema: {
+    type: 'object',
+    properties: {
+      lookup: {
+        type: 'object',
+        properties: { name: { type: 'string' }, args: { type: 'object' } },
+        required: ['name'],
+      },
+      answer: {
+        type: 'object',
+        properties: {
+          summary: { type: 'string' },
+          findings: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { claim: { type: 'string' }, evidence: { type: 'string' } },
+              required: ['claim', 'evidence'],
+            },
+          },
+          next: { type: 'array', items: { type: 'string' } },
+          fix: {
+            type: 'object',
+            properties: {
+              service: { type: 'string' },
+              field: { type: 'string' },
+              value: {},
+              why: { type: 'string' },
+            },
+            required: ['service', 'field', 'why'],
+          },
+        },
+        required: ['summary'],
+      },
+    },
+  },
+} as const
+
 /** Pull one step out of a reply that may be fenced or padded with prose. */
 function parseStep(content: string): {
   call?: { tool: string; args: Record<string, unknown> }
@@ -319,7 +372,12 @@ export async function diagnose(
       // Small budget per turn: a step is one tool call or one answer, and a
       // model given room to write an essay in the middle of an investigation
       // spends the conversation's tokens on prose nobody reads.
-      const reply = await chat({ apiKey, baseUrl, model }, messages, { maxTokens: 900 }, fetchImpl)
+      const reply = await chat(
+        { apiKey, baseUrl, model },
+        messages,
+        { maxTokens: 900, schema: STEP_SCHEMA as unknown as { name: string; schema: Record<string, unknown> } },
+        fetchImpl
+      )
       content = reply.content
     } catch (err) {
       return {

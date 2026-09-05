@@ -300,4 +300,44 @@ describe('the diagnosis loop', () => {
     // about nothing.
     assert.match(last, /Result of services/, 'recent evidence stays in full')
   })
+
+  test('the step protocol is sent as a schema, not only asked for in words', async () => {
+    // Asking does not work. Groq refused a request outright with "Tool choice
+    // is none, but model called a tool", and a local Gemma answered
+    // `<|tool_call>call:services{}<tool_call|>` in place of the JSON the prompt
+    // requested. Both produce exactly the right object when handed a schema.
+    const provider = scripted(['{"answer":{"summary":"fine","findings":[],"next":[]}}'])
+    await diagnose(ctx, { fleetId, question: 'why?' }, provider.impl)
+
+    const sent = JSON.parse(provider.prompts()[0]!)
+    assert.equal(sent.response_format?.type, 'json_schema')
+    assert.equal(sent.response_format?.json_schema?.name, 'step')
+  })
+
+  test('a provider that cannot constrain output is asked again without one', async () => {
+    // Not universal, and refusing to work against an endpoint that lacks it
+    // would trade a real capability for a nicety.
+    let calls = 0
+    const impl = (async (_url: string, init: RequestInit) => {
+      calls++
+      const body = JSON.parse(String(init.body))
+      if (body.response_format) {
+        return new Response(
+          JSON.stringify({ error: { message: 'response_format is not supported' } }),
+          { status: 400, headers: { 'content-type': 'application/json' } }
+        )
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: '{"answer":{"summary":"fine","findings":[],"next":[]}}' } }],
+          usage: {},
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      )
+    }) as unknown as typeof fetch
+
+    const out = await diagnose(ctx, { fleetId, question: 'why?' }, impl)
+    assert.equal(out.status, 'ok', 'the investigation must survive a provider without schemas')
+    assert.equal(calls, 2, 'once with, once without')
+  })
 })

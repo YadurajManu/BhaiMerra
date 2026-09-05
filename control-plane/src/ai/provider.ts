@@ -102,7 +102,26 @@ function waitHint(res: Response, message: string): number | null {
 export async function chat(
   config: ProviderConfig,
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
-  opts: { maxTokens?: number; temperature?: number; noRetry?: boolean } = {},
+  opts: {
+    maxTokens?: number
+    temperature?: number
+    noRetry?: boolean
+    retriesLeft?: number
+    /**
+     * A JSON schema the reply must satisfy, when the provider can enforce one.
+     *
+     * Constrained decoding rather than instruction. Every model this has run
+     * against reaches for its own tool-calling syntax when a prompt describes
+     * lookups: Groq refused a request outright with "Tool choice is none, but
+     * model called a tool", and a local Gemma answered
+     * `<|tool_call>call:services{}<tool_call|>` in place of the JSON asked for.
+     * Both produce exactly the right object when handed a schema. A prompt
+     * asks; this decides.
+     */
+    schema?: { name: string; schema: Record<string, unknown> }
+    /** Set internally once a provider has shown it cannot enforce one. */
+    noSchema?: boolean
+  } = {},
   fetchImpl: typeof fetch = fetch
 ): Promise<{ content: string; tokensIn: number; tokensOut: number }> {
   const controller = new AbortController()
@@ -120,6 +139,14 @@ export async function chat(
         temperature: opts.temperature ?? 0.1,
         max_tokens: opts.maxTokens ?? 1500,
         messages,
+        ...(opts.schema && !opts.noSchema
+          ? {
+              response_format: {
+                type: 'json_schema',
+                json_schema: { name: opts.schema.name, schema: opts.schema.schema },
+              },
+            }
+          : {}),
       }),
       signal: controller.signal,
     })
@@ -156,12 +183,50 @@ export async function chat(
       // Per-minute budgets are the common case on a free tier, and the wait is
       // usually seconds — the provider prints it, in the header or in prose.
       // Failing instead throws away whatever the caller had just done: an
-      // interactive answer, a review somebody waited for. Once, and only when
-      // told a short wait; anything longer belongs to the caller to decide.
+      // interactive answer, a review somebody waited for.
+      //
+      // More than once, because a per-minute budget is a rolling window and one
+      // wait of the hinted length is often not enough to clear it. An
+      // investigation makes a dozen requests against 8000 tokens a minute and
+      // hit this repeatedly: the provider said "try again in 585ms", the single
+      // retry did, the window had not moved, and the whole investigation was
+      // thrown away over a wait measured in seconds. Bounded by a count and by
+      // the hint being short, so a provider that is genuinely down still fails
+      // fast rather than being asked forever.
       const retryAfter = waitHint(res, body.error?.message ?? '')
-      if (res.status === 429 && retryAfter !== null && retryAfter <= 30_000 && !opts.noRetry) {
-        await new Promise((resolve) => setTimeout(resolve, retryAfter + 250))
-        return chat(config, messages, { ...opts, noRetry: true }, fetchImpl)
+      const retriesLeft = opts.retriesLeft ?? 3
+      if (
+        res.status === 429 &&
+        retryAfter !== null &&
+        retryAfter <= 30_000 &&
+        !opts.noRetry &&
+        retriesLeft > 0
+      ) {
+        // A little longer each time. The hint says when this request could have
+        // been served, not when the next one can, and retrying on exactly the
+        // hint lands in the same full window again.
+        const backoff = retryAfter + 250 * (4 - retriesLeft) ** 2
+        await new Promise((resolve) => setTimeout(resolve, backoff))
+        return chat(config, messages, { ...opts, retriesLeft: retriesLeft - 1 }, fetchImpl)
+      }
+
+      // A provider that cannot constrain its output is asked again without a
+      // schema, rather than failing.
+      //
+      // `response_format: json_schema` is the difference between a reply this
+      // can parse and one it cannot, so it is worth asking for -- but it is not
+      // universal, and refusing to work against an endpoint that lacks it would
+      // trade a real capability for a nicety. The prompt still asks for JSON,
+      // and the parser still copes with a model that answers in its own
+      // dialect; the schema just removes the need to.
+      const message = body.error?.message ?? ''
+      if (
+        res.status === 400 &&
+        opts.schema &&
+        !opts.noSchema &&
+        /response_format|json_schema|schema/i.test(message)
+      ) {
+        return chat(config, messages, { ...opts, noSchema: true }, fetchImpl)
       }
 
       // The provider's own message, because "500" tells the operator nothing

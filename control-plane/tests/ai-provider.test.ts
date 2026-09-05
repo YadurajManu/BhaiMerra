@@ -216,10 +216,12 @@ describe('a rate limit that says when to come back', () => {
     assert.equal(out.summary, 'ok')
   })
 
-  test('is waited out only once', async () => {
-    // A provider that is still limited after the wait is limited for longer
-    // than we should sit here. Retrying forever would hold an interactive
-    // command open with nothing to show for it.
+  test('is waited out a bounded number of times', async () => {
+    // A per-minute budget is a rolling window, and one wait of the hinted
+    // length often does not clear it — an investigation making a dozen requests
+    // hit this repeatedly and was thrown away over a wait measured in seconds.
+    // So more than once, and still bounded: a provider that is genuinely down
+    // must fail fast rather than be asked forever.
     let calls = 0
     const impl = (async () => {
       calls++
@@ -230,7 +232,7 @@ describe('a rate limit that says when to come back', () => {
     }) as unknown as typeof fetch
 
     await assert.rejects(() => explainWith(CONFIG, CONTEXT, impl), /429/)
-    assert.equal(calls, 2, 'one attempt, one retry, then report it')
+    assert.equal(calls, 4, 'one attempt, three retries, then report it')
   })
 
   test('a rate limit with no wait given is not retried', async () => {
