@@ -23,7 +23,15 @@ import type { AppContext } from '../api/context.js'
  * because an agent looping on a fleet's data is a bill, not an investigation.
  */
 
-export const MAX_CALLS = 8
+/**
+ * How many lookups one investigation may make.
+ *
+ * Raised from eight when a real question ran out mid-investigation: there are
+ * nine lookups now, and an answer that also has to name a manifest change needs
+ * room to check the change is right rather than plausible. Still bounded --
+ * an agent looping on a fleet's data is a bill, not an investigation.
+ */
+export const MAX_CALLS = 12
 
 export type Finding = {
   /** What is claimed. */
@@ -306,9 +314,29 @@ export async function diagnose(
     const result = await callTool(ctx, opts.fleetId, call.tool, call.args)
 
     messages.push({ role: 'assistant', content })
+
+    // Tell it what it has left.
+    //
+    // The loop used to run to exhaustion without warning, and a model that does
+    // not know its budget cannot spend it: the run that prompted this made
+    // eight lookups, each individually reasonable, and never stopped to answer.
+    // Knowing the last step is the last one is what turns a wandering
+    // investigation into a partial answer, and a partial answer with evidence
+    // is worth a great deal more than "stopped after 12 calls".
+    // Lookups available to the turn that reads this message, not to the one
+    // that just finished. Counting the wrong one put the final warning after
+    // the final request, where nothing ever read it.
+    const left = MAX_CALLS - step - 1
+    const budget =
+      left === 1
+        ? '\n\nThis is your last lookup. Use it on something that would settle the question, or answer now with what you have and say plainly what you could not establish.'
+        : left <= 3
+          ? `\n\n${left} lookups left. Ask for something that would settle it, or answer with what you have.`
+          : ''
+
     messages.push({
       role: 'user',
-      content: `Result of ${call.tool}(${JSON.stringify(call.args)}):\n${forPrompt(result)}`,
+      content: `Result of ${call.tool}(${JSON.stringify(call.args)}):\n${forPrompt(result)}${budget}`,
     })
   }
 

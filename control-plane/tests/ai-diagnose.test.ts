@@ -269,4 +269,17 @@ describe('the diagnosis loop', () => {
     if (out.status !== 'ok') return
     assert.equal(out.fix, undefined)
   })
+
+  test('it is told when its lookups are running out', async () => {
+    // The loop used to run to exhaustion without warning, and a model that does
+    // not know its budget cannot spend it: a real question made eight
+    // individually reasonable lookups and never stopped to answer. Knowing the
+    // last step is the last one turns that into a partial answer, which with
+    // evidence is worth far more than "stopped after 12 calls".
+    const provider = scripted(['{"lookup":{"name":"services","args":{}}}'])
+    await diagnose(ctx, { fleetId, question: 'why?' }, provider.impl)
+
+    const last = provider.prompts().at(-1)!
+    assert.match(last, /last lookup/, 'the final turn must say it is the final turn')
+  })
 })
