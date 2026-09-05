@@ -53,6 +53,20 @@ type Container struct {
 	// containers of the same service are up at once, and the service name alone
 	// cannot say which of them the control plane is waiting on.
 	DeploymentID string `json:"deployment_id,omitempty"`
+	// What the node found when it asked this container which paths it answers.
+	// Only ever present for a service with no health check configured, and only
+	// once the sweep has settled -- see agent/internal/health/discover.go.
+	HealthCandidates []HealthCandidate `json:"health_candidates,omitempty"`
+}
+
+// HealthCandidate is one path the node tried on a service that declares no
+// health check, and what came back. Declared here rather than reused from the
+// health package so the wire format stays self-describing.
+type HealthCandidate struct {
+	Path string `json:"path"`
+	// 0 when the request itself failed -- refused, timed out, no listener.
+	Status int `json:"status"`
+	Bytes  int `json:"bytes"`
 }
 
 type Heartbeat struct {

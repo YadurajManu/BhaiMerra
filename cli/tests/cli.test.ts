@@ -2,7 +2,7 @@ import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 import { parseArgs, KNOWN_FLAGS, nearestFlag } from '../src/args.js'
 import { etaLine, progressLine } from '../src/progress.js'
-import { alertCheck } from '../src/commands/doctor.js'
+import { alertCheck, healthPathCheck } from '../src/commands/doctor.js'
 import { table, relativeTime, mb, visibleLength, truncate, c } from '../src/render.js'
 import { readFileSync, readdirSync } from 'node:fs'
 
@@ -244,3 +244,57 @@ describe('the alerts check', () => {
     assert.ok(!c.detail.includes('slack'), 'a disabled channel is not protection')
   })
 })
+describe('the health paths a service actually answers on', () => {
+  const svc = (name: string, discoveredHealth: Array<{ path: string; status: number; bytes: number }> | null) => ({
+    id: name, name, domain: null, hostname: null, current: null, discoveredHealth,
+  })
+
+  test('suggests the path a service answers on but does not declare', () => {
+    // `fleet init` writes "Add one once you know a path that returns 2xx" and
+    // leaves the reader to find out. The node found out.
+    const check = healthPathCheck([
+      svc('backend', [
+        { path: '/health', status: 404, bytes: 0 },
+        { path: '/healthz', status: 200, bytes: 2 },
+        { path: '/', status: 404, bytes: 0 },
+      ]),
+    ])
+    assert.equal(check.state, 'warn')
+    assert.match(check.detail, /backend → \/healthz/)
+    assert.match(check.remedy!, /health: \{ path: \/healthz \}/)
+  })
+
+  test('prefers a dedicated endpoint over root when both answer', () => {
+    // A check that renders the whole application every ten seconds for the life
+    // of the deployment is the worse of two working answers. The node tries
+    // them in preference order; this must not re-sort them.
+    const check = healthPathCheck([
+      svc('web', [
+        { path: '/healthz', status: 200, bytes: 2 },
+        { path: '/', status: 200, bytes: 41_000 },
+      ]),
+    ])
+    assert.match(check.detail, /web → \/healthz/)
+  })
+
+  test('a service where nothing answered is not a warning', () => {
+    // Its manifest is already correct — it says container state decides, and
+    // that is now a measured fact rather than a default. Telling somebody their
+    // correct configuration is a problem is how a health report gets ignored.
+    const check = healthPathCheck([
+      svc('backend', [
+        { path: '/health', status: 404, bytes: 0 },
+        { path: '/', status: 404, bytes: 0 },
+      ]),
+    ])
+    assert.equal(check.state, 'ok')
+    assert.match(check.detail, /answered nothing/)
+  })
+
+  test('says nothing about services that were never swept', () => {
+    const check = healthPathCheck([svc('api', null)])
+    assert.equal(check.state, 'ok')
+    assert.match(check.detail, /declares a health check, or none has been swept/)
+  })
+})
+

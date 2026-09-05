@@ -374,3 +374,38 @@ func TestStartingIsNotDeferredOnTheFirstPass(t *testing.T) {
 		t.Errorf("expected the container to be created immediately, got %v", d.created)
 	}
 }
+
+func TestProbeAndDiscoverPartitionTheServices(t *testing.T) {
+	// Every service belongs to exactly one of them. One in neither is a service
+	// nothing ever asks about -- which is how a backend with no health check
+	// went unexamined while `fleet init` told its author to go and find a path
+	// that returns 2xx. One in both would be probed continuously *and* swept as
+	// though it were not.
+	desired := &client.DesiredState{Services: []client.DesiredService{
+		{Name: "probed", DeploymentID: "d1", HostPort: 3001, HealthCheckPath: "/healthz"},
+		{Name: "no-path", DeploymentID: "d2", HostPort: 3002},
+		{Name: "off", DeploymentID: "d3", HostPort: 3003, HealthCheckPath: "/", HealthDisabled: true},
+		// No published port: neither can reach it, and that is not a partition
+		// failure -- there is nothing to ask.
+		{Name: "internal", DeploymentID: "d4"},
+	}}
+
+	probed := map[string]bool{}
+	for _, t := range probeTargets(desired) {
+		probed[t.DeploymentID] = true
+	}
+	swept := map[string]bool{}
+	for _, t := range discoverTargets(desired) {
+		swept[t.DeploymentID] = true
+	}
+
+	for _, id := range []string{"d1", "d2", "d3"} {
+		if probed[id] == swept[id] {
+			t.Errorf("deployment %s is in %s — probe and discover must partition",
+				id, map[bool]string{true: "both sets", false: "neither set"}[probed[id]])
+		}
+	}
+	if probed["d4"] || swept["d4"] {
+		t.Error("a service with no published port cannot be reached by either")
+	}
+}

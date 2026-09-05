@@ -58,6 +58,21 @@ const heartbeat = z.object({
         health: z.string().max(32).optional(),
         /** Absent from agents older than the health-gated rollout. */
         deployment_id: z.string().max(64).optional(),
+        /**
+         * What the node found when it asked this container which paths it
+         * answers. Only sent for a service with no health check configured,
+         * and only once the sweep has settled.
+         */
+        health_candidates: z
+          .array(
+            z.object({
+              path: z.string().max(128),
+              status: z.number().int().min(0).max(599),
+              bytes: z.number().int().min(0),
+            })
+          )
+          .max(16)
+          .optional(),
       })
     )
     .max(200)
@@ -297,6 +312,45 @@ export async function agentRoutes(app: FastifyInstance) {
         dockerOk: hb.runtime.docker_available,
       },
     ]).catch((err) => req.log.warn({ err, nodeId }, 'telemetry sample not stored'))
+
+    // Record what the node found when it asked a service which paths it
+    // answers, for the services that declare no health check.
+    //
+    // The agent keeps reporting a settled sweep on every heartbeat, because it
+    // has no way to know this arrived. So the write is conditional on the
+    // value actually changing: one indexed read per heartbeat that carries
+    // candidates, and no write at all once it is stored. An unconditional
+    // update here would be a row rewritten every five seconds, for ever, for a
+    // fact that does not change.
+    const sweeps = hb.containers.filter((c) => c.deployment_id && c.health_candidates)
+    if (sweeps.length) {
+      const rows = await db
+        .select({
+          serviceId: deployments.serviceId,
+          deploymentId: deployments.id,
+          stored: services.discoveredHealth,
+        })
+        .from(deployments)
+        .innerJoin(services, eq(services.id, deployments.serviceId))
+        .where(
+          and(
+            eq(deployments.nodeId, nodeId),
+            inArray(
+              deployments.id,
+              sweeps.map((c) => c.deployment_id!)
+            )
+          )
+        )
+
+      for (const row of rows) {
+        const found = sweeps.find((c) => c.deployment_id === row.deploymentId)!.health_candidates!
+        if (JSON.stringify(row.stored) === JSON.stringify(found)) continue
+        await db
+          .update(services)
+          .set({ discoveredHealth: found, discoveredHealthAt: new Date() })
+          .where(eq(services.id, row.serviceId))
+      }
+    }
 
     // Promote deployments the agent reports as actually serving. The control
     // plane schedules; only the node can say whether the container came up, so

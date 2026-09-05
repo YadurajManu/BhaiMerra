@@ -7,11 +7,78 @@ import type { Flags } from '../args.js'
 type CheckState = 'ok' | 'warn' | 'fail'
 type Check = { state: CheckState; label: string; detail: string; remedy?: string }
 type Node = { name: string; status: string; live: boolean; lastHeartbeatAt: string | null; agentVersion: string | null; diskMb: number; telemetry: { diskUsedMb: number; runtime: { dockerAvailable: boolean; dockerVersion?: string; dockerError?: string; registryStatus?: 'ok' | 'failed' | 'not_tested'; registryError?: string; lastReconcileError?: string } } | null }
-type Service = { id: string; name: string; domain: string | null; hostname: string | null; current: { status: string } | null }
+type Candidate = { path: string; status: number; bytes: number }
+type Service = {
+  id: string
+  name: string
+  domain: string | null
+  hostname: string | null
+  current: { status: string } | null
+  healthDisabled?: boolean
+  discoveredHealth?: Candidate[] | null
+}
 type Deployment = { status: string; failureReason: string | null; startedAt: string }
 
 const icon = (state: CheckState) =>
   state === 'ok' ? glyph.ok : state === 'warn' ? glyph.warn : glyph.fail
+
+/**
+ * Services that answer on a health path but do not declare one.
+ *
+ * `fleet init` writes this into every manifest it generates:
+ *
+ *   # No health check: container state decides whether this is up.
+ *   # Add one once you know a path that returns 2xx —
+ *
+ * That is a research task handed to the reader, about a program the node is
+ * already running. The node does the research now -- it asks the container
+ * which of a handful of paths answers -- and this is where the answer is
+ * reported, because the sweep settles seconds after a deploy returns and there
+ * is nothing useful to say while it is still running.
+ *
+ * The negative result is deliberately not a warning. A service where nothing
+ * answered is a service whose manifest is already correct, and telling somebody
+ * their correct configuration is a problem is how a health report gets ignored.
+ *
+ * Separated from the command so both outcomes can be tested without a control
+ * plane -- and the one that matters is the suggestion, which a fleet whose
+ * services all declare health checks never produces.
+ */
+export function healthPathCheck(services: Service[]): {
+  state: 'ok' | 'warn'
+  label: string
+  detail: string
+  remedy?: string
+} {
+  const swept = services.filter((s) => s.discoveredHealth)
+  const answering = swept
+    .map((s) => ({
+      name: s.name,
+      // The first 2xx-3xx, which is the order the node tried them in: a
+      // dedicated endpoint before "/", because a check that renders the whole
+      // application every ten seconds is the worse of two working answers.
+      path: s.discoveredHealth!.find((c) => c.status >= 200 && c.status < 400)?.path,
+    }))
+    .filter((s): s is { name: string; path: string } => Boolean(s.path))
+
+  if (!answering.length) {
+    return {
+      state: 'ok',
+      label: 'health paths',
+      detail: swept.length
+        ? `${swept.length} service(s) without a health check answered nothing — container state is the only evidence, as declared.`
+        : 'Every service declares a health check, or none has been swept yet.',
+    }
+  }
+
+  const named = answering.map((s) => `${s.name} → ${s.path}`).join(', ')
+  return {
+    state: 'warn',
+    label: 'health paths',
+    detail: `${named}. These answer 2xx but declare no health check, so a deploy is confirmed on container state alone.`,
+    remedy: `Add \`health: { path: ${answering[0]!.path} }\` to ${answering[0]!.name} in fleet.yaml. Without one, a container that starts and then fails every request still counts as a successful deploy.`,
+  }
+}
 
 /**
  * A build failure carries the whole buildx transcript. One summary line
@@ -236,6 +303,7 @@ export const doctorCommand = {
             remedy: 'Set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY, restart the control plane, then connect repositories in Dashboard → Settings.',
           }
     )
+    checks.push(healthPathCheck(result.services))
     checks.push(alertCheck(result.alerts))
 
     checks.push({ state: 'ok', label: 'control-plane version', detail: result.health.version ?? 'version not reported' })

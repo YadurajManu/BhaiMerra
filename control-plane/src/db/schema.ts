@@ -345,6 +345,21 @@ export const services = pgTable(
     /** For images with no shell to probe with. */
     healthDisabled: boolean('health_disabled').notNull().default(false),
     /**
+     * What the node found when it asked this service which paths it answers.
+     *
+     * Only ever populated for a service that declares no health check, because
+     * that is the only case where the answer is unknown. `fleet init` writes
+     * "Add one once you know a path that returns 2xx" into every manifest it
+     * generates -- a research task handed to a reader, about a program the node
+     * is already running. This is that research, done once and kept.
+     *
+     * An empty array is a result, not an absence: it means every candidate was
+     * tried and none answered, which is true of a backend serving under a route
+     * prefix and is exactly what a manifest should record rather than guess at.
+     */
+    discoveredHealth: jsonb('discovered_health').$type<Array<{ path: string; status: number; bytes: number }>>(),
+    discoveredHealthAt: timestamp('discovered_health_at', { withTimezone: true }),
+    /**
      * Plain configuration from the manifest's `env:` block. Not sensitive by
      * definition — anything that is belongs in `secrets` and is referenced by
      * name from `secretRefs`.

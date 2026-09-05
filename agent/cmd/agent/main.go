@@ -139,7 +139,8 @@ func run() error {
 		// Health is decided here, on the node, rather than by a shell inside
 		// each container — so it no longer depends on the user's base image
 		// happening to contain wget or curl.
-		Health: health.New(),
+		Health:   health.New(),
+		Discover: health.NewDiscoverer(),
 	}
 
 	// Volume backups. The control plane hands them over with the desired

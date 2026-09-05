@@ -27,6 +27,10 @@ type Engine struct {
 	// prober simply leaves Docker's own verdict in place, which is what every
 	// test that does not care about health gets.
 	Health *health.Prober
+	// Discover asks a service with no health check which paths it answers, so
+	// the manifest can record one instead of telling the reader to go and find
+	// out. Optional, like Health: nil simply reports no candidates.
+	Discover *health.Discoverer
 
 	// Whether a reconcile pass has completed since this process started.
 	//
@@ -63,6 +67,39 @@ func probeTargets(desired *client.DesiredState) []health.Target {
 	return targets
 }
 
+// discoverTargets is the exact complement of probeTargets: every service the
+// agent is not already probing, because nobody has said what to ask for.
+//
+// Written as the complement rather than as its own set of conditions on
+// purpose. The two must partition the services between them -- a service in
+// neither is one nothing ever asks about, and a service in both would be
+// probed continuously and swept as though it were not. Deriving one from the
+// other is what keeps that true when either changes.
+//
+// This deliberately includes a service whose check is switched off explicitly.
+// The sweep settles once per deployment either way, and what it finds is worth
+// reporting: "you turned the check off, and for what it is worth /health does
+// answer" is information, and the manifest is still the operator's to decide.
+func discoverTargets(desired *client.DesiredState) []health.DiscoverTarget {
+	if desired == nil {
+		return nil
+	}
+	targets := make([]health.DiscoverTarget, 0, len(desired.Services))
+	for _, svc := range desired.Services {
+		probed := !svc.HealthDisabled && svc.HealthCheckPath != ""
+		if probed || svc.HostPort <= 0 {
+			continue
+		}
+		targets = append(targets, health.DiscoverTarget{
+			DeploymentID: svc.DeploymentID,
+			// Loopback, for the same reason the prober uses it: it is the one
+			// route no firewall rule written for outsiders can take away.
+			BaseURL: fmt.Sprintf("http://127.0.0.1:%d", svc.HostPort),
+		})
+	}
+	return targets
+}
+
 type Action struct {
 	Service string
 	Verb    string // started | replaced | stopped | unchanged | held | failed
@@ -77,6 +114,9 @@ func (e *Engine) Reconcile(ctx context.Context, desired *client.DesiredState) ([
 	// assembled.
 	if e.Health != nil {
 		e.Health.Track(probeTargets(desired))
+	}
+	if e.Discover != nil {
+		e.Discover.Sweep(ctx, discoverTargets(desired))
 	}
 
 	// Reconciliation is the one path that cannot proceed without Docker, so
@@ -342,6 +382,18 @@ func (e *Engine) List(ctx context.Context) ([]client.Container, error) {
 		e.Health.Probe(ctx)
 	}
 
+	var discovered map[string][]client.HealthCandidate
+	if e.Discover != nil {
+		discovered = make(map[string][]client.HealthCandidate)
+		for id, found := range e.Discover.Results() {
+			wire := make([]client.HealthCandidate, 0, len(found))
+			for _, c := range found {
+				wire = append(wire, client.HealthCandidate{Path: c.Path, Status: c.Status, Bytes: c.Bytes})
+			}
+			discovered[id] = wire
+		}
+	}
+
 	out := make([]client.Container, 0, len(summaries))
 	for _, c := range summaries {
 		name := c.Labels[docker.LabelService]
@@ -361,6 +413,9 @@ func (e *Engine) List(ctx context.Context) ([]client.Container, error) {
 			if s := e.Health.Status(container.DeploymentID); s != "" {
 				container.Health = s
 			}
+		}
+		if found, ok := discovered[container.DeploymentID]; ok {
+			container.HealthCandidates = found
 		}
 		out = append(out, container)
 	}
