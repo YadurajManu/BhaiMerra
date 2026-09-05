@@ -58,6 +58,8 @@ const heartbeat = z.object({
         health: z.string().max(32).optional(),
         /** Absent from agents older than the health-gated rollout. */
         deployment_id: z.string().max(64).optional(),
+        /** Steady-state memory, cache excluded. Absent until the node samples. */
+        memory_mb: z.number().int().min(0).max(4_194_304).optional(),
         /**
          * What the node found when it asked this container which paths it
          * answers. Only sent for a service with no health check configured,
@@ -313,6 +315,42 @@ export async function agentRoutes(app: FastifyInstance) {
       },
     ]).catch((err) => req.log.warn({ err, nodeId }, 'telemetry sample not stored'))
 
+    // Raise the observed memory peak where this heartbeat beat it.
+    //
+    // Conditional on beating it, so the write decays to nothing: a service
+    // settles into a steady state within minutes and never writes again. An
+    // unconditional update would be a row per service rewritten every five
+    // seconds to store a number that stopped changing.
+    const measured = hb.containers.filter((c) => c.deployment_id && c.memory_mb)
+    if (measured.length) {
+      const rows = await db
+        .select({
+          serviceId: deployments.serviceId,
+          deploymentId: deployments.id,
+          peak: services.observedRamPeakMb,
+        })
+        .from(deployments)
+        .innerJoin(services, eq(services.id, deployments.serviceId))
+        .where(
+          and(
+            eq(deployments.nodeId, nodeId),
+            inArray(
+              deployments.id,
+              measured.map((c) => c.deployment_id!)
+            )
+          )
+        )
+
+      for (const row of rows) {
+        const mb = measured.find((c) => c.deployment_id === row.deploymentId)!.memory_mb!
+        if (row.peak !== null && row.peak >= mb) continue
+        await db
+          .update(services)
+          .set({ observedRamPeakMb: mb })
+          .where(eq(services.id, row.serviceId))
+      }
+    }
+
     // Record what the node found when it asked a service which paths it
     // answers, for the services that declare no health check.
     //
@@ -397,6 +435,15 @@ export async function agentRoutes(app: FastifyInstance) {
               .update(deployments)
               .set({ status: 'running', finishedAt: new Date() })
               .where(eq(deployments.id, row.id))
+
+            // A new release is a new program, and its predecessor's appetite
+            // says nothing about it. Clearing the peak here rather than
+            // letting it carry over is what stops one memory-hungry release
+            // inflating the reservation advice for every version after it.
+            await tx
+              .update(services)
+              .set({ observedRamPeakMb: null, observedRamSince: new Date() })
+              .where(eq(services.id, row.serviceId))
 
             await tx
               .update(deployments)

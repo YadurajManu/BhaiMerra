@@ -561,3 +561,49 @@ func (c *Client) Inspect(ctx context.Context, name string) (*ContainerState, err
 	}
 	return state, nil
 }
+
+// MemoryUsage is what a container is actually using, in megabytes.
+//
+// The number the manifest guesses at. `fleet init` writes `ram: 512Mi` because
+// 512Mi is a round number, and the scheduler then plans capacity around that
+// figure for the life of the service -- on this fleet, 512Mi reserved against a
+// steady 60MB and 20MB, which is invisible on one node and is the difference
+// between fitting and `no_eligible_node` on a fleet where it matters.
+//
+// Docker reports a cache-inclusive figure and a cache line separately. The
+// cache is page cache the kernel will drop under pressure, so counting it would
+// report a service using nearly its whole limit when it is using very little of
+// it -- the same reading `docker stats` shows, and for the same reason it
+// subtracts it.
+func (c *Client) MemoryUsage(ctx context.Context, name string) (int, error) {
+	var out struct {
+		MemoryStats struct {
+			Usage uint64 `json:"usage"`
+			Stats struct {
+				// cgroup v2 and v1 spell it differently, and a node running
+				// either must produce the same answer.
+				InactiveFile      uint64 `json:"inactive_file"`
+				TotalInactiveFile uint64 `json:"total_inactive_file"`
+			} `json:"stats"`
+		} `json:"memory_stats"`
+	}
+	// stream=false and one-shot=true: without one-shot Docker collects two
+	// samples a second apart to compute a CPU delta nothing here reads, and
+	// that second would be spent once per container on every sample.
+	path := "/" + c.api(ctx) + "/containers/" + url.PathEscape(name) + "/stats?stream=false&one-shot=true"
+	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return 0, err
+	}
+
+	cache := out.MemoryStats.Stats.TotalInactiveFile
+	if cache == 0 {
+		cache = out.MemoryStats.Stats.InactiveFile
+	}
+	usage := out.MemoryStats.Usage
+	if cache > usage {
+		// A stats read that straddles a reclaim can report more cache than
+		// usage. Zero is wrong, but it is not negative-wrong.
+		return 0, nil
+	}
+	return int((usage - cache) / (1 << 20)), nil
+}

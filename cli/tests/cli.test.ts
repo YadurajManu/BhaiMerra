@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { parseArgs, KNOWN_FLAGS, nearestFlag } from '../src/args.js'
 import { etaLine, progressLine } from '../src/progress.js'
 import { alertCheck, healthPathCheck } from '../src/commands/doctor.js'
+import { tuneRam, asQuantity, type Observed } from '../src/tune.js'
 import { table, relativeTime, mb, visibleLength, truncate, c } from '../src/render.js'
 import { readFileSync, readdirSync } from 'node:fs'
 
@@ -298,3 +299,64 @@ describe('the health paths a service actually answers on', () => {
   })
 })
 
+
+describe('what a service should reserve, from what it used', () => {
+  const HOUR = 3_600_000
+  const now = Date.parse('2026-09-05T12:00:00Z')
+  const svc = (o: Partial<Observed> = {}): Observed => ({
+    name: 'backend',
+    requestRamMb: 512,
+    observedRamPeakMb: 60,
+    observedRamSince: new Date(now - 48 * HOUR).toISOString(),
+    ...o,
+  })
+
+  test('advises shrinking a reservation the service never approaches', () => {
+    // The real numbers from this fleet: 512Mi reserved, ~60MB used.
+    const a = tuneRam(svc(), now)
+    assert.equal(a.verdict, 'advise')
+    if (a.verdict !== 'advise') return
+    assert.equal(a.from, 512)
+    assert.equal(a.to, 128, 'double the peak, rounded to a number a person would write')
+  })
+
+  test('refuses to advise from an observation too short to mean anything', () => {
+    // A service watched for four minutes has not been observed, it has been
+    // glanced at. Nothing that runs a nightly job has shown its peak yet, and
+    // advising from that is how a tuned fleet starts OOM-killing at 3am.
+    const a = tuneRam(svc({ observedRamSince: new Date(now - 4 * 60_000).toISOString() }), now)
+    assert.equal(a.verdict, 'too-soon')
+  })
+
+  test('says nothing at all about a service never measured', () => {
+    const a = tuneRam(svc({ observedRamPeakMb: null }), now)
+    assert.equal(a.verdict, 'no-data')
+  })
+
+  test('never advises shrinking below the peak', () => {
+    // The reservation is the container's hard limit. Trimming to the bone is
+    // how a tuning tool gets run exactly once.
+    for (const peak of [1, 30, 60, 100, 200, 255]) {
+      const a = tuneRam(svc({ observedRamPeakMb: peak }), now)
+      if (a.verdict !== 'advise') continue
+      assert.ok(a.to > peak, `advised ${a.to}MB for a service that peaked at ${peak}MB`)
+    }
+  })
+
+  test('warns rather than trims when a service is near its limit', () => {
+    // Not a saving. A service peaking at four fifths of its reservation is one
+    // traffic spike from being killed, and that is the finding.
+    const a = tuneRam(svc({ observedRamPeakMb: 450 }), now)
+    assert.equal(a.verdict, 'tight')
+  })
+
+  test('leaves a reservation that is already about right alone', () => {
+    const a = tuneRam(svc({ requestRamMb: 128, observedRamPeakMb: 60 }), now)
+    assert.equal(a.verdict, 'fits')
+  })
+
+  test('writes megabytes the way a manifest does', () => {
+    assert.equal(asQuantity(128), '128Mi')
+    assert.equal(asQuantity(1024), '1Gi')
+  })
+})

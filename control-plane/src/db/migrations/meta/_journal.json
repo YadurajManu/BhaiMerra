@@ -141,6 +141,13 @@
       "when": 1788590772163,
       "tag": "0019_discovered_health",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1788590772164,
+      "tag": "0020_observed_ram",
+      "breakpoints": true
     }
   ]
 }

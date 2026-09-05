@@ -360,6 +360,30 @@ export const services = pgTable(
     discoveredHealth: jsonb('discovered_health').$type<Array<{ path: string; status: number; bytes: number }>>(),
     discoveredHealthAt: timestamp('discovered_health_at', { withTimezone: true }),
     /**
+     * The most memory this service has been seen using, in megabytes.
+     *
+     * The peak and not the average, because that is the statistic a
+     * reservation is made of: a reservation below the peak is an OOM kill, and
+     * one far above it is capacity the scheduler plans around and never uses.
+     * A spike that raises this is therefore conservative in the safe direction.
+     *
+     * Kept as a running maximum rather than a time series. The question is
+     * "what does this need", which is one number, and a samples table would be
+     * a row per service per five seconds for ever to answer it.
+     */
+    observedRamPeakMb: integer('observed_ram_peak_mb'),
+    /**
+     * When the current observation began -- set at promotion, because the peak
+     * belongs to the release that produced it. A new image is a new program,
+     * and its predecessor's appetite says nothing about it.
+     *
+     * Also what makes the reading refusable: an observation four minutes old
+     * is not a basis for a reservation, and `fleet tune` needs to know the
+     * difference between "it peaks at 60MB" and "it has peaked at 60MB so far
+     * today".
+     */
+    observedRamSince: timestamp('observed_ram_since', { withTimezone: true }),
+    /**
      * Plain configuration from the manifest's `env:` block. Not sensitive by
      * definition — anything that is belongs in `secrets` and is referenced by
      * name from `secretRefs`.

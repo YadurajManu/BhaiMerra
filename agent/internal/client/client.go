@@ -53,6 +53,9 @@ type Container struct {
 	// containers of the same service are up at once, and the service name alone
 	// cannot say which of them the control plane is waiting on.
 	DeploymentID string `json:"deployment_id,omitempty"`
+	// Steady-state memory in megabytes, cache excluded. Absent when the node
+	// has not sampled yet, which is not the same as zero.
+	MemoryMb int `json:"memory_mb,omitempty"`
 	// What the node found when it asked this container which paths it answers.
 	// Only ever present for a service with no health check configured, and only
 	// once the sweep has settled -- see agent/internal/health/discover.go.

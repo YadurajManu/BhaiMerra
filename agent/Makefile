@@ -1,4 +1,4 @@
-VERSION ?= 0.2.3
+VERSION ?= 0.2.4
 LDFLAGS := -s -w -X main.Version=$(VERSION)
 OUT     := dist
 

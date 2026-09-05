@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fleet-os/fleet-os/agent/internal/client"
@@ -31,6 +32,17 @@ type Engine struct {
 	// the manifest can record one instead of telling the reader to go and find
 	// out. Optional, like Health: nil simply reports no candidates.
 	Discover *health.Discoverer
+
+	// Last known memory per container, and when it was taken.
+	//
+	// Sampled on its own cadence rather than per heartbeat. Docker's stats
+	// endpoint is not free, the heartbeat runs every five seconds, and a
+	// reservation is decided from a steady state -- so a minute-old reading is
+	// exactly as useful as a fresh one and costs the heartbeat nothing.
+	memMu    sync.Mutex
+	memory   map[string]int
+	memoryAt time.Time
+	memBusy  bool
 
 	// Whether a reconcile pass has completed since this process started.
 	//
@@ -98,6 +110,61 @@ func discoverTargets(desired *client.DesiredState) []health.DiscoverTarget {
 		})
 	}
 	return targets
+}
+
+// MemorySampleInterval is how often each container's usage is re-read.
+//
+// A reservation covers a steady state, and a steady state does not move in a
+// minute. The cost of a shorter interval is a stats call per container per
+// node, for ever, to watch a number that barely changes.
+const MemorySampleInterval = 60 * time.Second
+
+// memorySnapshot returns the last readings, and starts a refresh if they are
+// stale.
+//
+// Asynchronous on purpose: this runs on the heartbeat path, and a node whose
+// Docker is slow to answer must not delay its heartbeat past the point the
+// control plane calls it down. The first heartbeat after startup carries no
+// memory at all, which is honest -- nothing has been measured yet.
+func (e *Engine) memorySnapshot(ctx context.Context, names []string) map[string]int {
+	e.memMu.Lock()
+	snapshot := make(map[string]int, len(e.memory))
+	for k, v := range e.memory {
+		snapshot[k] = v
+	}
+	stale := time.Since(e.memoryAt) >= MemorySampleInterval
+	start := stale && !e.memBusy
+	if start {
+		e.memBusy = true
+	}
+	e.memMu.Unlock()
+
+	if !start {
+		return snapshot
+	}
+
+	go func() {
+		fresh := make(map[string]int, len(names))
+		for _, name := range names {
+			// One at a time. These are local socket calls against a daemon
+			// that is also building and running containers, and a burst of
+			// them from a node with twenty services is a worse neighbour than
+			// a sample that takes a moment longer.
+			mb, err := e.Docker.MemoryUsage(ctx, name)
+			if err != nil {
+				continue
+			}
+			fresh[name] = mb
+		}
+
+		e.memMu.Lock()
+		e.memory = fresh
+		e.memoryAt = time.Now()
+		e.memBusy = false
+		e.memMu.Unlock()
+	}()
+
+	return snapshot
 }
 
 type Action struct {
@@ -382,6 +449,14 @@ func (e *Engine) List(ctx context.Context) ([]client.Container, error) {
 		e.Health.Probe(ctx)
 	}
 
+	names := make([]string, 0, len(summaries))
+	for _, c := range summaries {
+		if len(c.Names) > 0 {
+			names = append(names, strings.TrimPrefix(c.Names[0], "/"))
+		}
+	}
+	memory := e.memorySnapshot(ctx, names)
+
 	var discovered map[string][]client.HealthCandidate
 	if e.Discover != nil {
 		discovered = make(map[string][]client.HealthCandidate)
@@ -416,6 +491,11 @@ func (e *Engine) List(ctx context.Context) ([]client.Container, error) {
 		}
 		if found, ok := discovered[container.DeploymentID]; ok {
 			container.HealthCandidates = found
+		}
+		if len(c.Names) > 0 {
+			if mb, ok := memory[strings.TrimPrefix(c.Names[0], "/")]; ok {
+				container.MemoryMb = mb
+			}
 		}
 		out = append(out, container)
 	}

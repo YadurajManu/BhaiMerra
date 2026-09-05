@@ -41,6 +41,7 @@ const GROUPS: Array<[string, Array<[string, string]>]> = [
       ['services', 'List services and where they are running'],
       ['nodes', 'List nodes'],
       ['where <service>', 'Explain where a service would be placed, and why'],
+      ['tune', 'Compare each reservation with the memory the service actually used'],
       ['deployments <service>', 'Deployment history'],
       ['logs <service> --follow', 'Follow the latest agent-reported container tail'],
       ['events', 'Unified event timeline'],
