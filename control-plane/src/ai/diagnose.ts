@@ -33,6 +33,21 @@ import type { AppContext } from '../api/context.js'
  */
 export const MAX_CALLS = 12
 
+/**
+ * How long an investigation may take, whatever it has left to ask.
+ *
+ * Cloudflare gives an origin about a hundred seconds before it answers 524, and
+ * a diagnosis that exceeds it returns nothing at all -- no summary, no
+ * findings, not even the list of what it looked at. The step budget alone does
+ * not bound this: twelve lookups against a slow model is comfortably past it,
+ * and raising the step count is what pushed a working command over the edge.
+ *
+ * Eighty-five seconds leaves room for the final answer to be composed and sent
+ * inside the window. A partial answer that arrives beats a complete one that
+ * does not.
+ */
+export const DEADLINE_MS = 85_000
+
 export type Finding = {
   /** What is claimed. */
   claim: string
@@ -252,7 +267,19 @@ export async function diagnose(
   /** Whether the last reply was already a re-ask, so one slip costs a turn and not the investigation. */
   let retried = false
 
+  const startedAt = Date.now()
+
   for (let step = 0; step < MAX_CALLS; step++) {
+    // Out of time rather than out of steps. Reported the same way, because to
+    // a reader they are the same thing: it stopped, and here is what it saw.
+    if (Date.now() - startedAt > DEADLINE_MS) {
+      return {
+        status: 'inconclusive',
+        reason: `Stopped after ${Math.round((Date.now() - startedAt) / 1000)}s without reaching an answer.`,
+        calls,
+      }
+    }
+
     let content: string
     try {
       // Small budget per turn: a step is one tool call or one answer, and a
@@ -326,9 +353,15 @@ export async function diagnose(
     // Lookups available to the turn that reads this message, not to the one
     // that just finished. Counting the wrong one put the final warning after
     // the final request, where nothing ever read it.
-    const left = MAX_CALLS - step - 1
+    const left = Math.min(
+      MAX_CALLS - step - 1,
+      // Whichever runs out first. A model told it has nine lookups left while
+      // eighty of its eighty-five seconds are gone will use them, and the
+      // answer it was composing never gets sent.
+      Math.max(0, Math.round((DEADLINE_MS - (Date.now() - startedAt)) / 8_000))
+    )
     const budget =
-      left === 1
+      left <= 1
         ? '\n\nThis is your last lookup. Use it on something that would settle the question, or answer now with what you have and say plainly what you could not establish.'
         : left <= 3
           ? `\n\n${left} lookups left. Ask for something that would settle it, or answer with what you have.`
