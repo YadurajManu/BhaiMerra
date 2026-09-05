@@ -220,11 +220,16 @@ export async function chat(
       // and the parser still copes with a model that answers in its own
       // dialect; the schema just removes the need to.
       const message = body.error?.message ?? ''
+      //
+      // "Failed to generate JSON" counts. A provider that accepts the schema
+      // and then cannot satisfy it has failed in the same way as one that
+      // rejected it outright, and from here the remedy is identical: ask again
+      // without it and let the parser cope, which it was written to do.
       if (
         res.status === 400 &&
         opts.schema &&
         !opts.noSchema &&
-        /response_format|json_schema|schema/i.test(message)
+        /response_format|json_schema|schema|failed to generate/i.test(message)
       ) {
         return chat(config, messages, { ...opts, noSchema: true }, fetchImpl)
       }

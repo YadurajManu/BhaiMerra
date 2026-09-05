@@ -196,12 +196,15 @@ const STEP_SCHEMA = {
             },
           },
           next: { type: 'array', items: { type: 'string' } },
+          // `value` is deliberately absent from the schema. It is genuinely
+          // any scalar or null, which some validators will not express, and a
+          // schema a provider rejects buys nothing: parseFix checks the type
+          // anyway. Constrain what can be constrained cheaply.
           fix: {
             type: 'object',
             properties: {
               service: { type: 'string' },
               field: { type: 'string' },
-              value: {},
               why: { type: 'string' },
             },
             required: ['service', 'field', 'why'],
