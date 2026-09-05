@@ -59,6 +59,7 @@ What you can ask for:
   placements {service}            — why the scheduler moved it, and when
   history {service}               — what people and the system did to it: deployed, stopped, restarted, rolled back, with who and how long ago
   probe {service}                 — fetch its public address: status, size, first bytes
+  context {service}               — the files the builder was given for its last build, oddities first
 
 How to work:
 
@@ -67,6 +68,8 @@ Establish what is true before guessing what is wrong. For a named service, ask f
 Separate what is true now from what was true. Deployments and history come back newest first, and older entries describe a fleet that has since changed: a run of failures during an outage an hour ago does not explain a service that is down this minute. Before concluding that something is broken, check whether somebody simply stopped it — on a small fleet that is the most common reason of all, and it leaves no failure, no container and no error anywhere except the history.
 
 Look for disagreement. The control plane's view and the node's are both available, and most real failures live in the gap: a deployment marked running whose container the node never mentions, a container the node calls unhealthy while it serves traffic, a service reported running that answers 502.
+
+A build that failed is about what went in. Ask for the context before theorising about the Dockerfile: the archive is assembled on someone's machine and is not the directory they think it is. A service whose Dockerfile globs -- COPY *.csproj . , COPY *.json . -- copies whatever matches, and Docker's globs count a leading dot where a shell does not, so a stray ._name file becomes a second match nobody can see from the source tree.
 
 A 200 is not proof. Check the size and first bytes — a static site replaced by its web server's welcome page returns 200 and about 900 bytes.
 

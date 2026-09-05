@@ -76,7 +76,19 @@ export const cleanReason = (text: string): string =>
  */
 export async function openDeployment(
   ctx: AppContext,
-  input: { serviceId: string; nodeId: string | null; gitSha: string | null }
+  input: {
+    serviceId: string
+    nodeId: string | null
+    gitSha: string | null
+    /**
+     * What the builder was given, when this deploy uploaded a context.
+     *
+     * Copied onto the row here because it is the last moment it exists: the
+     * extracted context and its listing are both removed when the build ends,
+     * and a build failure cannot be explained without knowing what went in.
+     */
+    buildContext?: { entries: string[]; total: number; bytes: number } | null
+  }
 ): Promise<string> {
   const [row] = await ctx.db
     .insert(deployments)
@@ -84,6 +96,7 @@ export async function openDeployment(
       serviceId: input.serviceId,
       nodeId: input.nodeId,
       gitSha: input.gitSha,
+      buildContext: input.buildContext ?? null,
       status: 'queued',
     })
     .returning({ id: deployments.id })

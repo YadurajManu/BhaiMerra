@@ -1,0 +1,16 @@
+-- What the builder was actually given.
+--
+-- A listing, never the files. The extracted context is deleted the moment a
+-- build ends, on both the success and failure paths, because customer source is
+-- held only for as long as it takes to build it -- so the one piece of evidence
+-- a failed build cannot be explained without disappears with it.
+--
+-- The case that motivated it: a .NET service failed `dotnet restore` with
+-- "this folder contains more than one project or solution file" against a
+-- directory holding exactly one. The second was `._Worker.csproj`, an
+-- AppleDouble member that existed only inside the uploaded archive -- invisible
+-- to the Mac that produced it, written out as a real file by GNU tar here, and
+-- matched by `COPY *.csproj .` because Go's globs count a leading dot where a
+-- shell does not. Every lookup a diagnosis can make reads this database or a
+-- node's heartbeat, and that file was in neither.
+ALTER TABLE deployments ADD COLUMN IF NOT EXISTS build_context jsonb;

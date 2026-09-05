@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, sql } from 'drizzle-orm'
+import { and, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm'
 import { auditLog, deployments, nodes, placementEvents, services } from '../db/schema.js'
 import type { AppContext } from '../api/context.js'
 
@@ -229,6 +229,54 @@ export const TOOLS = {
         secondsAgo: Math.round((Date.now() - r.createdAt.getTime()) / 1000),
       }))
     )
+  },
+
+  /**
+   * What the builder was actually given for a service's last build.
+   *
+   * The blind spot this closes: every other lookup reads the database or a
+   * node's heartbeat, and a build runs against an archive that lives on neither
+   * and is deleted when the build ends. A .NET service failed `dotnet restore`
+   * with "this folder contains more than one project or solution file" against
+   * a directory holding exactly one -- the second was `._Worker.csproj`, an
+   * AppleDouble member that existed only inside the upload. The diagnosis
+   * reached the right conclusion, named the right Dockerfile line, and sent the
+   * reader to inspect a source directory that was innocent, because the file it
+   * needed to see was somewhere it could not look.
+   *
+   * Oddities come first in the listing, so the entry that explains a build is
+   * not the one truncation drops.
+   */
+  async context(ctx: AppContext, fleetId: string, args: { service: string }): Promise<ToolResult> {
+    const svc = await findService(ctx, fleetId, args.service)
+    if (!svc) return fail(`no service named "${args.service}" in this fleet`)
+
+    const [row] = await ctx.db
+      .select({ buildContext: deployments.buildContext, startedAt: deployments.startedAt })
+      .from(deployments)
+      .where(and(eq(deployments.serviceId, svc.id), isNotNull(deployments.buildContext)))
+      .orderBy(desc(deployments.startedAt))
+      .limit(1)
+
+    if (!row?.buildContext) {
+      return ok({
+        service: svc.name,
+        note: 'no build context recorded — this service deploys a prebuilt image, or its last build predates context recording',
+      })
+    }
+
+    const { entries, total, bytes } = row.buildContext
+    return ok({
+      service: svc.name,
+      uploadedAt: row.startedAt.toISOString(),
+      bytes,
+      fileCount: total,
+      // Files a person did not knowingly add, called out rather than left for
+      // the reader to spot among three hundred paths.
+      unexpected: entries.filter((e) => (e.split('/').pop() ?? e).startsWith('._')),
+      files: entries,
+      truncated: total > entries.length ? total - entries.length : 0,
+    })
   },
 
   /** Why the scheduler moved something, and where it went. */

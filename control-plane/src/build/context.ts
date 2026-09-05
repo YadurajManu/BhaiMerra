@@ -11,7 +11,7 @@
  * same way it builds a pushed commit, for every architecture its nodes have.
  */
 import { spawn } from 'node:child_process'
-import { mkdir, rm } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { ApiError } from '../api/errors.js'
@@ -25,6 +25,75 @@ export type UploadedContext = {
   id: string
   /** Absolute path the builder uses as its context root. */
   path: string
+  listing: ContextListing
+}
+
+/**
+ * What the builder was actually given.
+ *
+ * Not the files — a listing. The context itself is deleted the moment a build
+ * ends, on both paths, because customer source is held only for as long as it
+ * takes to build it. This keeps the one thing a failed build cannot be
+ * explained without, at a cost of kilobytes and no source at all.
+ *
+ * The reason it exists: a .NET service failed `dotnet restore` with "this
+ * folder contains more than one project or solution file" against a directory
+ * holding exactly one. The second was `._Worker.csproj`, an AppleDouble member
+ * that existed only inside the uploaded archive — invisible to the Mac that
+ * produced it, materialised as a real file by GNU tar here, and matched by
+ * `COPY *.csproj .` because Go's globs count a leading dot. Every lookup a
+ * diagnosis can make reads the database or the node, and this file was in
+ * neither, so the loop reached the right conclusion and could not finish it.
+ */
+export type ContextListing = {
+  /**
+   * Entries, oddities first.
+   *
+   * Ordered rather than sorted, because a listing is read to spot what should
+   * not be there. Truncating a thousand-file context alphabetically would drop
+   * `._Worker.csproj` on the floor precisely when it is the answer.
+   */
+  entries: string[]
+  /** How many entries the archive held, before the cap above. */
+  total: number
+  /** Compressed size of the upload. */
+  bytes: number
+}
+
+/**
+ * Entries that are worth seeing first.
+ *
+ * AppleDouble members and dotfiles at the context root: things a person did not
+ * knowingly put in a build context, and the ones that break a build when a
+ * Dockerfile globs.
+ */
+function unusual(entry: string): boolean {
+  const name = entry.replace(/^\.\//, '')
+  const base = name.split('/').pop() ?? name
+  return base.startsWith('._') || (base.startsWith('.') && !name.includes('/'))
+}
+
+/** How many entries to keep. A context of ten thousand files is a mistake in
+ *  itself, and the first few hundred plus a count says so. */
+const MAX_ENTRIES = 300
+
+/** Where a listing waits for the deploy that uses it. Beside the context
+ *  directory rather than inside it, so it never reaches the builder. */
+function listingPath(workdir: string, id: string): string {
+  return `${contextPath(workdir, id)}.listing.json`
+}
+
+/** The listing recorded for a context, or null once it has been disposed. */
+export async function readContextListing(
+  workdir: string,
+  id: string
+): Promise<ContextListing | null> {
+  if (!ID.test(id)) return null
+  try {
+    return JSON.parse(await readFile(listingPath(workdir, id), 'utf8')) as ContextListing
+  } catch {
+    return null
+  }
 }
 
 /** Where an upload lives. Separate from `checkouts/` so cleanup cannot confuse them. */
@@ -71,10 +140,13 @@ export async function extractContext(
 
   const listing = await runTar(['-tzf', '-'], undefined, archive)
   let hasDockerfile = false
+  const odd: string[] = []
+  const rest: string[] = []
 
   for (const raw of listing.split('\n')) {
     const entry = raw.trim()
     if (!entry) continue
+    if (entry !== './') (unusual(entry) ? odd : rest).push(entry)
     if (entry.startsWith('/') || entry.startsWith('~')) {
       throw ApiError.unprocessable('unsafe_context', `The archive contains an absolute path: ${entry}`)
     }
@@ -96,9 +168,17 @@ export async function extractContext(
     )
   }
 
+  const total = odd.length + rest.length
+  const recorded: ContextListing = {
+    entries: [...odd, ...rest].slice(0, MAX_ENTRIES),
+    total,
+    bytes: archive.length,
+  }
+
   const id = randomUUID()
   const path = contextPath(workdir, id)
   await mkdir(path, { recursive: true })
+  await writeFile(listingPath(workdir, id), JSON.stringify(recorded))
 
   // --no-same-owner: the archive records the uploader's uids, which mean
   // nothing here and would fail as a non-root process anyway.
@@ -118,7 +198,7 @@ export async function extractContext(
   // and, in a build context, has never once been intended.
   await runTar(['-xzf', '-', '-C', path, '--no-same-owner', '--exclude=._*'], path, archive)
 
-  return { id, path }
+  return { id, path, listing: recorded }
 }
 
 /**
@@ -131,6 +211,9 @@ export async function extractContext(
 export async function disposeContext(workdir: string, id: string): Promise<void> {
   if (!ID.test(id)) return
   await rm(contextPath(workdir, id), { recursive: true, force: true }).catch(() => {})
+  // The listing outlives the source only as far as the deployment row it was
+  // copied onto; the sidecar goes with the files it described.
+  await rm(listingPath(workdir, id), { force: true }).catch(() => {})
 }
 
 function runTar(args: string[], cwd: string | undefined, input: Buffer): Promise<string> {

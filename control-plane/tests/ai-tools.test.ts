@@ -22,6 +22,8 @@ let ctx: AppContext
 let fleetId: string
 let otherFleetId: string
 let orgId: string
+let apiId: string
+let nodeId: string
 /** Hostnames are unique across the whole table, and this database is not reset
     between runs — a fixed one works exactly once and then fails for ever. */
 const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -43,6 +45,7 @@ before(async () => {
       agentTokenHash: hashToken(newAgentToken()), status: 'online', agentVersion: '0.2.2',
     })
     .returning()
+  nodeId = node!.id
 
   const [svc] = await ctx.db
     .insert(services)
@@ -51,6 +54,7 @@ before(async () => {
       requestRamMb: 512, compatibleArches: ['amd64'], hostname: `api-${runId}.example.invalid`,
     })
     .returning()
+  apiId = svc!.id
 
   // One failure and one success, so "how did it end" has something to say.
   await ctx.db.insert(deployments).values([
@@ -133,6 +137,49 @@ describe('the tools a diagnosis can call', () => {
     const out = await callTool(ctx, fleetId, 'history', { service: 'secret-api' })
     assert.equal(out.ok, false)
     if (!out.ok) assert.match(out.error, /no service named/)
+  })
+
+  test('context shows the file that explains a build failure', async () => {
+    // The blind spot. A .NET service failed `dotnet restore` with "more than
+    // one project or solution file" against a directory holding exactly one.
+    // The second existed only inside the uploaded archive, which lives on
+    // neither the database nor a node, and is deleted when the build ends.
+    await ctx.db.insert(deployments).values({
+      serviceId: apiId,
+      nodeId,
+      status: 'failed',
+      failureReason: 'buildx failed: MSB1011',
+      startedAt: new Date(Date.now() - 30_000),
+      buildContext: {
+        entries: ['._Worker.csproj', './Dockerfile', './Worker.csproj'],
+        total: 3,
+        bytes: 4096,
+      },
+    })
+
+    const out = await callTool(ctx, fleetId, 'context', { service: 'api' })
+    assert.ok(out.ok)
+    const data = out.data as { unexpected: string[]; files: string[]; fileCount: number }
+    assert.deepEqual(
+      data.unexpected,
+      ['._Worker.csproj'],
+      'the file nobody put there is named outright, not left among the others'
+    )
+    assert.equal(data.fileCount, 3)
+  })
+
+  test('context says so plainly when nothing was recorded', async () => {
+    // A service deploying a prebuilt image has no context, and that is an
+    // answer rather than an error -- a tool that threw here would end an
+    // investigation on a service that never builds anything.
+    await ctx.db.insert(services).values({
+      fleetId, name: `prebuilt-${runId}`, project: 'demo', placementPolicy: 'flexible',
+      requestRamMb: 512, compatibleArches: ['amd64'],
+    })
+
+    const out = await callTool(ctx, fleetId, 'context', { service: `prebuilt-${runId}` })
+    assert.ok(out.ok)
+    assert.match((out.data as { note: string }).note, /no build context recorded/)
   })
 
   test('a tool cannot read another fleet', async () => {

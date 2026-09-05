@@ -10,6 +10,7 @@ import { platformsFor, BuildUnavailableError } from '../build/runner.js'
 import {
   extractContext,
   disposeContext,
+  readContextListing,
   contextPath,
   assertValidContextId,
   MAX_CONTEXT_BYTES,
@@ -631,6 +632,9 @@ export async function serviceRoutes(app: FastifyInstance) {
         serviceId: service.id,
         nodeId: decision.nodeId,
         gitSha: body.gitSha ?? null,
+        buildContext: body.contextId
+          ? await readContextListing(app.ctx.config.BUILD_WORKDIR, body.contextId)
+          : null,
       })
       const phases = phaseWriter(app.ctx, deploymentId)
 

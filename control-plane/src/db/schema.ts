@@ -438,6 +438,17 @@ export const deployments = pgTable(
     /** Host port the agent publishes this container on, so ingress can reach it. */
     hostPort: integer('host_port'),
     failureReason: text('failure_reason'),
+    /**
+     * What the builder was given, when this deployment uploaded a context.
+     *
+     * A listing, never the files: the context is deleted the moment the build
+     * ends. Kept because a build failure cannot be explained without it, and
+     * every other view a diagnosis has reads the database or the node. A .NET
+     * service failed on "more than one project or solution file" in a directory
+     * holding one; the second was an AppleDouble member that existed only
+     * inside the archive, and nothing could see it.
+     */
+    buildContext: jsonb('build_context').$type<{ entries: string[]; total: number; bytes: number }>(),
     startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
     finishedAt: timestamp('finished_at', { withTimezone: true }),
   },
