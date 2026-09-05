@@ -393,9 +393,22 @@ export async function diagnose(
       )
       content = reply.content
     } catch (err) {
+      const elapsed = Date.now() - startedAt
+      const message = err instanceof Error ? err.message : 'the provider call failed'
+
+      // An abort here is almost always this loop's own deadline expiring
+      // mid-call, and "This operation was aborted" tells the reader nothing
+      // they can act on. Naming the per-lookup pace does: it is the difference
+      // between a fleet that is hard to diagnose and a model that is too slow
+      // to diagnose it with.
+      const ourDeadline = /abort/i.test(message) && elapsed >= DEADLINE_MS - 5_000
       return {
         status: 'inconclusive',
-        reason: err instanceof Error ? err.message : 'the provider call failed',
+        reason: ourDeadline
+          ? `Stopped after ${Math.round(elapsed / 1000)}s. This provider is answering in about ` +
+            `${Math.round(elapsed / 1000 / Math.max(1, calls.length + 1))}s per lookup, which leaves ` +
+            `room for roughly ${Math.max(1, Math.floor(DEADLINE_MS / 1000 / Math.max(1, elapsed / 1000 / Math.max(1, calls.length + 1))))} of them.`
+          : message,
         calls,
       }
     }
