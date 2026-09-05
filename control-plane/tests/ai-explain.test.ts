@@ -15,7 +15,7 @@ import { eq } from 'drizzle-orm'
 import { loadConfig } from '../src/config.js'
 import { createContext, closeContext, type AppContext } from '../src/api/context.js'
 import { deploymentExplanations, deployments, fleets, orgs, services } from '../src/db/schema.js'
-import { explainDeployment, usageToday, DAILY_LIMIT } from '../src/ai/explain.js'
+import { explainDeployment, usageToday, DAILY_LIMIT, explanationKey } from '../src/ai/explain.js'
 import { signatureOf } from '../src/ai/signature.js'
 
 let ctx: AppContext
@@ -45,8 +45,28 @@ function provider(body: unknown, status = 200) {
   return { impl, calls: () => calls }
 }
 
+/**
+ * An answer in the loop's protocol.
+ *
+ * Explain no longer reads a log and reasons about the text; it runs the
+ * investigation with the question filled in, so a stub has to speak the same
+ * JSON the loop expects. This one answers on the first turn without asking for
+ * a lookup, which is the shortest legal investigation.
+ */
 const answer = {
-  choices: [{ message: { content: '{"summary":"The lockfile is out of sync.","steps":["npm install"]}' } }],
+  choices: [
+    {
+      message: {
+        content: JSON.stringify({
+          answer: {
+            summary: 'The lockfile is out of sync.',
+            findings: [{ claim: 'the install step failed', evidence: 'deployments(api) failure reason' }],
+            next: ['npm install'],
+          },
+        }),
+      },
+    },
+  ],
   usage: { prompt_tokens: 800, completion_tokens: 90 },
 }
 
@@ -72,7 +92,7 @@ before(async () => {
 })
 
 after(async () => {
-  await ctx.db.delete(deploymentExplanations).where(eq(deploymentExplanations.signature, signatureOf(FAILURE)))
+  await ctx.db.delete(deploymentExplanations).where(eq(deploymentExplanations.signature, explanationKey(fleetId, FAILURE)))
   for (const sig of madeSignatures) {
     await ctx.db.delete(deploymentExplanations).where(eq(deploymentExplanations.signature, sig))
   }
@@ -82,7 +102,7 @@ after(async () => {
 
 /** Back to "configured and unused" before each case. */
 beforeEach(async () => {
-  await ctx.db.delete(deploymentExplanations).where(eq(deploymentExplanations.signature, signatureOf(FAILURE)))
+  await ctx.db.delete(deploymentExplanations).where(eq(deploymentExplanations.signature, explanationKey(fleetId, FAILURE)))
   await ctx.redis.del(`ai:explain:${userId}:${new Date().toISOString().slice(0, 10)}`)
   // Operator config, not fleet config: whoever runs the control plane holds
   // the key.

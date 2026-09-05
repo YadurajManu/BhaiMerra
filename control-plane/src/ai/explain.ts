@@ -2,7 +2,7 @@ import { and, eq, sql } from 'drizzle-orm'
 import type { AppContext } from '../api/context.js'
 import { deployments, deploymentExplanations, services } from '../db/schema.js'
 import { signatureOf, tail, worthExplaining } from './signature.js'
-import { explainWith, type Explanation } from './provider.js'
+import { diagnose } from './diagnose.js'
 
 /**
  * Explaining a failed deploy, at most once per distinct failure.
@@ -31,6 +31,17 @@ export type ExplainOutcome =
   | { status: 'disabled'; reason: string }
   | { status: 'rate_limited'; used: number; limit: number; resetsInSec: number }
   | { status: 'failed'; reason: string }
+
+/**
+ * The cache key for one failure in one fleet.
+ *
+ * Exported so nothing has to reproduce the shape — a test that deletes by a
+ * key it built itself is a test that silently stops cleaning up the moment the
+ * shape changes, which is exactly what happened when the fleet scope was added.
+ */
+export function explanationKey(fleetId: string, failureReason: string): string {
+  return `${fleetId}:${signatureOf(failureReason)}`
+}
 
 /** Keyed per person per day, in the caller's own timezone-free UTC day. */
 const limitKey = (userId: string) =>
@@ -80,7 +91,22 @@ export async function explainDeployment(
   }
 
   const logTail = tail(row.failureReason!)
-  const signature = signatureOf(row.failureReason!)
+  /**
+   * Scoped to the fleet, which the log signature alone is not.
+   *
+   * An explanation used to be a reading of a log and nothing else, so the same
+   * buildx error meant the same thing anywhere and one global entry served
+   * everybody. It now comes from an investigation that reads this fleet's
+   * deployments, containers and logs, and those answers are about one fleet:
+   * "the service your app calls redis is named cache here" is correct and
+   * specific, and serving it to a stranger with the same stack trace would be
+   * wrong. It is also a reading of somebody's logs, which is reason enough on
+   * its own not to hand it to another fleet.
+   *
+   * Older entries keep their unscoped keys and simply stop matching. They were
+   * three rows, and a cache that misses is slow rather than wrong.
+   */
+  const signature = explanationKey(opts.fleetId, row.failureReason!)
 
   // 1. Cache. Free, so it happens before any limit is consulted.
   const [cached] = await ctx.db
@@ -136,13 +162,51 @@ export async function explainDeployment(
     }
   }
 
-  let out: Explanation
+  /**
+   * Investigate, rather than read the log and reason about the text.
+   *
+   * This is the whole of the merge. `explain` had no tools: it was handed a
+   * failure somebody already had and asked what it meant, which is fine for a
+   * buildx error that explains itself and useless for the failures that do not
+   * — a container reported unhealthy for ever, a service that cannot resolve
+   * the name it was written against, a build fed a file nobody put there.
+   * `diagnose` goes and looks. Explain is that with the question filled in.
+   *
+   * What explain keeps is the part diagnose has no opinion about: the cache
+   * above, and the daily limit below it. Those are the cost model, and they
+   * are why this can be pointed at every failure rather than rationed by hand.
+   */
+  let out: { summary: string; steps: string[]; model: string; tokensIn: number; tokensOut: number }
   try {
-    out = await explainWith(
-      { baseUrl, apiKey, model },
-      { log: logTail, service: row.serviceName },
+    const found = await diagnose(
+      ctx,
+      {
+        fleetId: opts.fleetId,
+        question:
+          `The deployment of "${row.serviceName}" failed. Its recorded failure was:\n\n${logTail}\n\n` +
+          `Work out why, and say what to do about it.`,
+      },
       fetchImpl
     )
+
+    if (found.status !== 'ok') {
+      await ctx.redis.decr(key)
+      return {
+        status: 'failed',
+        reason: found.status === 'disabled' ? found.reason : found.reason,
+      }
+    }
+
+    out = {
+      summary: found.summary,
+      // Findings before next steps: a reader wants to know what was
+      // established before being told what to do about it, and an unsupported
+      // instruction is the thing this whole design exists to avoid.
+      steps: [...found.findings.map((f) => `${f.claim} — ${f.evidence}`), ...found.next],
+      model: found.model,
+      tokensIn: 0,
+      tokensOut: 0,
+    }
   } catch (err) {
     // Give the allowance back: nothing was explained, so nothing was spent
     // from the reader's point of view, and a provider outage must not burn a
