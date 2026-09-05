@@ -387,6 +387,11 @@ export async function diagnose(
         {
           maxTokens: 900,
           timeoutMs: Math.max(5_000, remaining),
+          // The loop is the reasoning. Each turn only has to pick the next
+          // lookup or compose an answer from evidence already gathered, and a
+          // model thinking its way to a conclusion in one pass is doing badly
+          // and slowly what this does well across turns.
+          noReasoning: true,
           schema: STEP_SCHEMA as unknown as { name: string; schema: Record<string, unknown> },
         },
         fetchImpl

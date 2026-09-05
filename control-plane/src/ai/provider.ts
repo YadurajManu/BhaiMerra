@@ -132,6 +132,24 @@ export async function chat(
      * only one of the two parties honours is not a budget.
      */
     timeoutMs?: number
+    /**
+     * Ask the model not to think before answering.
+     *
+     * Measured on a local Gemma 4: choosing one lookup took 333 completion
+     * tokens and twenty-nine seconds, of which about fifteen tokens were the
+     * answer and the rest invisible reasoning. With reasoning off the same
+     * request cost seventeen tokens and 1.7 seconds — eighteen times faster for
+     * an identical reply.
+     *
+     * Right for this workload specifically. The loop does not need a model to
+     * reason its way to an answer in one pass; it needs it to pick the next
+     * lookup, and the reasoning is the loop itself, spread across turns with
+     * real evidence in between. It is also what made a hosted reasoning model
+     * spend its whole completion budget on thinking and return nothing.
+     */
+    noReasoning?: boolean
+    /** Set internally once a provider has shown it rejects that field. */
+    reasoningUnsupported?: boolean
   } = {},
   fetchImpl: typeof fetch = fetch
 ): Promise<{ content: string; tokensIn: number; tokensOut: number }> {
@@ -150,6 +168,7 @@ export async function chat(
         temperature: opts.temperature ?? 0.1,
         max_tokens: opts.maxTokens ?? 1500,
         messages,
+        ...(opts.noReasoning && !opts.reasoningUnsupported ? { reasoning_effort: 'none' } : {}),
         ...(opts.schema && !opts.noSchema
           ? {
               response_format: {
@@ -236,6 +255,15 @@ export async function chat(
       // and then cannot satisfy it has failed in the same way as one that
       // rejected it outright, and from here the remedy is identical: ask again
       // without it and let the parser cope, which it was written to do.
+      if (
+        res.status === 400 &&
+        opts.noReasoning &&
+        !opts.reasoningUnsupported &&
+        /reasoning_effort|reasoning/i.test(message)
+      ) {
+        return chat(config, messages, { ...opts, reasoningUnsupported: true }, fetchImpl)
+      }
+
       if (
         res.status === 400 &&
         opts.schema &&
