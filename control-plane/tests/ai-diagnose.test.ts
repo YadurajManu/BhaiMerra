@@ -213,4 +213,60 @@ describe('the diagnosis loop', () => {
     assert.equal(out.status, 'inconclusive')
     assert.equal(provider.turns(), 2, 'one retry, then stop')
   })
+
+  test('an editable fix comes back ready to apply', async () => {
+    const provider = scripted([
+      JSON.stringify({
+        answer: {
+          summary: 'the health check asks for a path the app does not serve',
+          findings: [{ claim: 'probe returns 404', evidence: 'probe(api)' }],
+          next: ['remove the health check'],
+          fix: { service: 'api', field: 'health', value: null, why: 'nothing answers 2xx' },
+        },
+      }),
+    ])
+    const out = await diagnose(ctx, { fleetId, question: 'why?' }, provider.impl)
+    assert.equal(out.status, 'ok')
+    if (out.status !== 'ok') return
+    assert.equal(out.fix?.applicable, true)
+    assert.equal(out.fix?.field, 'health')
+  })
+
+  test('a rename is returned refused, not applicable', async () => {
+    // The first real candidate for an automatic fix was exactly this: an app
+    // connecting to the hostname "redis" against a database the manifest named
+    // "cache". The diagnosis is right and the fix is a rename, which points a
+    // service at a new volume — harmless for a cache, data loss for a database,
+    // and not a distinction to leave to a model. It is reported in words and
+    // never offered as a button.
+    const provider = scripted([
+      JSON.stringify({
+        answer: {
+          summary: 'the app connects to a hostname no service answers to',
+          findings: [{ claim: 'vote cannot resolve redis', evidence: 'logs(vote)' }],
+          next: ['rename the database'],
+          fix: { service: 'cache', field: 'name', value: 'redis', why: 'the app hardcodes this host' },
+        },
+      }),
+    ])
+    const out = await diagnose(ctx, { fleetId, question: 'why?' }, provider.impl)
+    assert.equal(out.status, 'ok')
+    if (out.status !== 'ok') return
+    assert.equal(out.fix?.applicable, false, 'a rename must never be applied automatically')
+    assert.match(out.fix!.reason!, /volume/, 'and the refusal says what the risk is')
+  })
+
+  test('an answer with no fix is still an answer', async () => {
+    // Most investigations end without one exact manifest change, and a loop
+    // that felt obliged to produce a fix would invent one.
+    const provider = scripted([
+      JSON.stringify({
+        answer: { summary: 'the node was offline at the time', findings: [], next: ['nothing to do'] },
+      }),
+    ])
+    const out = await diagnose(ctx, { fleetId, question: 'why?' }, provider.impl)
+    assert.equal(out.status, 'ok')
+    if (out.status !== 'ok') return
+    assert.equal(out.fix, undefined)
+  })
 })

@@ -31,6 +31,7 @@ const GROUPS: Array<[string, Array<[string, string]>]> = [
       ['deploy <service>', 'Build, schedule, and roll out'],
       ['explain <service>', 'Read a failed deploy and say what to do about it'],
       ['diagnose "<question>"', 'Investigate why something is wrong, and cite what it looked at'],
+      ['fix <service>', 'Diagnose, propose one manifest change, deploy it, and undo it if that was worse'],
     ],
   ],
   [

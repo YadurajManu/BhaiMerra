@@ -61,6 +61,37 @@ function shape(field: string, value: Edit['value']): unknown {
   return value
 }
 
+/**
+ * Whether an edit may be applied by a machine, and why not when it may not.
+ *
+ * Separated from `applyEdits` because a refusal is worth reporting rather than
+ * discarding. The first real candidate for an automatic fix was a service whose
+ * application connects to the hostname "redis" against a database the manifest
+ * had named "cache" -- correct diagnosis, and the fix is a rename, which is
+ * exactly what this refuses. Renaming a service points it at a new volume: for
+ * a cache that is harmless and for a database it silently abandons the data, so
+ * the difference cannot be left to a model's judgement about which one it is
+ * looking at.
+ *
+ * A refused fix is still the answer. It is told to the operator in words, to
+ * carry out themselves, rather than performed.
+ */
+export function applicability(edit: Edit): { applicable: boolean; reason?: string } {
+  if (FORBIDDEN.has(edit.field)) {
+    return {
+      applicable: false,
+      reason:
+        edit.field === 'name'
+          ? 'Renaming a service points it at a new volume — harmless for a cache, and data loss for a database. Do this one by hand.'
+          : `"${edit.field}" decides where the code or the data comes from, which nothing automatic should change.`,
+    }
+  }
+  if (!EDITABLE.has(edit.field)) {
+    return { applicable: false, reason: `"${edit.field}" is not a field a review may change.` }
+  }
+  return { applicable: true }
+}
+
 export type ApplyResult = {
   manifest: string
   applied: Edit[]

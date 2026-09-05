@@ -1,5 +1,6 @@
 import { chat } from './provider.js'
 import { callTool, TOOLS, type ToolResult } from './tools.js'
+import { applicability } from './edits.js'
 import type { AppContext } from '../api/context.js'
 
 /**
@@ -31,12 +32,24 @@ export type Finding = {
   evidence: string
 }
 
+/** One manifest change, and whether a machine is allowed to make it. */
+export type ProposedFix = {
+  service: string
+  field: string
+  value: string | number | boolean | null
+  why: string
+  /** False for a change only a person should make; `reason` says why. */
+  applicable: boolean
+  reason?: string
+}
+
 export type Diagnosis =
   | {
       status: 'ok'
       summary: string
       findings: Finding[]
       next: string[]
+      fix?: ProposedFix
       calls: Array<{ tool: string; args: Record<string, unknown> }>
       model: string
     }
@@ -48,7 +61,7 @@ const SYSTEM = `You work out why a service on Fleet OS is misbehaving, by asking
 Do not use function calling. This conversation has no functions available: emitting one is an error and the investigation stops. Reply with a JSON object and nothing else, one of:
 
   {"lookup": {"name": "<which>", "args": {...}}}
-  {"answer": {"summary": "<one or two sentences>", "findings": [{"claim": "<what is true>", "evidence": "<the lookup and what it showed>"}], "next": ["<what the operator should do>"]}}
+  {"answer": {"summary": "<one or two sentences>", "findings": [{"claim": "<what is true>", "evidence": "<the lookup and what it showed>"}], "next": ["<what the operator should do>"], "fix": {"service": "<name>", "field": "<manifest field>", "value": <new value, or null to remove it>, "why": "<what this changes>"}}}
 
 What you can ask for:
   services {}                     — every service in the fleet and whether it is running
@@ -74,6 +87,8 @@ A build that failed is about what went in. Ask for the context before theorising
 A 200 is not proof. Check the size and first bytes — a static site replaced by its web server's welcome page returns 200 and about 900 bytes.
 
 Every finding cites what showed it. A claim you cannot point at is a guess, and a guess in a diagnosis is worse than no diagnosis.
+
+Include a fix only when the evidence names one exact manifest change that would resolve what you found, and leave it out entirely otherwise. It is a field on a service in fleet.yaml -- container_port, health, resources, env, command, replicas, placement -- and a wrong one is applied to somebody's running system, so a guess here is worse than nothing. Say what you found and stop.
 
 Answer as soon as you can support an answer. If the evidence does not settle it, say what you established and what you would look at next: an honest partial answer is useful and a confident wrong one is not.
 
@@ -125,7 +140,7 @@ function firstObject(raw: string): string | null {
 /** Pull one step out of a reply that may be fenced or padded with prose. */
 function parseStep(content: string): {
   call?: { tool: string; args: Record<string, unknown> }
-  answer?: { summary: string; findings: Finding[]; next: string[] }
+  answer?: { summary: string; findings: Finding[]; next: string[]; fix?: ProposedFix }
 } {
   const fenced = content.match(/```(?:json)?\s*([\s\S]*?)```/)
   const raw = (fenced?.[1] ?? content).trim()
@@ -135,7 +150,7 @@ function parseStep(content: string): {
   const parsed = JSON.parse(object) as {
     lookup?: { name?: unknown; args?: unknown }
     call?: { tool?: unknown; args?: unknown }
-    answer?: { summary?: unknown; findings?: unknown; next?: unknown }
+    answer?: { summary?: unknown; findings?: unknown; next?: unknown; fix?: unknown }
   }
 
   // Either spelling. The prompt asks for "lookup"/"name", and a model that has
@@ -163,10 +178,40 @@ function parseStep(content: string): {
     const next = Array.isArray(parsed.answer.next)
       ? (parsed.answer.next as unknown[]).filter((n): n is string => typeof n === 'string').slice(0, 5)
       : []
-    return { answer: { summary: parsed.answer.summary, findings, next } }
+    return { answer: { summary: parsed.answer.summary, findings, next, fix: parseFix(parsed.answer.fix) } }
   }
 
   throw new Error('the model returned neither a lookup nor an answer')
+}
+
+/**
+ * A proposed fix, checked before anybody is offered it.
+ *
+ * Validated here rather than where it is applied, so a change no machine should
+ * make never reaches the CLI as something to confirm. A person clicking through
+ * a prompt is not a guardrail; not offering the button is.
+ *
+ * A malformed fix is dropped rather than failing the answer: the findings above
+ * it are still worth reading, and losing a whole investigation because one
+ * optional field came back wrong is the wrong trade.
+ */
+function parseFix(raw: unknown): ProposedFix | undefined {
+  const f = raw as Partial<ProposedFix> | undefined
+  if (!f || typeof f.service !== 'string' || typeof f.field !== 'string' || typeof f.why !== 'string') {
+    return undefined
+  }
+  const value = f.value
+  if (
+    value !== null &&
+    typeof value !== 'string' &&
+    typeof value !== 'number' &&
+    typeof value !== 'boolean'
+  ) {
+    return undefined
+  }
+
+  const verdict = applicability({ service: f.service, field: f.field, value, why: f.why })
+  return { service: f.service, field: f.field, value, why: f.why, ...verdict }
 }
 
 /**
@@ -250,6 +295,7 @@ export async function diagnose(
         summary: step_.answer.summary,
         findings: step_.answer.findings,
         next: step_.answer.next,
+        fix: step_.answer.fix,
         calls,
         model,
       }

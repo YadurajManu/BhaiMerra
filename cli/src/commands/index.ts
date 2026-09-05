@@ -7,6 +7,7 @@ import { configCommand, useCommand } from './config.js'
 import { doctorCommand } from './doctor.js'
 import { upCommand } from './up.js'
 import { tuneCommand } from './tune.js'
+import { fixCommand } from './fix.js'
 import { openCommand } from './open.js'
 import { downCommand } from './down.js'
 import { unpairCommand, agentCommand } from './unpair.js'
@@ -42,6 +43,7 @@ export const commands: Record<string, Command> = {
   use: useCommand,
   doctor: doctorCommand,
   tune: tuneCommand,
+  fix: fixCommand,
   init: initCommand,
   diagnose: diagnoseCommand,
   import: importCommand,
