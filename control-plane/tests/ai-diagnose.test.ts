@@ -340,4 +340,43 @@ describe('the diagnosis loop', () => {
     assert.equal(out.status, 'ok', 'the investigation must survive a provider without schemas')
     assert.equal(calls, 2, 'once with, once without')
   })
+
+  test("the model's own syntax is kept out of the advice", async () => {
+    // A local Gemma ended an otherwise correct answer with a step reading
+    // `fix': null}}` and a code fence: it lost the thread mid-array and the
+    // fragment landed inside a string, so the object still parsed. Findings
+    // right, one instruction gibberish — the worst of both, because a reader
+    // then has to decide which lines to trust.
+    const provider = scripted([
+      JSON.stringify({
+        answer: {
+          summary: 'vote cannot reach redis',
+          findings: [],
+          next: ["Check the 'cache' service is reachable", "fix': null}}```", '', 'value: null'],
+        },
+      }),
+    ])
+    const out = await diagnose(ctx, { fleetId, question: 'why?' }, provider.impl)
+    assert.equal(out.status, 'ok')
+    if (out.status !== 'ok') return
+    assert.deepEqual(out.next, ["Check the 'cache' service is reachable"])
+  })
+
+  test('advice that merely mentions braces is left alone', async () => {
+    // The filter drops unmistakable syntax and nothing else. Losing a real
+    // instruction is a worse failure than showing an odd one.
+    const provider = scripted([
+      JSON.stringify({
+        answer: {
+          summary: 'x',
+          findings: [],
+          next: ['Set health: { path: /healthz } in fleet.yaml'],
+        },
+      }),
+    ])
+    const out = await diagnose(ctx, { fleetId, question: 'why?' }, provider.impl)
+    assert.equal(out.status, 'ok')
+    if (out.status !== 'ok') return
+    assert.equal(out.next.length, 1, 'real advice can contain braces')
+  })
 })

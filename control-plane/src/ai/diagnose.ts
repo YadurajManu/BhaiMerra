@@ -216,6 +216,30 @@ const STEP_SCHEMA = {
   },
 } as const
 
+/**
+ * Whether a next step is advice for a person, rather than the model's own
+ * syntax having leaked into the array.
+ *
+ * A local Gemma ended an otherwise correct answer with a step reading
+ * `fix': null}}` followed by a code fence: it lost the thread while writing
+ * the array, and the fragment landed inside a string, so the object still
+ * parsed. The findings were right and one instruction was gibberish, which is
+ * the worst of both — a reader has to decide which lines to trust.
+ *
+ * Deliberately narrow. It drops what is unmistakably JSON punctuation and
+ * leaves everything else alone: a filter that guessed at meaning would
+ * eventually swallow real advice, and losing a genuine instruction is a worse
+ * failure than showing an odd one.
+ */
+function isAdvice(text: string): boolean {
+  if (!text) return false
+  if (text.includes('}}') || text.includes('```')) return false
+  // A bare `"field": null` or `field: null`, which is a fragment of the schema
+  // rather than something to do about a broken service.
+  if (/^["']?\w+["']?\s*:\s*(null|true|false|\{|\[)/.test(text)) return false
+  return true
+}
+
 /** Pull one step out of a reply that may be fenced or padded with prose. */
 function parseStep(content: string): {
   call?: { tool: string; args: Record<string, unknown> }
@@ -255,7 +279,11 @@ function parseStep(content: string): {
           .slice(0, 8)
       : []
     const next = Array.isArray(parsed.answer.next)
-      ? (parsed.answer.next as unknown[]).filter((n): n is string => typeof n === 'string').slice(0, 5)
+      ? (parsed.answer.next as unknown[])
+          .filter((n): n is string => typeof n === 'string')
+          .map((n) => n.trim())
+          .filter(isAdvice)
+          .slice(0, 5)
       : []
     return { answer: { summary: parsed.answer.summary, findings, next, fix: parseFix(parsed.answer.fix) } }
   }
