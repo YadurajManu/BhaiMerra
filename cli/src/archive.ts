@@ -86,13 +86,41 @@ export async function packContext(dir: string): Promise<Buffer> {
     dir,
     // Ownership and timestamps vary per machine and would make two packs of the
     // same tree differ for no reason.
+    //
+    // Not sufficient on its own on macOS -- see COPYFILE_DISABLE below.
     '--no-xattrs',
     ...excludes.flatMap((p) => ['--exclude', p]),
     '.',
   ]
 
   return new Promise((resolve, reject) => {
-    const child = spawn('tar', args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn('tar', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      /**
+       * Keep macOS from smuggling AppleDouble files into the build context.
+       *
+       * bsdtar stores extended attributes as separate `._name` members, and
+       * `--no-xattrs` does not stop it -- that flag is a GNU-compatible alias
+       * bsdtar accepts for xattr *archiving*, while the AppleDouble members
+       * come from copyfile, which only this variable disables.
+       *
+       * The failure is invisible from a Mac, which is what makes it worth a
+       * comment this long. `tar tzf` on macOS does not list those members: it
+       * folds them back into xattrs on the file they belong to. GNU tar on the
+       * Linux control plane has no such notion and writes them out as real
+       * files, so a context packed here arrives there carrying `._Dockerfile`,
+       * `._Program.cs` and the rest.
+       *
+       * That is not merely untidy. Docker's COPY globs use Go's filepath.Match,
+       * where `*` matches a leading dot -- unlike a shell -- so a Dockerfile
+       * doing `COPY *.csproj .` copies both `Worker.csproj` and
+       * `._Worker.csproj`, and `dotnet restore` then refuses with "this folder
+       * contains more than one project or solution file". Found exactly that
+       * way, on a .NET service in Docker's own example voting app, having
+       * built five other services in the same deploy without complaint.
+       */
+      env: { ...process.env, COPYFILE_DISABLE: '1' },
+    })
     const chunks: Buffer[] = []
     let stderr = ''
     let settled = false

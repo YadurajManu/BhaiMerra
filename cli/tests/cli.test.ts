@@ -4,6 +4,12 @@ import { parseArgs, KNOWN_FLAGS, nearestFlag } from '../src/args.js'
 import { etaLine, progressLine } from '../src/progress.js'
 import { alertCheck, healthPathCheck } from '../src/commands/doctor.js'
 import { tuneRam, asQuantity, type Observed } from '../src/tune.js'
+import { gunzipSync } from 'node:zlib'
+import { mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { execFileSync } from 'node:child_process'
+import { packContext } from '../src/archive.js'
 import { table, relativeTime, mb, visibleLength, truncate, c } from '../src/render.js'
 import { readFileSync, readdirSync } from 'node:fs'
 
@@ -358,5 +364,52 @@ describe('what a service should reserve, from what it used', () => {
   test('writes megabytes the way a manifest does', () => {
     assert.equal(asQuantity(128), '128Mi')
     assert.equal(asQuantity(1024), '1Gi')
+  })
+})
+
+describe('the build context that leaves this machine', () => {
+  /**
+   * Parse tar member names from the raw bytes.
+   *
+   * Deliberately not `tar tzf`. On macOS that command does not list
+   * AppleDouble members at all — bsdtar folds them back into xattrs on the
+   * file they belong to — so the check this test exists to make is exactly the
+   * one the obvious implementation cannot see. GNU tar on the Linux control
+   * plane has no such notion and writes them out as files.
+   */
+  function memberNames(tgz: Buffer): string[] {
+    const tar = gunzipSync(tgz)
+    const names: string[] = []
+    for (let off = 0; off + 512 <= tar.length; ) {
+      const name = tar.subarray(off, off + 100).toString('utf8').replace(/\0.*$/, '')
+      if (!name) break
+      const size = parseInt(tar.subarray(off + 124, off + 136).toString('utf8').replace(/\0.*$/, '').trim() || '0', 8)
+      names.push(name)
+      off += 512 + Math.ceil(size / 512) * 512
+    }
+    return names
+  }
+
+  test('carries no AppleDouble files, whatever xattrs the source has', async (t) => {
+    if (process.platform !== 'darwin') return t.skip('AppleDouble is a macOS behaviour')
+
+    const dir = await mkdtemp(join(tmpdir(), 'fleet-ctx-'))
+    await writeFile(join(dir, 'Dockerfile'), 'FROM scratch\n')
+    await writeFile(join(dir, 'Worker.csproj'), '<Project />\n')
+    // What a file downloaded or unzipped on a Mac carries automatically.
+    execFileSync('xattr', ['-w', 'com.apple.test', '1', join(dir, 'Worker.csproj')])
+
+    const names = memberNames(await packContext(dir)).map((n) => n.split('/').pop() ?? n)
+
+    // `._Worker.csproj` matches Docker's `COPY *.csproj .` — Go's
+    // filepath.Match counts a leading dot, unlike a shell — so a second
+    // project file appears in the image and `dotnet restore` refuses to guess
+    // between them. Five services built fine in the same deploy; the .NET one
+    // did not.
+    const appleDouble = names.filter((n) => n.startsWith('._'))
+    assert.deepEqual(appleDouble, [], `AppleDouble members leaked into the context: ${appleDouble.join(', ')}`)
+    assert.ok(names.includes('Worker.csproj'), 'and the real file is still there')
+
+    await rm(dir, { recursive: true, force: true })
   })
 })

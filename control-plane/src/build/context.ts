@@ -102,7 +102,21 @@ export async function extractContext(
 
   // --no-same-owner: the archive records the uploader's uids, which mean
   // nothing here and would fail as a non-root process anyway.
-  await runTar(['-xzf', '-', '-C', path, '--no-same-owner'], path, archive)
+  //
+  // --exclude='._*': AppleDouble members, which a context packed on a Mac
+  // carries unless the packer disabled copyfile. bsdtar hides them on listing
+  // and folds them back into xattrs, so they are invisible from the machine
+  // that produced them; GNU tar here has no such notion and writes them out as
+  // real files beside the ones they describe. Docker's COPY globs then match
+  // them, because Go's filepath.Match counts a leading dot where a shell does
+  // not -- so `COPY *.csproj .` copied `._Worker.csproj` alongside the real
+  // one and `dotnet restore` refused to choose between two project files.
+  //
+  // The CLI stops producing them now, but every already-published CLI still
+  // does, and a control plane that only works with its newest client is not
+  // much of a control plane. A file legitimately named `._x` is legal on Linux
+  // and, in a build context, has never once been intended.
+  await runTar(['-xzf', '-', '-C', path, '--no-same-owner', '--exclude=._*'], path, archive)
 
   return { id, path }
 }
