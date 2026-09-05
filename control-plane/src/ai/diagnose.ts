@@ -240,6 +240,37 @@ function isAdvice(text: string): boolean {
   return true
 }
 
+/**
+ * Whether an answer's next steps ask a person to do what the loop can do.
+ *
+ * The tell, watched on a real fleet: the same fault, two runs. Asked "why is
+ * vote unhealthy" it made four lookups and found a Redis connection failure in
+ * the logs. Asked to fix it, it answered after one and advised "check the logs
+ * for the vote service" and "check the probe" — naming, as work for the
+ * operator, two lookups sitting unused in its own budget.
+ *
+ * Counting lookups was the first attempt at spotting that and it is a poor
+ * proxy: an answer can be well established after one, and badly established
+ * after five. What is unambiguous is an instruction to go and read something
+ * this could have read.
+ */
+function delegatesALookup(
+  next: string[],
+  made: Array<{ tool: string; args: Record<string, unknown> }>
+): boolean {
+  const already = new Set(made.map((c) => c.tool))
+  const unused = Object.keys(TOOLS).filter((t) => !already.has(t))
+  if (!unused.length) return false
+
+  return next.some((step) => {
+    const text = step.toLowerCase()
+    // The verb matters. "check the logs" is delegated work; "the logs show a
+    // connection refused" is a finding that happens to mention logs.
+    if (!/\b(check|look at|inspect|review|examine|verify|see)\b/.test(text)) return false
+    return unused.some((tool) => new RegExp(`\\b${tool}\\b`).test(text))
+  })
+}
+
 /** Pull one step out of a reply that may be fenced or padded with prose. */
 function parseStep(content: string): {
   call?: { tool: string; args: Record<string, unknown> }
@@ -386,6 +417,8 @@ export async function diagnose(
   const startedAt = Date.now()
   /** Where each lookup result sits, so the older ones can be shrunk. */
   const resultAt: number[] = []
+  /** Whether it has already been sent back to look further. Once only. */
+  let pushedBack = false
 
   for (let step = 0; step < MAX_CALLS; step++) {
     // Out of time rather than out of steps. Reported the same way, because to
@@ -476,6 +509,35 @@ export async function diagnose(
     retried = false
 
     if (step_.answer) {
+      // An answer reached on almost no evidence, with the budget untouched.
+      //
+      // Watched happen: the same fleet, the same fault. Asked "why is vote
+      // unhealthy" the loop made four lookups and found a Redis connection
+      // failure in the logs; asked to fix it, it answered after one and
+      // suggested reading the logs. Both replies were honest. One was useful.
+      //
+      // The prompt tells it to answer as soon as it can support an answer,
+      // which is right, and leaves nothing to say when it cannot yet and
+      // thinks it can. This is that: once, and only when there is genuinely
+      // room, and never against an answer that already carries a fix -- a
+      // model that has found the change to make has finished.
+      const thin = !step_.answer.fix && delegatesALookup(step_.answer.next, calls)
+      const roomLeft =
+        step < MAX_CALLS - 2 && Date.now() - startedAt < DEADLINE_MS * 0.5
+      if (thin && roomLeft && !pushedBack) {
+        pushedBack = true
+        messages.push({ role: 'assistant', content })
+        messages.push({
+          role: 'user',
+          content:
+            `Your next steps ask the operator to check something you can look at yourself right now, ` +
+            `and you have ${MAX_CALLS - step - 1} lookups left. Do it: read the logs, probe the ` +
+            `service, compare what the node reports against what the control plane believes. Then ` +
+            `answer, or say plainly what the evidence does not settle.`,
+        })
+        continue
+      }
+
       return {
         status: 'ok',
         summary: step_.answer.summary,

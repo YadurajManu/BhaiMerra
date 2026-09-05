@@ -104,7 +104,13 @@ describe('the diagnosis loop', () => {
     const { impl, turns } = scripted([
       JSON.stringify({ call: { tool: 'deployments', args: { service: 'ghost' } } }),
       JSON.stringify({
-        answer: { summary: 'No such service.', findings: [], next: ['Check the name'] },
+        answer: {
+          summary: 'No such service.',
+          // Cited, so this exercises the tool-error path rather than the
+          // push-back on an answer resting on nothing.
+          findings: [{ claim: 'no service named ghost', evidence: 'deployments(ghost) refused' }],
+          next: ['Check the name'],
+        },
       }),
     ])
 
@@ -378,5 +384,56 @@ describe('the diagnosis loop', () => {
     assert.equal(out.status, 'ok')
     if (out.status !== 'ok') return
     assert.equal(out.next.length, 1, 'real advice can contain braces')
+  })
+
+  test('a thin answer with the budget untouched is sent back once', async () => {
+    // Watched happen on a real fleet, same fault, two runs. Asked why a service
+    // was unhealthy the loop made four lookups and found a Redis connection
+    // failure in the logs; asked to fix it, it answered after one and suggested
+    // reading the logs. Both honest, one useful.
+    const provider = scripted([
+      '{"lookup":{"name":"services","args":{}}}',
+      '{"answer":{"summary":"it is unhealthy","findings":[],"next":["Check the logs for the vote service"]}}',
+      '{"answer":{"summary":"it cannot reach redis","findings":[{"claim":"connection refused","evidence":"logs(vote)"}],"next":["rename it"]}}',
+    ])
+    const out = await diagnose(ctx, { fleetId, question: 'why?' }, provider.impl)
+
+    assert.equal(out.status, 'ok')
+    if (out.status !== 'ok') return
+    assert.equal(out.summary, 'it cannot reach redis', 'the second, better answer is the one kept')
+    assert.match(provider.prompts()[2]!, /look at yourself/, 'and it was told why')
+  })
+
+  test('it is sent back at most once, however thin the second answer', async () => {
+    // Otherwise a model that cannot do better is asked forever, which is a bill
+    // rather than an investigation.
+    const provider = scripted([
+      '{"lookup":{"name":"services","args":{}}}',
+      '{"answer":{"summary":"thin","findings":[],"next":["Check the logs yourself"]}}',
+    ])
+    const out = await diagnose(ctx, { fleetId, question: 'why?' }, provider.impl)
+    assert.equal(out.status, 'ok')
+    if (out.status !== 'ok') return
+    assert.equal(out.summary, 'thin', 'the second answer stands even if it is no better')
+  })
+
+  test('an answer carrying a fix is never sent back', async () => {
+    // A model that has found the change to make has finished, however few
+    // lookups it took to get there.
+    const provider = scripted([
+      JSON.stringify({
+        answer: {
+          summary: 'the port is wrong',
+          findings: [],
+          next: [],
+          fix: { service: 'api', field: 'container_port', value: 80, why: 'it listens on 80' },
+        },
+      }),
+    ])
+    const out = await diagnose(ctx, { fleetId, question: 'why?' }, provider.impl)
+    assert.equal(out.status, 'ok')
+    if (out.status !== 'ok') return
+    assert.equal(out.fix?.field, 'container_port')
+    assert.equal(provider.turns(), 1, 'answered once, accepted once')
   })
 })
