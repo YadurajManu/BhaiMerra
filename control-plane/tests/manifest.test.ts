@@ -295,4 +295,38 @@ databases:
       }
     )
   })
+
+  test('a service with no health block is not probed', () => {
+    // The defect that made a running backend unconfirmable. An omitted
+    // `health:` was parsed as a written one, whose path then defaulted to
+    // "/" -- so a service that declared no check was probed at "/", answered
+    // 404 because its framework serves under a prefix, and was reported
+    // unhealthy for ever. The control plane will not promote a container that
+    // reports unhealthy, so `fleet up` sat waiting beside a container that was
+    // running and serving.
+    const m = parseManifest(`
+fleet: homelab
+services:
+  api: { build: ./api, container_port: 3100 }
+`)
+    const api = m.services.find((s) => s.name === 'api')!
+    assert.equal(
+      api.health.disabled,
+      true,
+      'no health block means no probe -- container state decides'
+    )
+  })
+
+  test('a declared health block is still probed', () => {
+    // The other half: making omission mean "disabled" must not disable the
+    // checks people actually asked for.
+    const m = parseManifest(`
+fleet: homelab
+services:
+  web: { build: ./web, container_port: 80, health: { path: /healthz } }
+`)
+    const web = m.services.find((s) => s.name === 'web')!
+    assert.equal(web.health.disabled, false)
+    assert.equal(web.health.path, '/healthz')
+  })
 })

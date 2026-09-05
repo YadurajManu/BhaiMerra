@@ -118,12 +118,30 @@ const healthCheck = z
     timeout: duration('5s'),
     interval: duration('15s'),
     /**
-     * For images with no shell to probe with. A distroless container cannot run
-     * a health check, and one it can never pass is worse than none at all.
+     * No probe: the container's own state decides whether the service is up.
+     *
+     * Set explicitly for an image with nothing to probe with -- a distroless
+     * container cannot run a check, and one it can never pass is worse than
+     * none at all -- and set implicitly, below, by leaving `health:` out.
      */
     disabled: z.boolean().default(false),
   })
-  .prefault({})
+  /**
+   * Leaving `health:` out means no check, and that has to be said here.
+   *
+   * A bare `.prefault({})` made an omitted block identical to writing
+   * `health: { path: "/" }`, because the inner defaults then filled it in. So
+   * a service that declared no health check was probed at `/` anyway, and a
+   * backend whose framework serves its routes under a prefix answered 404 to
+   * every probe. The node reported it unhealthy for ever; the control plane
+   * will not promote a deployment whose container reports unhealthy; and the
+   * deploy sat unconfirmed while the container beside it ran perfectly well.
+   *
+   * `fleet init` writes "No health check: container state decides whether this
+   * is up" into every manifest it generates. This is the line that makes that
+   * comment true.
+   */
+  .prefault({ disabled: true })
 
 /**
  * The shape, separate from the cross-field rules. `defaults:` validates
