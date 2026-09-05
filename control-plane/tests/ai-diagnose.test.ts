@@ -282,4 +282,22 @@ describe('the diagnosis loop', () => {
     const last = provider.prompts().at(-1)!
     assert.match(last, /last lookup/, 'the final turn must say it is the final turn')
   })
+
+  test('older lookup results are compacted out of the conversation', async () => {
+    // The whole conversation is resent every turn, so each result is paid for
+    // once per remaining step. Twelve steps of untrimmed results is what took a
+    // real investigation past a free tier's 8000 tokens a minute — the loop
+    // stopped not because it had nothing left to ask but because it could no
+    // longer afford to ask it.
+    const provider = scripted(['{"lookup":{"name":"services","args":{}}}'])
+    await diagnose(ctx, { fleetId, question: 'why?' }, provider.impl)
+
+    const last = provider.prompts().at(-1)!
+    const seen = (last.match(/already seen/g) ?? []).length
+    assert.ok(seen > 0, 'the early results should have been shrunk by the final turn')
+
+    // And the most recent ones survive intact, or the investigation is reasoning
+    // about nothing.
+    assert.match(last, /Result of services/, 'recent evidence stays in full')
+  })
 })

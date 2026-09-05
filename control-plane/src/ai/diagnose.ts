@@ -249,6 +249,38 @@ function forPrompt(result: ToolResult): string {
   return text.length > 2_000 ? `${text.slice(0, 2_000)}… (truncated)` : text
 }
 
+/**
+ * How many lookup results are kept in full.
+ *
+ * The whole conversation is resent on every turn, so each result is paid for
+ * once per remaining step: raising the step budget to twelve is what took a
+ * working investigation past a free tier's 8000 tokens a minute. Older results
+ * are replaced by a line naming what was looked at, which keeps the thing that
+ * matters — that it already asked, and need not ask again — at a fraction of
+ * the cost.
+ *
+ * Three, because a diagnosis reasons about the last thing it saw against the
+ * one or two before it. Findings are cited from the answer, not re-derived
+ * from the transcript, so an older result having been compacted costs nothing
+ * a reader sees.
+ */
+const KEEP_IN_FULL = 3
+
+/**
+ * Replace all but the most recent results with a one-line note.
+ *
+ * In place on the array, because the alternative is rebuilding the whole
+ * conversation each turn and getting the assistant/user alternation subtly
+ * wrong.
+ */
+function compact(messages: Array<{ role: string; content: string }>, resultAt: number[]): void {
+  for (const i of resultAt.slice(0, -KEEP_IN_FULL)) {
+    const first = messages[i]!.content.split('\n')[0] ?? ''
+    if (first.endsWith('(already seen)')) continue
+    messages[i]!.content = `${first.replace(/:$/, '')} (already seen)`
+  }
+}
+
 export async function diagnose(
   ctx: AppContext,
   opts: { fleetId: string; question: string },
@@ -268,6 +300,8 @@ export async function diagnose(
   let retried = false
 
   const startedAt = Date.now()
+  /** Where each lookup result sits, so the older ones can be shrunk. */
+  const resultAt: number[] = []
 
   for (let step = 0; step < MAX_CALLS; step++) {
     // Out of time rather than out of steps. Reported the same way, because to
@@ -371,6 +405,8 @@ export async function diagnose(
       role: 'user',
       content: `Result of ${call.tool}(${JSON.stringify(call.args)}):\n${forPrompt(result)}${budget}`,
     })
+    resultAt.push(messages.length - 1)
+    compact(messages, resultAt)
   }
 
   // Out of steps. Everything gathered is still worth reporting: a list of what
