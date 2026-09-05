@@ -195,6 +195,38 @@ describe('reclaim policies (FR-9)', () => {
     assert.equal(old?.status, 'failed', 'history should not be rewritten to look seamless')
   })
 
+  test('a strand recorded with its detail is still found by the sweep', async () => {
+    // The reason a deployment is stranded now travels with the code -- the row
+    // reads "no_eligible_node: 1 insufficient ram", because the bare code
+    // could not tell an operator whether the node was full, offline or the
+    // wrong architecture. The sweep matches on the code as a prefix. If those
+    // two ever disagree, every flexible service stays stranded for good and
+    // nothing says why: the recovery is silent when it works, so its absence
+    // is silent too.
+    const [svc] = await ctx.db
+      .insert(services)
+      .values({
+        fleetId, name: 'detailed-strand', placementPolicy: 'flexible',
+        requestRamMb: 256, compatibleArches: ['amd64'],
+      })
+      .returning()
+    await ctx.db
+      .insert(deployments)
+      .values({
+        serviceId: svc!.id,
+        nodeId: n['home'],
+        status: 'failed',
+        failureReason: 'no_eligible_node: 1 insufficient ram',
+      })
+
+    const outcomes = await reclaimToNode(ctx, fleetId, n['home']!)
+    assert.equal(
+      outcomes.find((o) => o.service === 'detailed-strand')?.action,
+      'unstranded',
+      'the detail after the code must not hide the strand from the sweep'
+    )
+  })
+
   test('a service that is already running is not disturbed by the strand sweep', async () => {
     // An old no_eligible_node row must not cause a second deployment of
     // something that recovered by other means -- a redeploy, say.

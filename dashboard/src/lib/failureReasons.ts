@@ -92,7 +92,12 @@ const PATTERNS: Array<{ test: RegExp; help: ReasonHelp }> = [
 /** The explanation for a failure reason, or null when there is nothing to add. */
 export function helpFor(reason: string | null | undefined): ReasonHelp | null {
   if (!reason) return null
-  const code = reason.trim()
+  const text = reason.trim()
+  // A scheduler reason carries its detail after the code — "no_eligible_node:
+  // 1 insufficient ram". The glossary is keyed by the code alone, so look up
+  // the part before the colon, and only when what precedes it is code-shaped:
+  // a build log full of colons must not be truncated into a false match.
+  const code = /^[a-z0-9_]+:/.test(text) ? text.slice(0, text.indexOf(':')) : text
   if (CODES[code]) return CODES[code]!
-  return PATTERNS.find((p) => p.test.test(code))?.help ?? null
+  return PATTERNS.find((p) => p.test.test(text))?.help ?? null
 }

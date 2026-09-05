@@ -57,11 +57,14 @@ What you can ask for:
   containers {node}               — what that node's last heartbeat says it is actually running, with health
   logs {service}                  — the container's own output, as last reported
   placements {service}            — why the scheduler moved it, and when
+  history {service}               — what people and the system did to it: deployed, stopped, restarted, rolled back, with who and how long ago
   probe {service}                 — fetch its public address: status, size, first bytes
 
 How to work:
 
 Establish what is true before guessing what is wrong. For a named service, ask for its deployments first — a failure reason usually names the cause outright.
+
+Separate what is true now from what was true. Deployments and history come back newest first, and older entries describe a fleet that has since changed: a run of failures during an outage an hour ago does not explain a service that is down this minute. Before concluding that something is broken, check whether somebody simply stopped it — on a small fleet that is the most common reason of all, and it leaves no failure, no container and no error anywhere except the history.
 
 Look for disagreement. The control plane's view and the node's are both available, and most real failures live in the gap: a deployment marked running whose container the node never mentions, a container the node calls unhealthy while it serves traffic, a service reported running that answers 502.
 

@@ -1,7 +1,7 @@
 import { and, eq, inArray } from 'drizzle-orm'
 import { deployments, services, placementEvents, fleets } from '../db/schema.js'
 import { recordAudit } from '../lib/audit.js'
-import { place } from './placement.js'
+import { place, rejectionCounts } from './placement.js'
 import { allocateHostPort, invalidateRoutesForService } from '../ingress/routes.js'
 import { fleetSnapshot, toServiceSpec } from './snapshot.js'
 import type { AppContext } from '../api/context.js'
@@ -90,9 +90,18 @@ export async function rescheduleFromNode(
     const decision = place(spec, snapshot, placements, antiAffinityBy)
 
     if (decision.outcome !== 'placed') {
+      // Code first, detail after. The code is what `placeStranded` matches on
+      // and what the dashboard's glossary looks up, so it stays the leading
+      // token; the detail is the part a person actually needs, and storing
+      // only the code sent every reader back to the event stream to find out
+      // whether the node was full, offline, or the wrong architecture.
+      const why = rejectionCounts(decision.rejected)
       await ctx.db
         .update(deployments)
-        .set({ status: 'failed', failureReason: 'no_eligible_node' })
+        .set({
+          status: 'failed',
+          failureReason: why ? `no_eligible_node: ${why}` : 'no_eligible_node',
+        })
         .where(eq(deployments.id, deployment.id))
 
       outcomes.push({ service: service.name, action: 'stranded', reason: decision.summary })

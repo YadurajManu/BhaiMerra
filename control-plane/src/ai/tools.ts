@@ -1,5 +1,5 @@
-import { and, desc, eq, inArray } from 'drizzle-orm'
-import { deployments, nodes, placementEvents, services } from '../db/schema.js'
+import { and, desc, eq, inArray, sql } from 'drizzle-orm'
+import { auditLog, deployments, nodes, placementEvents, services } from '../db/schema.js'
 import type { AppContext } from '../api/context.js'
 
 /**
@@ -187,6 +187,48 @@ export const TOOLS = {
       lines: entry?.text.split(/\r?\n/).filter(Boolean).slice(-40) ?? [],
       note: entry ? null : 'the agent has not reported a log tail for this service',
     })
+  },
+
+  /**
+   * What people and the system did to this service, most recent first.
+   *
+   * The gap that made the first real diagnosis wrong. Asked why a service was
+   * not running, the loop read a list of deployments, found several that had
+   * failed with `no_eligible_node` during an outage an hour earlier, and
+   * concluded — with evidence, and in the present tense — that the scheduler
+   * had nowhere to put it. The actual answer was that somebody had stopped it
+   * from the dashboard thirty minutes before, which nothing it could see
+   * recorded.
+   *
+   * On a small fleet that is the single most common reason a service is down,
+   * and it is invisible in every other view: stopping a service leaves no
+   * failure, no placement event, and no container to ask.
+   */
+  async history(ctx: AppContext, fleetId: string, args: { service: string }): Promise<ToolResult> {
+    const svc = await findService(ctx, fleetId, args.service)
+    if (!svc) return fail(`no service named "${args.service}" in this fleet`)
+
+    const rows = await ctx.db
+      .select({
+        action: auditLog.action,
+        actorKind: auditLog.actorKind,
+        createdAt: auditLog.createdAt,
+      })
+      .from(auditLog)
+      .where(and(eq(auditLog.targetType, 'service'), eq(auditLog.targetId, sql`${svc.id}::text`)))
+      .orderBy(desc(auditLog.createdAt))
+      .limit(10)
+
+    return ok(
+      rows.map((r) => ({
+        action: r.action,
+        // Whether a person or the system did it is the whole point: "stopped
+        // by a user" is an answer and "rescheduled by the system" is a symptom.
+        by: r.actorKind,
+        at: r.createdAt.toISOString(),
+        secondsAgo: Math.round((Date.now() - r.createdAt.getTime()) / 1000),
+      }))
+    )
   },
 
   /** Why the scheduler moved something, and where it went. */

@@ -14,13 +14,14 @@ import assert from 'node:assert/strict'
 
 import { loadConfig } from '../src/config.js'
 import { createContext, closeContext, type AppContext } from '../src/api/context.js'
-import { deployments, fleets, nodes, orgs, services } from '../src/db/schema.js'
+import { auditLog, deployments, fleets, nodes, orgs, services } from '../src/db/schema.js'
 import { hashToken, newAgentToken } from '../src/lib/tokens.js'
 import { callTool } from '../src/ai/tools.js'
 
 let ctx: AppContext
 let fleetId: string
 let otherFleetId: string
+let orgId: string
 /** Hostnames are unique across the whole table, and this database is not reset
     between runs — a fixed one works exactly once and then fails for ever. */
 const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -29,6 +30,7 @@ before(async () => {
   ctx = createContext(loadConfig())
 
   const [org] = await ctx.db.insert(orgs).values({ name: `tools-org-${Date.now()}` }).returning()
+  orgId = org!.id
   const [fleet] = await ctx.db.insert(fleets).values({ orgId: org!.id, name: 'tools' }).returning()
   const [other] = await ctx.db.insert(fleets).values({ orgId: org!.id, name: 'other' }).returning()
   fleetId = fleet!.id
@@ -58,6 +60,21 @@ before(async () => {
       startedAt: new Date(Date.now() - 600_000), finishedAt: new Date(Date.now() - 590_000),
     },
     { serviceId: svc!.id, nodeId: node!.id, status: 'running', startedAt: new Date(Date.now() - 60_000) },
+  ])
+
+  // The shape that made the first real diagnosis wrong: a system action from
+  // the middle of an outage, and a person stopping the service afterwards.
+  await ctx.db.insert(auditLog).values([
+    {
+      orgId, actorKind: 'system', action: 'service.rescheduled',
+      targetType: 'service', targetId: svc!.id,
+      createdAt: new Date(Date.now() - 3_600_000),
+    },
+    {
+      orgId, actorKind: 'user', action: 'service.stopped',
+      targetType: 'service', targetId: svc!.id,
+      createdAt: new Date(Date.now() - 120_000),
+    },
   ])
 
   // A service in another fleet, to prove scoping.
@@ -96,6 +113,26 @@ describe('the tools a diagnosis can call', () => {
     const rows = out.data as Array<{ node: string; status: string; agentVersion: string }>
     assert.equal(rows[0]!.node, 'box-1')
     assert.equal(rows[0]!.agentVersion, '0.2.2')
+  })
+
+  test('history shows that a person stopped it, which nothing else records', async () => {
+    // The first real diagnosis read a run of no_eligible_node failures from an
+    // outage an hour earlier and concluded, in the present tense and with
+    // citations, that the scheduler had nowhere to put the service. Somebody
+    // had stopped it from the dashboard thirty minutes before. That leaves no
+    // failure, no placement event and no container -- only this.
+    const out = await callTool(ctx, fleetId, 'history', { service: 'api' })
+    assert.ok(out.ok)
+    const rows = out.data as Array<{ action: string; by: string; secondsAgo: number }>
+    assert.equal(rows[0]!.action, 'service.stopped', 'newest first, or the answer is buried')
+    assert.equal(rows[0]!.by, 'user', 'a person stopping it is an answer; the system moving it is a symptom')
+    assert.ok(rows[0]!.secondsAgo < rows[1]!.secondsAgo, 'elapsed time is what separates now from then')
+  })
+
+  test('history is scoped to the fleet like every other tool', async () => {
+    const out = await callTool(ctx, fleetId, 'history', { service: 'secret-api' })
+    assert.equal(out.ok, false)
+    if (!out.ok) assert.match(out.error, /no service named/)
   })
 
   test('a tool cannot read another fleet', async () => {

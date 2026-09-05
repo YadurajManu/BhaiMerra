@@ -236,16 +236,25 @@ export function place(
 }
 
 /** One line the CLI can print verbatim on exit code 3. */
-function summarise(service: ServiceSpec, nodes: NodeSnapshot[], rejected: Rejection[]): string {
-  if (!nodes.length) return `No nodes in this fleet to place "${service.name}" on.`
-
+/**
+ * Why the nodes were refused, counted.
+ *
+ * The part that differs between two `no_eligible_node` failures, and the only
+ * part worth storing on a deployment row: "1 insufficient ram" and "1 offline"
+ * are the same outcome and completely different problems, and the code alone
+ * cannot tell an operator which one they have.
+ */
+export function rejectionCounts(rejected: Rejection[]): string {
   const counts = new Map<string, number>()
   for (const r of rejected) counts.set(r.code, (counts.get(r.code) ?? 0) + 1)
 
-  const reasons = [...counts.entries()]
+  return [...counts.entries()]
     .sort((a, b) => b[1] - a[1])
     .map(([code, n]) => `${n} ${code.replace(/_/g, ' ')}`)
     .join(', ')
+}
 
-  return `No eligible node for "${service.name}" among ${nodes.length}: ${reasons}.`
+function summarise(service: ServiceSpec, nodes: NodeSnapshot[], rejected: Rejection[]): string {
+  if (!nodes.length) return `No nodes in this fleet to place "${service.name}" on.`
+  return `No eligible node for "${service.name}" among ${nodes.length}: ${rejectionCounts(rejected)}.`
 }

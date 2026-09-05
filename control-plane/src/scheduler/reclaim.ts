@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, notInArray } from 'drizzle-orm'
+import { and, desc, eq, inArray, like, notInArray } from 'drizzle-orm'
 import { deployments, services, nodes, fleets, placementEvents } from '../db/schema.js'
 import { recordAudit } from '../lib/audit.js'
 import { place } from './placement.js'
@@ -189,7 +189,10 @@ async function placeStranded(
       and(
         eq(services.fleetId, fleetId),
         eq(deployments.status, 'failed'),
-        eq(deployments.failureReason, 'no_eligible_node')
+        // A prefix, because the reason now carries why the nodes were
+        // refused after the code. Rows written before that change are the
+        // bare code and still match.
+        like(deployments.failureReason, 'no_eligible_node%')
       )
     )
     .orderBy(desc(deployments.startedAt))
