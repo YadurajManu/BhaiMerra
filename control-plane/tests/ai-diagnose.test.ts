@@ -171,4 +171,46 @@ describe('the diagnosis loop', () => {
     const out = await diagnose(bare, { fleetId, question: 'why?' })
     assert.equal(out.status, 'disabled')
   })
+
+  test('a reply that is one object followed by prose is still read', async () => {
+    // "Unexpected non-whitespace character after JSON at position 70" ended a
+    // real investigation one step in. Everything between the first brace and
+    // the last is not the first object: a trailing sentence, or a second
+    // object, slices into something that parses as neither.
+    const provider = scripted([
+      '{"lookup":{"name":"services","args":{}}}\n\nI will check the services first.',
+      '{"answer":{"summary":"nothing is running","findings":[],"next":[]}}',
+    ])
+    const out = await diagnose(ctx, { fleetId, question: 'what is wrong?' }, provider.impl)
+
+    assert.equal(out.status, 'ok')
+    if (out.status !== 'ok') return
+    assert.deepEqual(out.calls.map((c) => c.tool), ['services'], 'the object before the prose is the step')
+  })
+
+  test('an unreadable reply costs a turn, not the whole investigation', async () => {
+    // Four good tool calls thrown away over one formatting slip is the wrong
+    // trade. It gets told what was wrong and answers again -- once.
+    const provider = scripted([
+      '{"lookup":{"name":"services","args":{}}}',
+      'I think the problem is the database.',
+      '{"answer":{"summary":"the database is down","findings":[],"next":[]}}',
+    ])
+    const out = await diagnose(ctx, { fleetId, question: 'what is wrong?' }, provider.impl)
+
+    assert.equal(out.status, 'ok', 'a slip in the middle should not end it')
+    if (out.status !== 'ok') return
+    assert.equal(out.calls.length, 1, 'the call made before the slip is kept')
+    assert.match(provider.prompts()[2]!, /could not be read/, 'and it is told what was wrong')
+  })
+
+  test('two unreadable replies in a row stop, rather than retrying for ever', async () => {
+    // A model that cannot hold the protocol will not find it on the third ask,
+    // and an agent looping on a fleet's data is a bill, not an investigation.
+    const provider = scripted(['no JSON here at all'])
+    const out = await diagnose(ctx, { fleetId, question: 'what is wrong?' }, provider.impl)
+
+    assert.equal(out.status, 'inconclusive')
+    assert.equal(provider.turns(), 2, 'one retry, then stop')
+  })
 })

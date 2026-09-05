@@ -76,6 +76,49 @@ Answer as soon as you can support an answer. If the evidence does not settle it,
 
 Write nothing outside the JSON.`
 
+/**
+ * The first complete JSON object in a reply, by matching braces.
+ *
+ * Taking everything between the first `{` and the last `}` looks equivalent
+ * and is not: a reply that is one object followed by a sentence, or by a
+ * second object, slices into something that parses as neither. That ended a
+ * real investigation one step in — "Unexpected non-whitespace character after
+ * JSON at position 70" — with the usable object sitting in the first seventy
+ * characters.
+ *
+ * Braces inside strings do not count, and neither does an escaped quote, or
+ * a path in a log line closes the object early.
+ */
+function firstObject(raw: string): string | null {
+  const start = raw.indexOf('{')
+  if (start < 0) return null
+
+  let depth = 0
+  let inString = false
+  let escaped = false
+
+  for (let i = start; i < raw.length; i++) {
+    const ch = raw[i]!
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (ch === '\\' && inString) {
+      escaped = true
+      continue
+    }
+    if (ch === '"') {
+      inString = !inString
+      continue
+    }
+    if (inString) continue
+    if (ch === '{') depth++
+    else if (ch === '}' && --depth === 0) return raw.slice(start, i + 1)
+  }
+
+  return null
+}
+
 /** Pull one step out of a reply that may be fenced or padded with prose. */
 function parseStep(content: string): {
   call?: { tool: string; args: Record<string, unknown> }
@@ -83,11 +126,10 @@ function parseStep(content: string): {
 } {
   const fenced = content.match(/```(?:json)?\s*([\s\S]*?)```/)
   const raw = (fenced?.[1] ?? content).trim()
-  const start = raw.indexOf('{')
-  const end = raw.lastIndexOf('}')
-  if (start < 0 || end <= start) throw new Error('the model did not return JSON')
+  const object = firstObject(raw)
+  if (!object) throw new Error('the model did not return JSON')
 
-  const parsed = JSON.parse(raw.slice(start, end + 1)) as {
+  const parsed = JSON.parse(object) as {
     lookup?: { name?: unknown; args?: unknown }
     call?: { tool?: unknown; args?: unknown }
     answer?: { summary?: unknown; findings?: unknown; next?: unknown }
@@ -151,6 +193,8 @@ export async function diagnose(
     { role: 'user', content: opts.question },
   ]
   const calls: Array<{ tool: string; args: Record<string, unknown> }> = []
+  /** Whether the last reply was already a re-ask, so one slip costs a turn and not the investigation. */
+  let retried = false
 
   for (let step = 0; step < MAX_CALLS; step++) {
     let content: string
@@ -172,12 +216,30 @@ export async function diagnose(
     try {
       step_ = parseStep(content)
     } catch (err) {
-      return {
-        status: 'inconclusive',
-        reason: err instanceof Error ? err.message : 'the reply could not be read',
-        calls,
+      // An unreadable reply is a formatting slip, not a dead end, and
+      // discarding four good tool calls over one is the wrong trade. Say what
+      // was wrong and let it answer again — once. A second failure in a row is
+      // a model that cannot hold the protocol, and retrying that forever is
+      // just a bill.
+      if (retried) {
+        return {
+          status: 'inconclusive',
+          reason: err instanceof Error ? err.message : 'the reply could not be read',
+          calls,
+        }
       }
+      retried = true
+      step--
+      messages.push({ role: 'assistant', content })
+      messages.push({
+        role: 'user',
+        content:
+          `That reply could not be read: ${err instanceof Error ? err.message : 'invalid JSON'}. ` +
+          `Reply with one JSON object and nothing else — no prose before or after it.`,
+      })
+      continue
     }
+    retried = false
 
     if (step_.answer) {
       return {
